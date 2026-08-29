@@ -52,9 +52,9 @@ Most terminal tools optimize for command execution or remote administration. iTe
 
 ## Current status
 
-**M0 and the single-process M1 Runtime/CLI gates passed at L2. Durable storage and MCP are next.**
+**M0–M2 gates passed at L2: shared Shell, single-process Action Runtime, and PostgreSQL transaction boundary.**
 
-Real local bash and zsh PTY scenarios now prove command boundaries, shared `cwd`/environment, fail-fast Busy, structured Input/Control, stale-target rejection, marker-spoof isolation, large output, and Ctrl+C recovery. The current Runtime is single-process and in-memory; no MCP server, database, or web console is complete yet.
+Real local bash and zsh PTY scenarios prove command boundaries, shared state, fail-fast Busy, structured Input/Control, stale-target rejection, marker-spoof isolation, large output, and Ctrl+C recovery. PostgreSQL 17 proves the durable reservation/idempotency/outbox/recovery transaction independently. The live Runtime is still single-process and in-memory; the async database ingest loop, MCP server, and web console are not complete yet.
 
 See:
 
@@ -64,6 +64,7 @@ See:
 - [M0 spike](./spikes/shell-integration/README.md) — the highest-risk hypothesis and its evidence.
 - [M0 verification](./docs/verification/M0/2026-08-30-shell-integration.md) — environment, scenarios, limits, and L2 boundary.
 - [M1 verification](./docs/verification/M1/2026-08-30-runtime-cli.md) — Runtime/CLI scenarios and remaining durability boundary.
+- [M2 verification](./docs/verification/M2/2026-08-30-postgres-persistence.md) — real PostgreSQL concurrency, rollback, and recovery evidence.
 
 ## Planned shape
 

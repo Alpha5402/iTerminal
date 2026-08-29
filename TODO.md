@@ -348,7 +348,7 @@ expected_screen_version（需要 fresh screen 时）
 
 ### 6.3 Control protocol 方案门
 
-M0 必须对两种方案做 spike 并形成 ADR：
+M0 必须对两种方案做 spike 并形成 ADR：f
 
 1. **独立 control FD/channel（优先）**：Shell hooks 向 Runtime 专用 channel 写 framed messages；PTY 只承载用户可见 bytes。控制 FD 应 close-on-exec，避免普通 child process 继承；Shell builtin hook 仍可写入。
 2. **Authenticated OSC/DCS fallback**：marker 带不可预测 session nonce、length framing、严格 parser；从 Human rendering stream 中剥离。
@@ -784,21 +784,21 @@ Exit Gate：L2 核心链路通过；仍不声明 durability、MCP 或 Web 已完
 
 ### M2 — PostgreSQL Domain Persistence 与 Reservation（目标：L2）
 
-- [ ] migrations：Session/Generation/Actor/Action/Execution/Event/Snapshot/Checkpoint/Outbox。
-- [ ] Action idempotency + request hash conflict。
-- [ ] Session READY -> RESERVED CAS 事务。
-- [ ] accepted Action/Execution/Event/Outbox 同事务。
-- [ ] Event sequence 分配与 chunk persistence。
-- [ ] Runtime restart 将失联 live generation 标记 BROKEN；模糊 Execution 标 UNKNOWN。
-- [ ] Snapshot/checkpoint best-effort 更新，不覆盖历史事实。
-- [ ] retention/quota 最小实现。
+- [x] migrations：Session/Generation/Actor/Action/Execution/Event/Snapshot/Checkpoint/Outbox。
+- [x] Action idempotency + request hash conflict。
+- [x] Session READY -> RESERVED CAS 事务。
+- [x] accepted Action/Execution/Event/Outbox 同事务。
+- [x] Event sequence 分配与 chunk persistence。
+- [x] Runtime restart 将失联 live generation 标记 BROKEN；模糊 Execution 标 UNKNOWN。
+- [x] Snapshot/checkpoint best-effort 更新，不覆盖历史事实。
+- [x] retention/quota 最小实现。
 
 验收：
 
-- [ ] 100 个并发 Execute 只有一个 Reservation 成功，其余 PTY_BUSY。
-- [ ] 相同 idempotency key/hash 返回原 Action，不同 hash 冲突。
-- [ ] DB commit 前失败不留下半个 Action；commit 后 crash 可发现 RESERVED/UNKNOWN。
-- [ ] Runtime 重启不伪造旧 PTY 恢复。
+- [x] 100 个并发 Execute 只有一个 Reservation 成功，其余 PTY_BUSY。
+- [x] 相同 idempotency key/hash 返回原 Action，不同 hash 冲突。
+- [x] DB commit 前失败不留下半个 Action；commit 后 crash 可发现 RESERVED/UNKNOWN。
+- [x] Runtime 重启不伪造旧 PTY 恢复。
 
 ### M3 — Bounded Event Observation（目标：L2）
 
