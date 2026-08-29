@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import type { RuntimeStore } from "@iterminal/application";
 import type { Execution, Session, SessionAction, SessionEvent } from "@iterminal/domain";
 import { RuntimeError } from "@iterminal/domain";
@@ -66,6 +64,17 @@ export class MemoryRuntimeStore implements RuntimeStore {
     return session;
   }
 
+  public cancelReservation(sessionId: string, generation: number, executionId: string): Session {
+    const session = this.#generation(sessionId, generation);
+    this.#active(session, executionId);
+    if (session.status !== "RESERVED") {
+      throw stateError(session, "RESERVED");
+    }
+    delete session.activeExecutionId;
+    session.status = "READY";
+    return session;
+  }
+
   public markSessionRunning(sessionId: string, generation: number, executionId: string): Session {
     const session = this.#generation(sessionId, generation);
     this.#active(session, executionId);
@@ -115,6 +124,22 @@ export class MemoryRuntimeStore implements RuntimeStore {
     return session.actionSequence;
   }
 
+  public rollbackActionSequence(
+    sessionId: string,
+    generation: number,
+    actionSequence: number,
+  ): void {
+    const session = this.#generation(sessionId, generation);
+    if (session.actionSequence !== actionSequence) {
+      throw new RuntimeError("INVALID_REQUEST", "Cannot roll back a non-current action sequence", {
+        actionSequence,
+        currentActionSequence: session.actionSequence,
+        sessionId,
+      });
+    }
+    session.actionSequence -= 1;
+  }
+
   public saveAction(action: SessionAction): void {
     this.#actions.set(action.id, action);
   }
@@ -143,13 +168,12 @@ export class MemoryRuntimeStore implements RuntimeStore {
   public appendEvent(
     sessionId: string,
     generation: number,
-    event: Omit<SessionEvent, "id" | "sequence">,
+    event: Omit<SessionEvent, "sequence">,
   ): SessionEvent {
     const session = this.#generation(sessionId, generation);
     session.eventSequence += 1;
     const stored: SessionEvent = {
       ...event,
-      id: `evt_${randomUUID()}`,
       sequence: session.eventSequence,
     };
     const events = this.#events.get(eventScope(sessionId, generation));

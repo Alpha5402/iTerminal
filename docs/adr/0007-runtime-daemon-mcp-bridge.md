@@ -32,4 +32,4 @@ MCP Client <-> stdio MCP bridge <-> 0600 Unix socket <-> Runtime daemon -> Appli
 - The daemon is now the live failure boundary. If it dies, its in-memory M4 Sessions are lost; PostgreSQL recovery still marks that truth BROKEN/UNKNOWN and is not yet wired into this daemon.
 - Unix file permissions provide local process isolation, not user authentication, capability policy, or a sandbox.
 - M4 RPC uses one connection per request for a simple uncertainty boundary. Connection pooling and backpressure remain later work.
-- The M4 daemon still uses `MemoryRuntimeStore`; its Event retention is not the M3 PostgreSQL observation implementation.
+- The base M4 daemon uses `MemoryRuntimeStore`. ADR-0008 adds an optional PostgreSQL durable journal and bounded Event ingest loop without pretending that database rows own the PTY.

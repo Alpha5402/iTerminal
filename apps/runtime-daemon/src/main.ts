@@ -1,8 +1,16 @@
 import { defaultRuntimeSocketPath, startRuntimeDaemon } from "./server.js";
 
 const socketPath = process.env.ITERM_RUNTIME_SOCKET ?? defaultRuntimeSocketPath();
-const daemon = await startRuntimeDaemon({ socketPath });
-process.stderr.write(`iTerminal Runtime daemon listening at ${daemon.socketPath}\n`);
+const databaseUrl = process.env.ITERM_DATABASE_URL;
+const ownerId = process.env.ITERM_RUNTIME_OWNER_ID;
+const daemon = await startRuntimeDaemon({
+  socketPath,
+  ...(databaseUrl === undefined ? {} : { databaseUrl }),
+  ...(ownerId === undefined ? {} : { ownerId }),
+});
+process.stderr.write(
+  `iTerminal Runtime daemon listening at ${daemon.socketPath} (${daemon.durable ? "postgres" : "memory"})\n`,
+);
 
 let closing = false;
 const shutdown = async (signal: string): Promise<void> => {

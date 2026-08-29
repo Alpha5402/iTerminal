@@ -1,10 +1,10 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
-> 状态：Implementation Baseline v4 — M0–M4 已通过 L2，M4 L3 待真实模型调用
+> 状态：Implementation Baseline v4.1 — M0–M4.1 已通过 L2，M4 L3 待真实模型调用
 >
 > 基线日期：2026-08-30
 >
-> 当前仓库状态：M0–M4 已实现并保存 L2 证据；M4 的模型驱动 Agent 验收、M5 Human Console 及其后的 L3/L4 路径仍未完成。
+> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live MCP daemon 已接入 PostgreSQL write-ahead journal 与 bounded ingest loop。M4 的模型驱动 Agent 验收、M5 Human Console 及其后的 L3/L4 路径仍未完成。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -468,30 +468,30 @@ PTY bytes -> ANSI/VT parser -> versioned screen buffer -> full/diff/region/searc
 
 ### 9.1 核心表
 
-- [ ] `sessions`：status、current generation、workspace root、shell profile、active execution、next action sequence。
-- [ ] `session_generations`：owner、PTY/Shell metadata、integration version、started/broken/closed reason。
+- [x] `sessions`：status、current generation、workspace root、shell profile、active execution、next action sequence。
+- [x] `session_generations`：owner、PTY/Shell metadata、integration version、started/broken/closed reason。
 - [ ] `actors` / `session_actors`：identity、type、capability、display metadata。
-- [ ] `actions`：kind、immutable payload、actor、sequence、idempotency key、request hash、status、lineage。
-- [ ] `executions`：execute action、generation、owner/fencing、write/start/end state、exit/outcome/unknown reason。
-- [ ] `session_events`：generation、event sequence、action/execution/actor、type、payload/ref、created time。
-- [ ] `session_snapshots`：cwd、foreground observation、last exit、screen version、confidence、observed time。
-- [ ] `shell_checkpoints`：filtered reconstructable context、source generation、staleness/hash。
+- [ ] `actions`：kind、immutable payload、actor、sequence、idempotency key、request hash、status 已完成；lineage 待 M7。
+- [ ] `executions`：execute action、generation、owner、write/start/end state、exit/outcome/unknown reason 已完成；fencing 待 M9。
+- [x] `session_events`：generation、event sequence、action/execution/actor、type、payload/ref、created time。
+- [x] `session_snapshots`：cwd、foreground observation、last exit、screen version、confidence、observed time。
+- [ ] `shell_checkpoints`：基础表与 newest-observation 更新已完成；filtered context/staleness 生成待 M7。
 - [ ] `screen_snapshots`：geometry/cursor/content or artifact ref、screen version。
 - [ ] `interaction_guards`：mode、actor、TTL、reason、version。
 - [ ] `approvals`：exact action hash、actor/approver、expiry、one-time use。
-- [ ] `outbox`：待发布 ExecutionReady/Event。
-- [ ] `artifacts`：大输出、录制、导出文件 metadata/hash/size/retention。
+- [ ] `outbox`：`ExecutionReady` 已写入；Event publisher/mark/retry 待 M8。
+- [ ] `artifacts`：大输出 metadata/hash/size/retention 已完成；录制/导出待 M10。
 - [ ] `worker_registry` / `session_leases`：M9 才引入。
 
 ### 9.2 关键约束
 
-- [ ] `UNIQUE(session_id, action_sequence)`。
-- [ ] `UNIQUE(session_id, actor_id, idempotency_key)`。
-- [ ] `UNIQUE(session_id, generation)`。
-- [ ] `UNIQUE(session_id, generation, event_sequence)`。
-- [ ] 同 idempotency key 不同 request hash 返回 `IDEMPOTENCY_KEY_REUSED`。
+- [x] `UNIQUE(session_id, action_sequence)`。
+- [x] `UNIQUE(session_id, actor_id, idempotency_key)`。
+- [x] `UNIQUE(session_id, generation)`。
+- [x] `UNIQUE(session_id, generation, event_sequence)`。
+- [x] 同 idempotency key 不同 request hash 返回 `IDEMPOTENCY_KEY_REUSED`。
 - [ ] `sessions.status = RUNNING` 时 active execution 必须属于 current generation。
-- [ ] Session CAS Reservation、Action、Execution、accepted event、Outbox 同事务创建。
+- [x] Session CAS Reservation、Action、Execution、accepted event、Outbox 同事务创建。
 - [ ] 所有 Execution 状态更新使用 expected version；多 Worker 阶段额外校验 fencing token。
 
 ### 9.3 Reservation 事务
@@ -581,10 +581,10 @@ Observation：
 
 - [ ] 所有 write tool 接受 idempotency key；Input/Control 接受 generation + target execution。
 - [ ] Agent fresh-screen 策略开启时，Input 要求 expected screen version。
-- [ ] Tool description 清楚解释 Execute/Input/Control 的选择边界。
-- [ ] `PTY_BUSY` 返回当前 execution 与 allowed next actions，不只返回字符串。
-- [ ] MCP stdio stdout 只能有合法 JSON-RPC，诊断写 stderr。
-- [ ] MCP adapter 不复制 Application 逻辑；新 MCP Tasks 能力只做 adapter，不替换 Action/Execution 模型。
+- [x] Tool description 清楚解释 Execute/Input/Control 的选择边界。
+- [x] `PTY_BUSY` 返回当前 execution 与 allowed next actions，不只返回字符串。
+- [x] MCP stdio stdout 只能有合法 JSON-RPC，诊断写 stderr。
+- [x] MCP adapter 不复制 Application 逻辑；新 MCP Tasks 能力只做 adapter，不替换 Action/Execution 模型。
 
 ### 11.2 HTTP / WebSocket
 
@@ -665,13 +665,13 @@ MVP 假设单机受信用户；Agent 可能犯错或受提示注入影响，但 
 - [ ] 校验 Origin/Host/WebSocket upgrade；短期 token 不放 URL query。
 - [ ] workspace root 与 fork cwd 使用 realpath/containment 校验。
 - [ ] 明确声明：workspace containment 不阻止 Shell command 访问 root 外路径。
-- [ ] 不继承完整宿主 env；Runtime env、Shell env、checkpoint env 分开定义。
+- [x] 不继承完整宿主 env；Runtime env、Shell env、checkpoint env 分开定义。
 - [ ] Secret 不进入 Action payload、Event、Snapshot、Checkpoint、MCP result、普通 log/recording。
 - [ ] Human-only secret channel 直接写 PTY，只记录完成/取消 metadata；敏感期间暂停/脱敏 screen/event recording。
 - [ ] Approval 绑定 immutable Action request hash + session generation + actor + expiry；任何变化使批准失效。
 - [ ] PTY/Shell 独立 process group/session；close/timeout 使用可配置 Control -> SIGTERM -> SIGKILL，并验证子进程回收。
 - [ ] 限制 Session、event bytes、artifact bytes、单次返回、WS backlog、screen geometry、Action rate。
-- [ ] Shell marker parser 抵抗注入、oversize frame、partial frame 与 nonce replay。
+- [x] Shell marker parser 抵抗注入、oversize frame、partial frame 与 nonce replay。
 - [ ] CI 做 secret scan、dependency audit、SBOM 与 release provenance。
 
 ### 13.3 Remote/硬隔离后续边界
@@ -819,9 +819,13 @@ Exit Gate：已在 PostgreSQL 17 通过。Agent 测试程序只靠 metadata/quer
 - [x] idempotency、generation、target execution precondition 透传。
 - [x] OpenCode 1.18.25 与 Claude Code 2.1.251 完成本地 stdio handshake。
 - [x] MCP Client 重启后凭 Action/Execution/Event cursor 恢复观察。
+- [x] `ITERM_DATABASE_URL` durable daemon：Session/Execute/Input/Control/Execution 状态接入 PostgreSQL。
+- [x] PTY output 经每 Session 有界有序 ingest loop 进入 Event/Artifact，失败熔断 live generation。
+- [x] 真实 MCP + PostgreSQL 证明 write-ahead Action、attribution 与 durable cursor 重连。
+- [x] daemon `SIGKILL` 后同 owner 重启将旧 generation/Execution 标为 `BROKEN/UNKNOWN`，不伪恢复 PTY。
 - [ ] 真实模型驱动 Agent 自主完成完整工具路径（需要显式外发授权）。
 
-Exit Gate：L2 协议/Runtime 路径已完成；官方 SDK Client 已完成 create -> shared state -> execute -> busy/wait/input/control -> observe，OpenCode/Claude Code handshake 通过。尚未由真实模型自主完成该路径，因此不声明 L3，不开始依赖 L3 的 M5。
+Exit Gate：L2 协议/Runtime/持久化路径已完成；官方 SDK Client 已完成 create -> shared state -> execute -> busy/wait/input/control -> durable observe/reconnect，真实进程崩溃恢复通过，OpenCode/Claude Code handshake 通过。尚未由真实模型自主完成该路径，因此不声明 L3，不开始依赖 L3 的 M5。
 
 ### M5 — Human Console（目标：L3 shared path）
 
@@ -1002,16 +1006,18 @@ Exit Gate：3+ Worker chaos 下每个 generation 最多一个有效 PTY owner；
 - [ ] 项目/包名暂用 `iTerminal`，发布前查 npm/GitHub/商标冲突。
 - [ ] License 建议 Apache-2.0，由项目所有者确认。
 - [ ] 首发 macOS arm64/x64 + Linux x64/arm64；Windows 延后。
-- [ ] bash/zsh 为首发 Shell；默认 Runtime-managed profile，可选 source user rc。
-- [ ] Shell Integration 优先独立 control FD；OSC/DCS 只作带 nonce fallback。
-- [ ] Persistent Shell ExecuteAction 接受 Shell command string；不与 direct argv API 混为一谈。
-- [ ] Session 忙时 fail-fast，不建 Execute Queue；并行用 fork Session。
+- [x] bash/zsh 为首发 Shell；默认 Runtime-managed profile。
+- [ ] 可选 source user rc 及 hook 重装/校验仍待兼容验证。
+- [x] Shell Integration 使用独立 control FD，不信任 PTY 文本 marker 作为状态事实源。
+- [x] Persistent Shell ExecuteAction 接受 Shell command string；不与 direct argv API 混为一谈。
+- [x] Session 忙时 fail-fast，不建 Execute Queue；并行用 fork Session。
 - [ ] Human READY 使用 composer，RUNNING 使用 interactive input。
 - [ ] 默认 input policy 为 `human_guarded`；Human emergency control 可按权限绕过。
 - [ ] Checkpoint 只保存 cwd + shell + filtered exported env + workspace。
-- [ ] PostgreSQL 为 durable truth；raw output 达阈值转 artifact。
-- [ ] MCP M4 先 stdio；对外 HTTP 后续实现 Origin/Auth。
-- [ ] 开发 retention 默认 7 天或固定磁盘上限，以先到者为准。
+- [x] PostgreSQL 为 durable truth；raw output 达阈值转 artifact。
+- [x] MCP M4 先 stdio；对外 HTTP 后续实现 Origin/Auth。
+- [x] 开发 retention 默认 7 天或固定事件上限，以先到者为准。
+- [ ] artifact/recording 全局磁盘预算与清理告警待 M10。
 - [ ] Multi Worker 先 owner routing，后 Lease/Fencing；owner loss 不迁移旧 PTY。
 
 ---
@@ -1045,4 +1051,4 @@ v1.0 还必须满足 M7–M10、fork 语义、故障矩阵、owner routing、mul
 7. `feat(persistence): persist actions executions and events`：PostgreSQL、CAS、idempotency、unknown recovery。
 8. `feat(observation): add bounded event queries`：完成 M3 后再开始 MCP adapter。
 
-当前只完成规划更新；是否开始第 1 个 PR，等待项目所有者明确授权。
+当前已完成建议切片 1–8，并追加 M4.1 live durable journal 接线；后续仍严格按里程碑 Exit Gate 与 `docs/verification/` 证据推进。

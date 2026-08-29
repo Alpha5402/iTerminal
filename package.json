@@ -22,6 +22,7 @@
     "test:m2": "vitest run packages/persistence-postgres/src/postgres-runtime-repository.test.ts",
     "test:m3": "vitest run packages/persistence-postgres/src/postgres-observation-repository.test.ts",
     "test:m4": "vitest run apps/mcp/src/mcp-stdio.test.ts",
+    "test:m4:durable": "vitest run apps/runtime-daemon/src/durable-runtime.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm verify:docs && pnpm build",
     "verify:docs": "node scripts/check-verification.mjs"

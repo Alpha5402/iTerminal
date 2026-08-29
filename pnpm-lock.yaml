@@ -105,12 +105,25 @@ importers:
       '@iterminal/executor-pty':
         specifier: workspace:*
         version: link:../../packages/executor-pty
+      '@iterminal/persistence-postgres':
+        specifier: workspace:*
+        version: link:../../packages/persistence-postgres
       '@iterminal/runtime-memory':
         specifier: workspace:*
         version: link:../../packages/runtime-memory
       '@iterminal/runtime-rpc':
         specifier: workspace:*
         version: link:../../packages/runtime-rpc
+    devDependencies:
+      '@modelcontextprotocol/client':
+        specifier: 2.0.0
+        version: 2.0.0
+      '@types/pg':
+        specifier: ^8.15.5
+        version: 8.23.1
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
 
   packages/application:
     dependencies:
@@ -134,6 +147,9 @@ importers:
 
   packages/persistence-postgres:
     dependencies:
+      '@iterminal/application':
+        specifier: workspace:*
+        version: link:../application
       '@iterminal/domain':
         specifier: workspace:*
         version: link:../domain

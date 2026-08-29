@@ -2,6 +2,13 @@
 
 iTerminal uses the official Model Context Protocol TypeScript SDK v2 and `serveStdio`. The bridge logs only to stderr because stdout is the MCP framing channel. A separate Runtime daemon owns all live state; set `ITERM_RUNTIME_SOCKET` to its absolute Unix socket path before starting the bridge.
 
+The daemon has two explicit storage modes:
+
+- Without `ITERM_DATABASE_URL`, it is a development-only in-memory live Runtime.
+- With `ITERM_DATABASE_URL`, Execute/Input/Control admission and lifecycle facts are committed to PostgreSQL, PTY output enters a bounded per-Session ingest loop, and `events_query` reads the durable Event stream.
+
+In both modes the PTY remains process-local live truth. Restart recovery marks the previous stable owner generation `BROKEN` and ambiguous work `UNKNOWN`; it never rebuilds a fake live Session from rows.
+
 ## Actor configuration
 
 One bridge process represents one Agent Actor:
@@ -45,14 +52,15 @@ Every successful tool result contains a JSON text block and `structuredContent: 
 }
 ```
 
-`execute`, `input`, and `control` require caller-generated idempotency keys. A transport disconnect after a mutating RPC returns `DELIVERY_UNKNOWN`; inspect state using the same idempotency key or Events before any deliberate retry.
+`execute`, `input`, and `control` require caller-generated idempotency keys. The namespace is one Session + Actor across all three Action kinds, so reusing a key for another kind or payload returns `IDEMPOTENCY_KEY_REUSED`. A transport disconnect after a mutating RPC returns `DELIVERY_UNKNOWN`; inspect state using the same idempotency key or Events before any deliberate retry.
 
 ## Run locally
 
 Use two terminals:
 
 ```bash
-ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm daemon
+ITERM_DATABASE_URL=postgresql://iterminal@127.0.0.1:5432/iterminal \
+  ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm daemon
 ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm mcp
 ```
 

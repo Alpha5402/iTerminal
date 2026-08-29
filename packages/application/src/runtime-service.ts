@@ -15,15 +15,24 @@ import type {
 } from "@iterminal/domain";
 import { RuntimeError } from "@iterminal/domain";
 
-import type { RuntimeStore, ShellExecutor, ShellExecutorFactory } from "./ports.js";
+import type {
+  DurableSessionEvent,
+  RuntimeDurability,
+  RuntimeServiceOptions,
+  RuntimeStore,
+  ShellExecutor,
+  ShellExecutorFactory,
+} from "./ports.js";
 
 const DEFAULT_EVENT_LIMIT = 100;
 const MAX_EVENT_LIMIT = 500;
+const MAX_PENDING_DURABLE_EVENTS = 10_000;
+const MAX_PENDING_DURABLE_BYTES = 8 * 1024 * 1024;
+const DURABLE_FLUSH_TIMEOUT_MS = 30_000;
 
 export interface CreateSessionRequest {
   readonly shell: ShellKind;
   readonly workspaceRoot: string;
-  readonly ownerId?: string;
 }
 
 export interface ExecuteRequest {
@@ -60,16 +69,38 @@ export interface StartedExecution {
   readonly completion: Promise<Execution>;
 }
 
+interface EventOptions {
+  readonly action?: SessionAction;
+  readonly execution?: Execution;
+  readonly persist?: boolean;
+}
+
+interface DurableQueueState {
+  failure?: RuntimeError;
+  pendingBytes: number;
+  pendingEvents: number;
+  tail: Promise<void>;
+}
+
 export class RuntimeService {
   readonly #executors = new Map<string, ShellExecutor>();
   readonly #completions = new Map<string, Promise<Execution>>();
   readonly #started = new Map<string, Promise<void>>();
+  readonly #durableQueues = new Map<string, DurableQueueState>();
+  readonly #mutationTails = new Map<string, Promise<void>>();
+  readonly #durability: RuntimeDurability | undefined;
+  readonly #now: () => Date;
+  readonly #ownerId: string;
 
   public constructor(
     private readonly store: RuntimeStore,
     private readonly executorFactory: ShellExecutorFactory,
-    private readonly now: () => Date = () => new Date(),
-  ) {}
+    options: RuntimeServiceOptions = {},
+  ) {
+    this.#durability = options.durability;
+    this.#now = options.now ?? (() => new Date());
+    this.#ownerId = options.ownerId ?? `owner_${process.pid.toString()}`;
+  }
 
   public async createSession(request: CreateSessionRequest): Promise<Session> {
     const sessionId = `ses_${randomUUID()}`;
@@ -81,15 +112,31 @@ export class RuntimeService {
       eventSequence: 0,
       generation,
       id: sessionId,
-      ownerId: request.ownerId ?? `owner_${process.pid.toString()}`,
+      ownerId: this.#ownerId,
       screenVersion: 0,
       shell: request.shell,
       status: "STARTING",
       workspaceRoot: request.workspaceRoot,
     };
     this.store.createSession(session);
-    this.#event(session, "session.created", { shell: request.shell });
-    this.#event(session, "session.shell_starting", {});
+    const createdEvent = this.#event(
+      session,
+      "session.created",
+      { shell: request.shell },
+      {
+        persist: false,
+      },
+    );
+    const startingEvent = this.#event(session, "session.shell_starting", {}, { persist: false });
+
+    try {
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.createSession(session, [createdEvent, startingEvent]),
+      );
+    } catch (error) {
+      this.store.breakSession(sessionId, generation);
+      throw durabilityError(error);
+    }
 
     try {
       const executor = await this.executorFactory.create({
@@ -99,13 +146,29 @@ export class RuntimeService {
       });
       this.#executors.set(sessionId, executor);
       const ready = this.store.markSessionReady(sessionId, generation);
-      this.#event(ready, "session.shell_ready", {
-        shellPid: executor.shellPid,
-      });
+      const readyEvent = this.#event(
+        ready,
+        "session.shell_ready",
+        { shellPid: executor.shellPid },
+        { persist: false },
+      );
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.markSessionReady(ready, executor.shellPid, readyEvent),
+      );
       return ready;
     } catch (error) {
+      this.#executors.get(sessionId)?.close();
+      this.#executors.delete(sessionId);
       const broken = this.store.breakSession(sessionId, generation);
-      this.#event(broken, "session.broken", { reason: errorMessage(error) });
+      const brokenEvent = this.#event(
+        broken,
+        "session.broken",
+        { reason: errorMessage(error) },
+        { persist: false },
+      );
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.markSessionBroken(broken, [brokenEvent], errorMessage(error)),
+      ).catch(() => undefined);
       throw error;
     }
   }
@@ -118,12 +181,29 @@ export class RuntimeService {
     return this.store.listSessions();
   }
 
-  public startExecute(request: ExecuteRequest): StartedExecution {
+  public async recoverDurableOwner(reason: string): Promise<{
+    readonly brokenSessions: number;
+    readonly unknownExecutions: number;
+  }> {
+    return (
+      (await this.#durability?.recoverOwner(this.#ownerId, reason)) ?? {
+        brokenSessions: 0,
+        unknownExecutions: 0,
+      }
+    );
+  }
+
+  public startExecute(request: ExecuteRequest): Promise<StartedExecution> {
+    return this.#withMutationLock(request.sessionId, () => this.#startExecuteLocked(request));
+  }
+
+  async #startExecuteLocked(request: ExecuteRequest): Promise<StartedExecution> {
     if (request.command.includes("\0")) {
       throw new RuntimeError("INVALID_REQUEST", "Execute command cannot contain NUL bytes");
     }
+    await this.#flushDurable(request.sessionId);
     const requestHash = hashRequest({ command: request.command });
-    const scope = `${request.sessionId}:execute:${request.actor.principal}`;
+    const scope = `${request.sessionId}:${request.actor.id}`;
     const replay = this.#idempotentReplay(scope, request.idempotencyKey, requestHash);
     if (replay !== undefined) {
       if (replay.type !== "execute") {
@@ -144,9 +224,10 @@ export class RuntimeService {
     const executionId = `exe_${randomUUID()}`;
     const reserved = this.store.reserveSession(session.id, session.generation, executionId);
     const acceptedAt = this.#timestamp();
+    const actionSequence = this.store.nextActionSequence(session.id, session.generation);
     const action: ExecuteAction = {
       acceptedAt,
-      actionSequence: this.store.nextActionSequence(session.id, session.generation),
+      actionSequence,
       actor: request.actor,
       command: request.command,
       executionId,
@@ -155,7 +236,7 @@ export class RuntimeService {
       requestHash,
       sessionGeneration: session.generation,
       sessionId: session.id,
-      status: "ACCEPTED",
+      status: "DISPATCHING",
       type: "execute",
     };
     const execution: Execution = {
@@ -168,12 +249,51 @@ export class RuntimeService {
       sessionId: session.id,
       status: "DISPATCHING",
     };
+    const acceptedEvent = this.#eventDraft(reserved, "action.accepted", {}, action, execution);
+    const dispatchingEvent = this.#eventDraft(
+      reserved,
+      "action.dispatching",
+      {},
+      action,
+      execution,
+    );
+    try {
+      if (this.#durability !== undefined) {
+        const durable = await this.#enqueueDurable(session.id, 0, () =>
+          this.#durability?.acceptExecute({
+            acceptedEvent,
+            action,
+            dispatchingEvent,
+            execution,
+          }),
+        );
+        if (
+          durable === undefined ||
+          durable.replayed ||
+          durable.actionId !== action.id ||
+          durable.executionId !== execution.id ||
+          durable.actionSequence !== action.actionSequence
+        ) {
+          throw new RuntimeError(
+            "DELIVERY_UNKNOWN",
+            "Durable Execute admission does not match the live Runtime projection",
+            { durable, expectedActionId: action.id, expectedExecutionId: execution.id },
+          );
+        }
+      }
+    } catch (error) {
+      this.store.rollbackActionSequence(session.id, session.generation, actionSequence);
+      this.store.cancelReservation(session.id, session.generation, executionId);
+      if (isDurabilityFatal(error)) {
+        this.#tripDurability(session.id, error);
+      }
+      throw error instanceof RuntimeError ? error : durabilityError(error);
+    }
     this.store.saveAction(action);
     this.store.bindIdempotency(scope, request.idempotencyKey, action.id);
     this.store.saveExecution(execution);
-    this.#event(reserved, "action.accepted", {}, action, execution);
-    action.status = "DISPATCHING";
-    this.#event(reserved, "action.dispatching", {}, action, execution);
+    this.store.appendEvent(session.id, session.generation, acceptedEvent);
+    this.store.appendEvent(session.id, session.generation, dispatchingEvent);
 
     const startedDeferred = deferred<void>();
     void startedDeferred.promise.catch(() => undefined);
@@ -189,11 +309,24 @@ export class RuntimeService {
             session.generation,
             execution.id,
           );
-          this.#event(running, "execution.started", { observedCommand }, action, execution);
+          const startedEvent = this.#event(
+            running,
+            "execution.started",
+            { observedCommand },
+            { action, execution, persist: false },
+          );
+          void this.#enqueueDurable(session.id, 0, () =>
+            this.#durability?.markExecutionRunning({
+              action,
+              event: startedEvent,
+              execution,
+              session: running,
+            }),
+          ).catch((error: unknown) => this.#tripDurability(session.id, error));
           startedDeferred.resolve();
         },
       })
-      .then((result) => {
+      .then(async (result) => {
         execution.exitCode = result.exitCode;
         execution.cwd = result.cwd;
         execution.finishedAt = this.#timestamp();
@@ -203,17 +336,39 @@ export class RuntimeService {
         execution.status = interrupted ? "INTERRUPTED" : "COMPLETED";
         action.status = interrupted ? "INTERRUPTED" : "COMPLETED";
         const ready = this.store.releaseSession(session.id, session.generation, execution.id);
-        this.#event(
+        const completedEvent = this.#event(
           ready,
           interrupted ? "execution.interrupted" : "execution.completed",
           { cwd: result.cwd, exitCode: result.exitCode, outputTruncated: result.outputTruncated },
-          action,
-          execution,
+          { action, execution, persist: false },
         );
-        this.#event(ready, "session.shell_ready", { cwd: result.cwd });
+        const readyEvent = this.#event(
+          ready,
+          "session.shell_ready",
+          { cwd: result.cwd },
+          { persist: false },
+        );
+        try {
+          await this.#enqueueDurable(session.id, 0, () =>
+            this.#durability?.finishExecution({
+              action,
+              events: [completedEvent, readyEvent],
+              execution,
+              session: ready,
+            }),
+          );
+        } catch (error) {
+          execution.status = "UNKNOWN";
+          action.status = "UNKNOWN";
+          this.#tripDurability(session.id, error);
+          throw durabilityError(error);
+        }
         return execution;
       })
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
+        if (execution.status === "UNKNOWN") {
+          throw error;
+        }
         startedDeferred.reject(error);
         execution.status = "FAILED";
         execution.finishedAt = this.#timestamp();
@@ -221,14 +376,27 @@ export class RuntimeService {
         const current = this.store.getSession(session.id);
         if (current?.status !== "CLOSED") {
           const broken = this.store.breakSession(session.id, session.generation);
-          this.#event(
+          const failedEvent = this.#event(
             broken,
             "execution.failed",
             { reason: errorMessage(error) },
-            action,
-            execution,
+            { action, execution, persist: false },
           );
-          this.#event(broken, "session.broken", { reason: errorMessage(error) });
+          const brokenEvent = this.#event(
+            broken,
+            "session.broken",
+            { reason: errorMessage(error) },
+            { persist: false },
+          );
+          await this.#enqueueDurable(session.id, 0, () =>
+            this.#durability?.failExecution({
+              action,
+              events: [failedEvent, brokenEvent],
+              execution,
+              reason: errorMessage(error),
+              session: broken,
+            }),
+          ).catch((durableError: unknown) => this.#tripDurability(session.id, durableError));
         }
         throw error;
       });
@@ -238,19 +406,24 @@ export class RuntimeService {
   }
 
   public async execute(request: ExecuteRequest): Promise<Execution> {
-    return this.startExecute(request).completion;
+    return (await this.startExecute(request)).completion;
   }
 
-  public sendInput(request: InputRequest): InputAction {
+  public sendInput(request: InputRequest): Promise<InputAction> {
+    return this.#withMutationLock(request.sessionId, () => this.#sendInputLocked(request));
+  }
+
+  async #sendInputLocked(request: InputRequest): Promise<InputAction> {
     if (request.data.includes("\0")) {
       throw new RuntimeError("INVALID_REQUEST", "Input data cannot contain NUL bytes");
     }
+    await this.#flushDurable(request.sessionId);
     const requestHash = hashRequest({
       data: request.data,
       expectedScreenVersion: request.expectedScreenVersion,
       targetExecutionId: request.targetExecutionId,
     });
-    const scope = `${request.sessionId}:input:${request.actor.principal}`;
+    const scope = `${request.sessionId}:${request.actor.id}`;
     const replay = this.#idempotentReplay(scope, request.idempotencyKey, requestHash);
     if (replay !== undefined) {
       if (replay.type !== "input") {
@@ -281,22 +454,43 @@ export class RuntimeService {
         ? {}
         : { expectedScreenVersion: request.expectedScreenVersion }),
     };
+    const acceptedEvent = this.#eventDraft(session, "action.accepted", {}, action);
+    try {
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.acceptInteraction(action, acceptedEvent),
+      );
+    } catch (error) {
+      this.store.rollbackActionSequence(session.id, session.generation, action.actionSequence);
+      if (isDurabilityFatal(error)) this.#tripDurability(session.id, error);
+      throw error instanceof RuntimeError ? error : durabilityError(error);
+    }
     this.store.saveAction(action);
     this.store.bindIdempotency(scope, request.idempotencyKey, action.id);
-    this.#event(session, "action.accepted", {}, action);
+    this.store.appendEvent(session.id, session.generation, acceptedEvent);
     try {
       this.#requireExecutor(session.id).writeInput(request.data);
       action.status = "DELIVERED";
-      this.#event(
+      const deliveredEvent = this.#event(
         session,
         "interaction.input_delivered",
         { byteLength: byteLength(request.data) },
-        action,
+        { action, persist: false },
+      );
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.finishInteraction(action, deliveredEvent),
       );
       return action;
     } catch (error) {
       action.status = "UNKNOWN";
-      this.#event(session, "interaction.input_unknown", { reason: errorMessage(error) }, action);
+      const unknownEvent = this.#event(
+        session,
+        "interaction.input_unknown",
+        { reason: errorMessage(error) },
+        { action, persist: false },
+      );
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.finishInteraction(action, unknownEvent),
+      ).catch((durableFailure: unknown) => this.#tripDurability(session.id, durableFailure));
       throw new RuntimeError(
         "DELIVERY_UNKNOWN",
         "PTY input delivery is uncertain",
@@ -306,12 +500,17 @@ export class RuntimeService {
     }
   }
 
-  public sendControl(request: ControlRequest): ControlAction {
+  public sendControl(request: ControlRequest): Promise<ControlAction> {
+    return this.#withMutationLock(request.sessionId, () => this.#sendControlLocked(request));
+  }
+
+  async #sendControlLocked(request: ControlRequest): Promise<ControlAction> {
+    await this.#flushDurable(request.sessionId);
     const requestHash = hashRequest({
       delivery: request.delivery,
       targetExecutionId: request.targetExecutionId,
     });
-    const scope = `${request.sessionId}:control:${request.actor.principal}`;
+    const scope = `${request.sessionId}:${request.actor.id}`;
     const replay = this.#idempotentReplay(scope, request.idempotencyKey, requestHash);
     if (replay !== undefined) {
       if (replay.type !== "control") {
@@ -338,19 +537,45 @@ export class RuntimeService {
       targetExecutionId: request.targetExecutionId,
       type: "control",
     };
+    const acceptedEvent = this.#eventDraft(session, "action.accepted", {}, action);
+    try {
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.acceptInteraction(action, acceptedEvent),
+      );
+    } catch (error) {
+      this.store.rollbackActionSequence(session.id, session.generation, action.actionSequence);
+      if (isDurabilityFatal(error)) this.#tripDurability(session.id, error);
+      throw error instanceof RuntimeError ? error : durabilityError(error);
+    }
     this.store.saveAction(action);
     this.store.bindIdempotency(scope, request.idempotencyKey, action.id);
-    this.#event(session, "action.accepted", {}, action);
+    this.store.appendEvent(session.id, session.generation, acceptedEvent);
     try {
       this.#requireExecutor(session.id).sendControl(request.delivery);
       const execution = this.#requireExecution(request.targetExecutionId);
       execution.interruptedRequested = isInterrupt(request.delivery);
       action.status = "DELIVERED";
-      this.#event(session, "interaction.control_delivered", { delivery: request.delivery }, action);
+      const deliveredEvent = this.#event(
+        session,
+        "interaction.control_delivered",
+        { delivery: request.delivery },
+        { action, persist: false },
+      );
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.finishInteraction(action, deliveredEvent),
+      );
       return action;
     } catch (error) {
       action.status = "UNKNOWN";
-      this.#event(session, "interaction.control_unknown", { reason: errorMessage(error) }, action);
+      const unknownEvent = this.#event(
+        session,
+        "interaction.control_unknown",
+        { reason: errorMessage(error) },
+        { action, persist: false },
+      );
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.finishInteraction(action, unknownEvent),
+      ).catch((durableFailure: unknown) => this.#tripDurability(session.id, durableFailure));
       throw new RuntimeError(
         "DELIVERY_UNKNOWN",
         "Control delivery is uncertain",
@@ -369,14 +594,18 @@ export class RuntimeService {
     return this.#completions.get(execution.id) ?? execution;
   }
 
-  public queryEvents(
+  public async queryEvents(
     sessionId: string,
     generation: number,
     after = 0,
     requestedLimit = DEFAULT_EVENT_LIMIT,
-  ): EventPage {
+  ): Promise<EventPage> {
     this.#requireGeneration(sessionId, generation);
     const limit = Math.max(1, Math.min(requestedLimit, MAX_EVENT_LIMIT));
+    if (this.#durability !== undefined) {
+      await this.#flushDurable(sessionId);
+      return this.#durability.queryEvents(sessionId, generation, after, limit);
+    }
     const events = this.store.queryEvents(sessionId, generation, after, limit + 1);
     const truncated = events.length > limit;
     const page = truncated ? events.slice(0, limit) : events;
@@ -388,13 +617,29 @@ export class RuntimeService {
     };
   }
 
-  public closeSession(sessionId: string, generation: number): Session {
-    const session = this.#requireGeneration(sessionId, generation);
-    this.#executors.get(sessionId)?.close();
-    this.#executors.delete(sessionId);
-    const closed = this.store.closeSession(sessionId, generation);
-    this.#event(closed, "session.closed", { previousStatus: session.status });
-    return closed;
+  public closeSession(sessionId: string, generation: number): Promise<Session> {
+    return this.#withMutationLock(sessionId, async () => {
+      let flushFailure: unknown;
+      await this.#flushDurable(sessionId).catch((error: unknown) => {
+        flushFailure = error;
+      });
+      const session = this.#requireExactGeneration(sessionId, generation);
+      const previousStatus = session.status;
+      this.#executors.get(sessionId)?.close();
+      this.#executors.delete(sessionId);
+      const closed = this.store.closeSession(sessionId, generation);
+      const closedEvent = this.#event(
+        closed,
+        "session.closed",
+        { previousStatus },
+        { persist: false },
+      );
+      if (flushFailure !== undefined) throw durabilityError(flushFailure);
+      await this.#enqueueDurable(sessionId, 0, () =>
+        this.#durability?.closeSession(closed, closedEvent),
+      );
+      return closed;
+    });
   }
 
   #recordOutput(sessionId: string, generation: number, data: string): void {
@@ -403,11 +648,25 @@ export class RuntimeService {
       return;
     }
     const screenVersion = this.store.bumpScreenVersion(sessionId, generation);
-    this.#event(current, "terminal.pty_output", {
-      byteLength: byteLength(data),
-      data,
-      screenVersion,
-    });
+    const execution =
+      current.activeExecutionId === undefined
+        ? undefined
+        : this.store.getExecution(current.activeExecutionId);
+    const action = execution === undefined ? undefined : this.store.getAction(execution.actionId);
+    this.#event(
+      current,
+      "terminal.pty_output",
+      {
+        byteLength: byteLength(data),
+        data,
+        screenVersion,
+      },
+      {
+        persist: true,
+        ...(action === undefined ? {} : { action }),
+        ...(execution === undefined ? {} : { execution }),
+      },
+    );
   }
 
   #requireSession(sessionId: string): Session {
@@ -419,6 +678,17 @@ export class RuntimeService {
   }
 
   #requireGeneration(sessionId: string, generation: number): Session {
+    const session = this.#requireExactGeneration(sessionId, generation);
+    if (session.status === "BROKEN") {
+      throw new RuntimeError("SESSION_BROKEN", `Session is broken: ${sessionId}`, { sessionId });
+    }
+    if (session.status === "CLOSED") {
+      throw new RuntimeError("SESSION_NOT_READY", `Session is closed: ${sessionId}`, { sessionId });
+    }
+    return session;
+  }
+
+  #requireExactGeneration(sessionId: string, generation: number): Session {
     const session = this.#requireSession(sessionId);
     if (session.generation !== generation) {
       throw new RuntimeError(
@@ -426,12 +696,6 @@ export class RuntimeService {
         `Expected generation ${generation.toString()}, current ${session.generation.toString()}`,
         { currentGeneration: session.generation, sessionId },
       );
-    }
-    if (session.status === "BROKEN") {
-      throw new RuntimeError("SESSION_BROKEN", `Session is broken: ${sessionId}`, { sessionId });
-    }
-    if (session.status === "CLOSED") {
-      throw new RuntimeError("SESSION_NOT_READY", `Session is closed: ${sessionId}`, { sessionId });
     }
     return session;
   }
@@ -500,10 +764,31 @@ export class RuntimeService {
     session: Session,
     type: string,
     payload: Readonly<Record<string, unknown>>,
+    options: EventOptions = {},
+  ): SessionEvent {
+    const draft = this.#eventDraft(session, type, payload, options.action, options.execution);
+    const stored = this.store.appendEvent(session.id, session.generation, draft);
+    if (options.persist !== false && this.#durability !== undefined) {
+      const pendingBytes =
+        type === "terminal.pty_output" && typeof payload.data === "string"
+          ? byteLength(payload.data)
+          : 0;
+      void this.#enqueueDurable(session.id, pendingBytes, () =>
+        this.#durability?.appendEvent(draft),
+      ).catch((error: unknown) => this.#tripDurability(session.id, error));
+    }
+    return stored;
+  }
+
+  #eventDraft(
+    session: Session,
+    type: string,
+    payload: Readonly<Record<string, unknown>>,
     action?: SessionAction,
     execution?: Execution,
-  ): SessionEvent {
-    return this.store.appendEvent(session.id, session.generation, {
+  ): DurableSessionEvent {
+    return {
+      id: `evt_${randomUUID()}`,
       observedAt: this.#timestamp(),
       payload,
       sessionGeneration: session.generation,
@@ -511,11 +796,127 @@ export class RuntimeService {
       type,
       ...(action === undefined ? {} : { actionId: action.id, actor: action.actor }),
       ...(execution === undefined ? {} : { executionId: execution.id }),
+    };
+  }
+
+  async #enqueueDurable<T>(
+    sessionId: string,
+    pendingBytes: number,
+    work: () => Promise<T> | undefined,
+  ): Promise<T | undefined> {
+    if (this.#durability === undefined) return undefined;
+    const state = this.#durableQueue(sessionId);
+    if (state.failure !== undefined) throw state.failure;
+    if (
+      state.pendingEvents + 1 > MAX_PENDING_DURABLE_EVENTS ||
+      state.pendingBytes + pendingBytes > MAX_PENDING_DURABLE_BYTES
+    ) {
+      const failure = new RuntimeError(
+        "RUNTIME_UNAVAILABLE",
+        "Durable event ingest backlog exceeded its bound",
+        {
+          maxPendingBytes: MAX_PENDING_DURABLE_BYTES,
+          maxPendingEvents: MAX_PENDING_DURABLE_EVENTS,
+          sessionId,
+        },
+        true,
+      );
+      state.failure = failure;
+      throw failure;
+    }
+    state.pendingEvents += 1;
+    state.pendingBytes += pendingBytes;
+    const operation = state.tail.then(async () => {
+      if (state.failure !== undefined) throw state.failure;
+      try {
+        return await work();
+      } catch (error) {
+        if (error instanceof RuntimeError) {
+          if (error.code === "RUNTIME_UNAVAILABLE") state.failure ??= error;
+          if (error.code === "DELIVERY_UNKNOWN") state.failure ??= durabilityError(error);
+          throw error;
+        }
+        const failure = durabilityError(error);
+        state.failure ??= failure;
+        throw failure;
+      }
+    });
+    state.tail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation.finally(() => {
+      state.pendingEvents -= 1;
+      state.pendingBytes -= pendingBytes;
     });
   }
 
+  async #flushDurable(sessionId: string): Promise<void> {
+    if (this.#durability === undefined) return;
+    const state = this.#durableQueue(sessionId);
+    try {
+      await withTimeout(
+        state.tail,
+        DURABLE_FLUSH_TIMEOUT_MS,
+        `Timed out draining durable Event ingest for Session ${sessionId}`,
+      );
+    } catch (error) {
+      state.failure ??= durabilityError(error);
+      throw state.failure;
+    }
+    if (state.failure !== undefined) throw state.failure;
+  }
+
+  #durableQueue(sessionId: string): DurableQueueState {
+    let state = this.#durableQueues.get(sessionId);
+    if (state === undefined) {
+      state = { pendingBytes: 0, pendingEvents: 0, tail: Promise.resolve() };
+      this.#durableQueues.set(sessionId, state);
+    }
+    return state;
+  }
+
+  #tripDurability(sessionId: string, error: unknown): void {
+    const state = this.#durableQueue(sessionId);
+    state.failure ??= durabilityError(error);
+    const session = this.store.getSession(sessionId);
+    if (session?.activeExecutionId !== undefined) {
+      const execution = this.store.getExecution(session.activeExecutionId);
+      if (execution !== undefined) {
+        execution.status = "UNKNOWN";
+        execution.finishedAt ??= this.#timestamp();
+        const action = this.store.getAction(execution.actionId);
+        if (action?.type === "execute") action.status = "UNKNOWN";
+      }
+    }
+    this.#executors.get(sessionId)?.close();
+    this.#executors.delete(sessionId);
+    if (session !== undefined && session.status !== "CLOSED" && session.status !== "BROKEN") {
+      this.store.breakSession(session.id, session.generation);
+    }
+  }
+
+  async #withMutationLock<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.#mutationTails.get(sessionId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => gate);
+    this.#mutationTails.set(sessionId, tail);
+    await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+      if (this.#mutationTails.get(sessionId) === tail) {
+        this.#mutationTails.delete(sessionId);
+      }
+    }
+  }
+
   #timestamp(): string {
-    return this.now().toISOString();
+    return this.#now().toISOString();
   }
 }
 
@@ -560,6 +961,24 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function durabilityError(error: unknown): RuntimeError {
+  if (error instanceof RuntimeError && error.code === "RUNTIME_UNAVAILABLE") return error;
+  return new RuntimeError(
+    "RUNTIME_UNAVAILABLE",
+    "PostgreSQL durable journal is unavailable",
+    { reason: errorMessage(error) },
+    true,
+  );
+}
+
+function isDurabilityFatal(error: unknown): boolean {
+  return (
+    !(error instanceof RuntimeError) ||
+    error.code === "RUNTIME_UNAVAILABLE" ||
+    error.code === "DELIVERY_UNKNOWN"
+  );
+}
+
 function deferred<T>(): {
   readonly promise: Promise<T>;
   readonly resolve: (value: T | PromiseLike<T>) => void;
@@ -572,4 +991,18 @@ function deferred<T>(): {
     reject = innerReject;
   });
   return { promise, reject, resolve };
+}
+
+async function withTimeout<T>(work: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }

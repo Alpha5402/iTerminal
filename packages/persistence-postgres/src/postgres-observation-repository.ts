@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import type { Actor } from "@iterminal/domain";
 import { RuntimeError } from "@iterminal/domain";
 import { Pool, type PoolClient } from "pg";
 
@@ -86,7 +87,13 @@ export class PostgresObservationRepository {
   readonly #pool: Pool;
 
   public constructor(connectionString: string) {
-    this.#pool = new Pool({ connectionString, max: 10 });
+    this.#pool = new Pool({
+      connectionString,
+      connectionTimeoutMillis: 5_000,
+      max: 10,
+      query_timeout: 30_000,
+      statement_timeout: 30_000,
+    });
   }
 
   public async close(): Promise<void> {
@@ -255,14 +262,29 @@ export class PostgresObservationRepository {
   }
 
   public async appendOutput(input: {
+    readonly actionId?: string;
+    readonly actor?: Actor;
+    readonly eventId?: string;
     readonly sessionId: string;
     readonly generation: number;
     readonly executionId?: string;
     readonly data: string;
     readonly createdAt: Date;
     readonly inlineThresholdBytes?: number;
+    readonly payload?: Readonly<Record<string, unknown>>;
   }): Promise<ArtifactWriteResult> {
     return this.#transaction(async (client) => {
+      if (input.actor !== undefined) {
+        await client.query(
+          `INSERT INTO actors (id, actor_type, principal, client)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (id) DO UPDATE
+             SET actor_type = EXCLUDED.actor_type,
+                 principal = EXCLUDED.principal,
+                 client = EXCLUDED.client`,
+          [input.actor.id, input.actor.type, input.actor.principal, input.actor.client],
+        );
+      }
       const content = Buffer.from(input.data, "utf8");
       const tailPreview = content
         .subarray(Math.max(0, content.length - DEFAULT_TAIL_BYTES))
@@ -297,6 +319,7 @@ export class PostgresObservationRepository {
         );
       }
       const payload = {
+        ...(input.payload ?? {}),
         byteCount: content.length,
         tailPreview,
         ...(artifactRef === undefined ? { data: input.data } : { artifactRef }),
@@ -304,14 +327,16 @@ export class PostgresObservationRepository {
       await client.query(
         `INSERT INTO session_events
           (id, session_id, session_generation, event_sequence, event_type,
-           execution_id, payload, created_at, search_text)
-         VALUES ($1, $2, $3, $4, 'terminal.pty_output', $5, $6, $7, $8)`,
+           action_id, execution_id, actor_id, payload, created_at, search_text)
+         VALUES ($1, $2, $3, $4, 'terminal.pty_output', $5, $6, $7, $8, $9, $10)`,
         [
-          `evt_${randomUUID()}`,
+          input.eventId ?? `evt_${randomUUID()}`,
           input.sessionId,
           input.generation,
           sequence,
+          input.actionId ?? null,
           input.executionId ?? null,
+          input.actor?.id ?? null,
           JSON.stringify(payload),
           input.createdAt,
           input.data,

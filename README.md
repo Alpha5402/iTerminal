@@ -52,9 +52,9 @@ Most terminal tools optimize for command execution or remote administration. iTe
 
 ## Current status
 
-**M0–M4 gates passed at L2: shared Shell, Action Runtime, durable transactions, bounded observation, and a real stdio MCP bridge.**
+**M0–M4.1 gates passed at L2: shared Shell, Action Runtime, integrated durable transactions/observation, and a real stdio MCP bridge.**
 
-Real local bash and zsh PTY scenarios prove command boundaries, shared state, fail-fast Busy, structured Input/Control, stale-target rejection, marker-spoof isolation, large output, and Ctrl+C recovery. PostgreSQL 17 independently proves durable reservation/idempotency/outbox/recovery plus bounded event queries, FTS over 100,000 lines, scoped cursors, retention resync, and chunked artifact reads. An official MCP SDK Client now drives the same live zsh across stdio Client restarts through a separate Runtime daemon; OpenCode and Claude Code handshakes also pass. The live daemon still uses in-memory state, no model-driven Agent has been authorized, and the Human Console is not complete.
+Real local bash and zsh PTY scenarios prove command boundaries, shared state, fail-fast Busy, structured Input/Control, stale-target rejection, marker-spoof isolation, large output, and Ctrl+C recovery. With `ITERM_DATABASE_URL`, the live daemon now commits Execute/Input/Control admission before PTY delivery, sends attributed output through a bounded per-Session ingest loop, serves durable cursors, and marks a `SIGKILL`-lost owner generation `BROKEN/UNKNOWN` on restart. An official MCP SDK Client drives the same live zsh across stdio bridge restarts; OpenCode and Claude Code handshakes also pass. In-memory development mode remains available, but no model-driven Agent has been authorized and the Human Console is not complete.
 
 See:
 
@@ -70,6 +70,8 @@ See:
 - [M4 daemon/MCP decision](./docs/adr/0007-runtime-daemon-mcp-bridge.md) — why Client lifecycle cannot own the PTY.
 - [M4 MCP protocol](./docs/protocol/m4-mcp-tools.md) — tools, Actor binding, results, and errors.
 - [M4 verification](./docs/verification/M4/2026-08-30-mcp-adapter.md) — official SDK, OpenCode, Claude Code, and remaining L3 boundary.
+- [M4.1 durability decision](./docs/adr/0008-live-runtime-durable-journal.md) — live PTY truth, write-ahead facts, and the bounded ingest loop.
+- [M4.1 verification](./docs/verification/M4/2026-08-30-durable-runtime.md) — real PostgreSQL/MCP Actions and daemon crash recovery.
 
 ## Planned shape
 
@@ -107,6 +109,8 @@ ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm mcp
 pnpm spike:shell -- --shell zsh
 pnpm spike:shell -- --shell bash
 ```
+
+The command above starts explicit in-memory development mode. To enable the durable journal, start PostgreSQL and pass `ITERM_DATABASE_URL` to `pnpm daemon`; the MCP bridge still receives only `ITERM_RUNTIME_SOCKET`. PostgreSQL durability does not sandbox Shell commands or resurrect a lost PTY.
 
 The repository does not yet have a final license. That decision is intentionally tracked in the roadmap instead of being silently assumed.
 

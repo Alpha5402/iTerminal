@@ -28,6 +28,9 @@ export interface AcceptExecuteTransaction {
   readonly idempotencyKey: string;
   readonly requestHash: string;
   readonly acceptedAt: Date;
+  readonly dispatchingEventId?: string;
+  readonly dispatchingAt?: Date;
+  readonly expectedActionSequence?: number;
   readonly failpoint?: "before_commit";
 }
 
@@ -69,7 +72,13 @@ export class PostgresRuntimeRepository {
   readonly #pool: Pool;
 
   public constructor(connectionString: string) {
-    this.#pool = new Pool({ connectionString, max: 20 });
+    this.#pool = new Pool({
+      connectionString,
+      connectionTimeoutMillis: 5_000,
+      max: 20,
+      query_timeout: 30_000,
+      statement_timeout: 30_000,
+    });
   }
 
   public async migrate(): Promise<void> {
@@ -169,11 +178,17 @@ export class PostgresRuntimeRepository {
         [input.actor.id, input.actor.type, input.actor.principal, input.actor.client],
       );
       const sequence = Number.parseInt(reservation.next_action_sequence, 10);
+      if (input.expectedActionSequence !== undefined && sequence !== input.expectedActionSequence) {
+        throw new RuntimeError("DELIVERY_UNKNOWN", "Live and durable Action sequence diverged", {
+          durableActionSequence: sequence,
+          liveActionSequence: input.expectedActionSequence,
+        });
+      }
       await client.query(
         `INSERT INTO actions
           (id, session_id, session_generation, actor_id, kind, action_sequence,
            idempotency_key, request_hash, payload, status, accepted_at)
-         VALUES ($1, $2, $3, $4, 'execute', $5, $6, $7, $8, 'ACCEPTED', $9)`,
+         VALUES ($1, $2, $3, $4, 'execute', $5, $6, $7, $8, $9, $10)`,
         [
           input.actionId,
           input.sessionId,
@@ -183,6 +198,7 @@ export class PostgresRuntimeRepository {
           input.idempotencyKey,
           input.requestHash,
           JSON.stringify({ command: input.command }),
+          input.dispatchingEventId === undefined ? "ACCEPTED" : "DISPATCHING",
           input.acceptedAt,
         ],
       );
@@ -216,6 +232,29 @@ export class PostgresRuntimeRepository {
           input.acceptedAt,
         ],
       );
+      if (input.dispatchingEventId !== undefined) {
+        const dispatchingSequence = await nextEventSequence(
+          client,
+          input.sessionId,
+          input.generation,
+        );
+        await client.query(
+          `INSERT INTO session_events
+            (id, session_id, session_generation, event_sequence, event_type,
+             action_id, execution_id, actor_id, payload, created_at)
+           VALUES ($1, $2, $3, $4, 'action.dispatching', $5, $6, $7, '{}'::jsonb, $8)`,
+          [
+            input.dispatchingEventId,
+            input.sessionId,
+            input.generation,
+            dispatchingSequence,
+            input.actionId,
+            input.executionId,
+            input.actor.id,
+            input.dispatchingAt ?? input.acceptedAt,
+          ],
+        );
+      }
       await client.query(
         `INSERT INTO outbox
           (id, aggregate_type, aggregate_id, event_type, payload, created_at)

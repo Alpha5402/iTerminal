@@ -54,6 +54,8 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+      - run: sudo apt-get update && sudo apt-get install --yes zsh
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:m2
       - run: pnpm test:m3
+      - run: pnpm test:m4:durable

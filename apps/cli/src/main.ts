@@ -17,12 +17,11 @@ input.on("line", (line) => {
 });
 
 input.on("close", () => {
-  void requestChain.finally(() => closeAll());
+  void requestChain.finally(async () => closeAll());
 });
 
 process.on("SIGINT", () => {
-  closeAll();
-  process.exit(130);
+  void closeAll().then(() => process.exit(130));
 });
 
 async function handleLine(line: string): Promise<void> {
@@ -65,7 +64,7 @@ async function dispatch(request: Record<string, unknown>): Promise<unknown> {
     return runtime.getSession(stringField(request, "sessionId"));
   }
   if (op === "execute") {
-    const started = runtime.startExecute({
+    const started = await runtime.startExecute({
       actor: actorField(request),
       command: stringField(request, "command"),
       idempotencyKey: stringField(request, "idempotencyKey"),
@@ -119,10 +118,10 @@ async function dispatch(request: Record<string, unknown>): Promise<unknown> {
   throw new RuntimeError("INVALID_REQUEST", `Unsupported CLI operation: ${op}`);
 }
 
-function closeAll(): void {
+async function closeAll(): Promise<void> {
   for (const session of runtime.listSessions()) {
     if (session.status !== "CLOSED") {
-      runtime.closeSession(session.id, session.generation);
+      await runtime.closeSession(session.id, session.generation);
     }
   }
 }

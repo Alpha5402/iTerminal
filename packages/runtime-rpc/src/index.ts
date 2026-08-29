@@ -88,7 +88,6 @@ const operationSchemas = {
   }),
   "session.close": sessionIdentitySchema,
   "session.create": z.strictObject({
-    ownerId: z.string().min(1).max(256).optional(),
     shell: z.enum(["bash", "zsh"]),
     workspaceRoot: z.string().min(1).max(4096),
   }),
@@ -136,8 +135,8 @@ export class LocalRuntimeGateway implements RuntimeGateway {
     return Promise.resolve(this.runtime.listSessions());
   }
 
-  public startExecute(request: ExecuteRequest): Promise<StartedExecutionView> {
-    const started = this.runtime.startExecute(request);
+  public async startExecute(request: ExecuteRequest): Promise<StartedExecutionView> {
+    const started = await this.runtime.startExecute(request);
     return Promise.resolve({ action: started.action, execution: started.execution });
   }
 
@@ -150,11 +149,11 @@ export class LocalRuntimeGateway implements RuntimeGateway {
   }
 
   public sendInput(request: InputRequest): Promise<InputAction> {
-    return Promise.resolve(this.runtime.sendInput(request));
+    return this.runtime.sendInput(request);
   }
 
   public sendControl(request: ControlRequest): Promise<ControlAction> {
-    return Promise.resolve(this.runtime.sendControl(request));
+    return this.runtime.sendControl(request);
   }
 
   public queryEvents(
@@ -163,11 +162,11 @@ export class LocalRuntimeGateway implements RuntimeGateway {
     after = 0,
     limit = 100,
   ): Promise<EventPage> {
-    return Promise.resolve(this.runtime.queryEvents(sessionId, generation, after, limit));
+    return this.runtime.queryEvents(sessionId, generation, after, limit);
   }
 
   public closeSession(sessionId: string, generation: number): Promise<Session> {
-    return Promise.resolve(this.runtime.closeSession(sessionId, generation));
+    return this.runtime.closeSession(sessionId, generation);
   }
 }
 
@@ -198,13 +197,14 @@ export interface RuntimeRpcServerHandle {
 export async function startRuntimeRpcServer(options: {
   readonly socketPath: string;
   readonly gateway: RuntimeGateway;
+  readonly isReady?: () => boolean;
 }): Promise<RuntimeRpcServerHandle> {
   await prepareSocketPath(options.socketPath);
   const activeSockets = new Set<Socket>();
   const server = createServer((socket) => {
     activeSockets.add(socket);
     socket.once("close", () => activeSockets.delete(socket));
-    handleSocket(socket, options.gateway);
+    handleSocket(socket, options.gateway, options.isReady);
   });
   const previousUmask = process.umask(0o177);
   try {
@@ -244,7 +244,6 @@ export class UnixRuntimeClient implements RuntimeGateway {
     return this.#request("session.create", {
       shell: request.shell,
       workspaceRoot: request.workspaceRoot,
-      ...(request.ownerId === undefined ? {} : { ownerId: request.ownerId }),
     });
   }
 
@@ -377,7 +376,11 @@ export class UnixRuntimeClient implements RuntimeGateway {
   }
 }
 
-function handleSocket(socket: Socket, gateway: RuntimeGateway): void {
+function handleSocket(
+  socket: Socket,
+  gateway: RuntimeGateway,
+  isReady: (() => boolean) | undefined,
+): void {
   socket.setEncoding("utf8");
   let buffer = "";
   socket.on("data", (chunk: string) => {
@@ -391,11 +394,16 @@ function handleSocket(socket: Socket, gateway: RuntimeGateway): void {
     const line = buffer.slice(0, newline);
     buffer = "";
     socket.pause();
-    void respond(socket, line, gateway);
+    void respond(socket, line, gateway, isReady);
   });
 }
 
-async function respond(socket: Socket, line: string, gateway: RuntimeGateway): Promise<void> {
+async function respond(
+  socket: Socket,
+  line: string,
+  gateway: RuntimeGateway,
+  isReady: (() => boolean) | undefined,
+): Promise<void> {
   let id = "unassigned";
   try {
     const candidate: unknown = JSON.parse(line);
@@ -414,6 +422,14 @@ async function respond(socket: Socket, line: string, gateway: RuntimeGateway): P
       throw new RuntimeError("INVALID_REQUEST", "Unsupported Runtime RPC operation");
     }
     const operation = parsed.operation;
+    if (isReady !== undefined && !isReady()) {
+      throw new RuntimeError(
+        "RUNTIME_UNAVAILABLE",
+        "Runtime daemon is still initializing",
+        {},
+        true,
+      );
+    }
     const input = operationSchemas[operation].parse(parsed.input);
     const result = await dispatch(gateway, operation, input);
     writeResponse(socket, { id, ok: true, result });
@@ -443,7 +459,6 @@ async function dispatch(
       return gateway.createSession({
         shell: request.shell,
         workspaceRoot: request.workspaceRoot,
-        ...(request.ownerId === undefined ? {} : { ownerId: request.ownerId }),
       });
     }
     case "session.get": {

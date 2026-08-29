@@ -11,7 +11,7 @@ const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const clients: Client[] = [];
 let fixtureRoot = "";
 let workspaceRoot = "";
-let daemon: RuntimeDaemonHandle;
+let daemon: RuntimeDaemonHandle | undefined;
 
 beforeAll(async () => {
   fixtureRoot = await mkdtemp(join(tmpdir(), "iterminal-m4-"));
@@ -25,8 +25,8 @@ afterAll(async () => {
   for (const client of clients.splice(0)) {
     await client.close().catch(() => undefined);
   }
-  await daemon.close();
-  await rm(fixtureRoot, { force: true, recursive: true });
+  await daemon?.close().catch(() => undefined);
+  if (fixtureRoot !== "") await rm(fixtureRoot, { force: true, recursive: true });
 });
 
 describe("M4 stdio MCP bridge", () => {
@@ -178,6 +178,7 @@ describe("M4 stdio MCP bridge", () => {
 });
 
 async function connectClient(name: string): Promise<Client> {
+  if (daemon === undefined) throw new Error("Runtime daemon was not started");
   const transport = new StdioClientTransport({
     args: [join(repositoryRoot, "apps/mcp/src/main.ts")],
     command: join(repositoryRoot, "node_modules/.bin/tsx"),

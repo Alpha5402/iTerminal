@@ -38,7 +38,7 @@ describe.each(["bash", "zsh"] as const)("M1 %s Runtime", (shell: ShellKind) => {
       expect(observed.output).toContain("ENV=shared");
       expect(runtime.getSession(session.id).status).toBe("READY");
     } finally {
-      runtime.closeSession(session.id, session.generation);
+      await runtime.closeSession(session.id, session.generation);
     }
   }, 20_000);
 });
@@ -49,7 +49,7 @@ describe("M1 Action Runtime", () => {
     const workspace = createWorkspace();
     const session = await runtime.createSession({ shell: "zsh", workspaceRoot: workspace });
     try {
-      const python = runtime.startExecute({
+      const python = await runtime.startExecute({
         actor: agentActor,
         command: "python3 -q",
         idempotencyKey: "python-start",
@@ -58,7 +58,18 @@ describe("M1 Action Runtime", () => {
       });
       await python.started;
 
-      expect(() =>
+      await expect(
+        runtime.sendInput({
+          actor: agentActor,
+          data: "ignored\n",
+          idempotencyKey: "python-start",
+          sessionGeneration: session.generation,
+          sessionId: session.id,
+          targetExecutionId: python.execution.id,
+        }),
+      ).rejects.toThrowError(expect.objectContaining({ code: "IDEMPOTENCY_KEY_REUSED" }));
+
+      await expect(
         runtime.startExecute({
           actor: humanActor,
           command: "pwd",
@@ -66,9 +77,9 @@ describe("M1 Action Runtime", () => {
           sessionGeneration: session.generation,
           sessionId: session.id,
         }),
-      ).toThrowError(expect.objectContaining({ code: "PTY_BUSY" }));
+      ).rejects.toThrowError(expect.objectContaining({ code: "PTY_BUSY" }));
 
-      expect(() =>
+      await expect(
         runtime.sendInput({
           actor: agentActor,
           data: "ignored\n",
@@ -77,10 +88,10 @@ describe("M1 Action Runtime", () => {
           sessionId: session.id,
           targetExecutionId: "exe_stale",
         }),
-      ).toThrowError(expect.objectContaining({ code: "EXECUTION_CHANGED" }));
+      ).rejects.toThrowError(expect.objectContaining({ code: "EXECUTION_CHANGED" }));
 
       const screenVersion = runtime.getSession(session.id).screenVersion;
-      expect(() =>
+      await expect(
         runtime.sendInput({
           actor: agentActor,
           data: "ignored\n",
@@ -90,9 +101,9 @@ describe("M1 Action Runtime", () => {
           sessionId: session.id,
           targetExecutionId: python.execution.id,
         }),
-      ).toThrowError(expect.objectContaining({ code: "SCREEN_CHANGED" }));
+      ).rejects.toThrowError(expect.objectContaining({ code: "SCREEN_CHANGED" }));
 
-      const humanInput = runtime.sendInput({
+      const humanInput = await runtime.sendInput({
         actor: humanActor,
         data: "shared_value = 41\n",
         idempotencyKey: "python-human-input",
@@ -100,7 +111,7 @@ describe("M1 Action Runtime", () => {
         sessionId: session.id,
         targetExecutionId: python.execution.id,
       });
-      const agentInput = runtime.sendInput({
+      const agentInput = await runtime.sendInput({
         actor: agentActor,
         data: "print(shared_value + 1)\n",
         idempotencyKey: "python-agent-input",
@@ -108,7 +119,7 @@ describe("M1 Action Runtime", () => {
         sessionId: session.id,
         targetExecutionId: python.execution.id,
       });
-      runtime.sendInput({
+      await runtime.sendInput({
         actor: humanActor,
         data: "exit()\n",
         idempotencyKey: "python-exit",
@@ -122,12 +133,12 @@ describe("M1 Action Runtime", () => {
       expect(completed.output).toContain("42");
       expect(completed.status).toBe("COMPLETED");
 
-      const events = runtime.queryEvents(session.id, session.generation, 0, 500);
+      const events = await runtime.queryEvents(session.id, session.generation, 0, 500);
       expect(events.events.some((event) => event.type === "interaction.input_delivered")).toBe(
         true,
       );
     } finally {
-      runtime.closeSession(session.id, session.generation);
+      await runtime.closeSession(session.id, session.generation);
     }
   }, 20_000);
 
@@ -136,7 +147,7 @@ describe("M1 Action Runtime", () => {
     const workspace = createWorkspace();
     const session = await runtime.createSession({ shell: "zsh", workspaceRoot: workspace });
     try {
-      const sleeping = runtime.startExecute({
+      const sleeping = await runtime.startExecute({
         actor: agentActor,
         command: "sleep 10",
         idempotencyKey: "sleep-start",
@@ -145,7 +156,7 @@ describe("M1 Action Runtime", () => {
       });
       await sleeping.started;
       await delay(100);
-      const control = runtime.sendControl({
+      const control = await runtime.sendControl({
         actor: humanActor,
         delivery: { control: "CTRL_C", mode: "TTY_CONTROL" },
         idempotencyKey: "sleep-control",
@@ -159,7 +170,7 @@ describe("M1 Action Runtime", () => {
       expect(interrupted.exitCode).toBe(130);
       expect(runtime.getSession(session.id).status).toBe("READY");
     } finally {
-      runtime.closeSession(session.id, session.generation);
+      await runtime.closeSession(session.id, session.generation);
     }
   }, 20_000);
 
@@ -183,7 +194,7 @@ describe("M1 Action Runtime", () => {
         sessionId: session.id,
       });
       expect(replay.id).toBe(first.id);
-      expect(() =>
+      await expect(
         runtime.startExecute({
           actor: agentActor,
           command: "false",
@@ -191,12 +202,12 @@ describe("M1 Action Runtime", () => {
           sessionGeneration: session.generation,
           sessionId: session.id,
         }),
-      ).toThrowError(expect.objectContaining({ code: "IDEMPOTENCY_KEY_REUSED" }));
-      expect(() => runtime.queryEvents(session.id, session.generation + 1)).toThrowError(
+      ).rejects.toThrowError(expect.objectContaining({ code: "IDEMPOTENCY_KEY_REUSED" }));
+      await expect(runtime.queryEvents(session.id, session.generation + 1)).rejects.toThrowError(
         expect.objectContaining({ code: "SESSION_GENERATION_CHANGED" }),
       );
     } finally {
-      runtime.closeSession(session.id, session.generation);
+      await runtime.closeSession(session.id, session.generation);
     }
   });
 });

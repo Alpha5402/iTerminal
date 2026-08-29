@@ -7,7 +7,13 @@
   "dependencies": {
     "@iterminal/application": "workspace:*",
     "@iterminal/executor-pty": "workspace:*",
+    "@iterminal/persistence-postgres": "workspace:*",
     "@iterminal/runtime-memory": "workspace:*",
     "@iterminal/runtime-rpc": "workspace:*"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.0.0",
+    "@types/pg": "^8.15.5",
+    "pg": "^8.16.3"
   }
 }

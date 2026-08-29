@@ -5,6 +5,7 @@
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
+    "@iterminal/application": "workspace:*",
     "@iterminal/domain": "workspace:*",
     "pg": "^8.16.3"
   },
