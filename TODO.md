@@ -1,0 +1,1047 @@
+# iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
+
+> 状态：Planning Baseline v2
+>
+> 基线日期：2026-08-30
+>
+> 当前仓库状态：空仓库，仅存在 `.git` 与本规划文件；本文描述目标与验收，不代表功能已经实现。
+>
+> 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
+
+---
+
+## 0. 本轮调整评估结论
+
+本版接受并替换上一版的核心产品模型：
+
+- 从“每个 Actor 有独立 Context”改为“同一 Session 的 Actor 共享一个真实 Shell Context”。
+- 从“Command Mode + Interactive Mode”改为“所有 Shell 操作都发生在同一个 Persistent PTY”。
+- 从“Session 内命令排队”改为“单 Session 单 active ExecuteAction；忙时立即返回 `PTY_BUSY`”。
+- 从“新建 Lane 并行”改为“需要独立/并行环境时显式 `fork_session`”。
+- 将 Execute、Input、Signal/Control 统一为结构化 Action，经同一 Application Service 仲裁、审计和持久化。
+- Shell 状态由真实 Shell 持有；Runtime 只通过 Shell Integration 观察，不模拟 cwd/env。
+
+以下技术点不能原样照搬，本文已修正：
+
+1. **PTY 通常只有一个合并输出字节流。**不能可靠地把它重新拆成 stdout/stderr；事件类型使用 `pty_output`，只有非 PTY 旁路执行才可能保留 stream 来源。
+2. **EOF 不是 POSIX signal。**`SIGINT/SIGTERM` 属于 process signal；`Ctrl+C/Ctrl+D/EOF` 属于 TTY key/control bytes，Action schema 必须区分 delivery mode。
+3. **原子 `pty.write()` 只防止字符级混写，不防止语义竞争。**InputAction 仍需 target execution、screen version 与短期 Interaction Guard。
+4. **PTY/Shell 是当前 live state 的事实源，PostgreSQL 是 durable accepted/observed facts 的事实源。**Runtime crash 后不能从数据库假装恢复同一个 PTY。
+5. **Lease/Fencing 不能迁移内核 PTY。**Session owner Worker 丢失时，旧 generation 进入 `BROKEN/UNKNOWN`；只能从 checkpoint 创建新 generation。
+6. **Shell marker 可能被命令输出伪造。**优先使用独立 control channel；若使用 OSC/DCS，必须带 session nonce、严格 parser 和信任边界说明。
+7. **`fork_session` 只能复制可重建的 Shell Checkpoint。**不能复制 foreground process、REPL memory、数据库事务、vim buffer、socket 或 file descriptor。
+
+本轮只更新规划，不进入代码实现。
+
+---
+
+## 1. 如何使用这份 TODO
+
+- [ ] 复选框只有在对应证据保存后才能勾选；“代码已写”或“构建通过”不能替代场景验收。
+- [ ] 每个里程碑通过 Exit Gate 后才能开始依赖它的下一阶段。
+- [ ] 每个 PR 完成一个可回滚的垂直切片，并同时更新测试、协议、迁移、文档与验证记录。
+- [ ] 改变 Action、Session、Execution、Shell Integration、并发、失败或权限语义时，必须先更新 ADR。
+- [ ] 验证记录保存到 `docs/verification/<milestone>/<date>.md`，包含环境、命令、结果、失败项与产物。
+
+### 1.1 验证等级
+
+| 等级 | 含义                                         | 可声明范围       |
+| ---- | -------------------------------------------- | ---------------- |
+| L0   | 文档、静态审阅、状态机推演                   | 设计已定义       |
+| L1   | 单元、属性、协议契约测试                     | 局部语义通过     |
+| L2   | 真实 PostgreSQL、PTY、Shell 与本机集成       | 本地链路可运行   |
+| L3   | 真实 Human Console + 真实 MCP Agent 协作路径 | MVP 用户场景可用 |
+| L4   | 故障注入、跨平台、压力、安全与持续 dogfood   | 发布候选         |
+
+MVP 至少达到 L3；v1.0 必须达到 L4。
+
+---
+
+## 2. 产品目标、用户与非目标
+
+### 2.1 核心问题
+
+项目不以“让 Agent 可以执行 Shell Command”为终点，而要回答：
+
+> Human 与 Agent 如何可靠地共同操作一个持续变化、有隐式状态、可能运行交互程序的真实终端环境？
+
+核心价值：
+
+1. Human、Agent、Scheduler、System 都是一等 Actor，不存在永久 owner/takeover/release 状态。
+2. 同一 Session 的所有 Actor 看到并改变同一个真实 cwd、env、Shell 与 foreground process。
+3. Actor 不直接绕过 Runtime 写 PTY；每次操作都形成结构化 Action、状态与事件。
+4. Action 被接受不等于执行成功；Runtime 明确区分 accepted、delivered、running、completed、failed 与 unknown。
+5. Human 获得高带宽实时终端；Agent 获得有界、可寻址、可做新鲜度校验的 Observation。
+6. 无法证明副作用结果时进入 `UNKNOWN`，不以自动重试制造二次副作用。
+
+### 2.2 首批目标用户
+
+- 希望与 Coding Agent 操作同一个真实终端上下文的本地开发者。
+- 需要在 Agent 卡在密码、REPL、TUI 或长任务时直接协助的 Human Operator。
+- 需要 Action attribution、持久事件、按需日志与失败解释的 Agent Harness 开发者。
+- 后续希望接入 Scheduler 或 remote executor，但不希望把终端语义散落在各 transport 中的平台团队。
+
+### 2.3 MVP 成功场景
+
+- Agent 执行 `cd packages/web`，Human 随后执行 `pwd`，得到同一共享 cwd。
+- Human 执行 `export DEBUG=1`，Agent 随后执行 `echo $DEBUG`，得到 `1`。
+- Human 与 Agent 同时 Execute，只有一个 CAS 成功，另一个立刻获得包含当前 execution 的 `PTY_BUSY`。
+- Human 启动 `psql`，Agent 通过 InputAction 操作同一连接；输入归属与顺序可审计。
+- Agent 基于旧 execution/screen 发送输入时获得 `EXECUTION_CHANGED` 或 `SCREEN_CHANGED`，不误写新程序。
+- 10 万行 PTY 输出不会无界进入 Agent 上下文；Agent 可按 execution、sequence、time、keyword 查询。
+- Worker 在写入 `npm publish` 后崩溃时，Execution 进入 `UNKNOWN`，不自动再次写入。
+- Human Console 与 MCP Client 断线重连后，可从 durable cursor 恢复已持久化事实，并明确标示 live gap。
+
+### 2.4 MVP 明确不做
+
+- 通用 SSH/远程运维、多主机广播、文件传输、端口转发。
+- Docker/Kubernetes 编排、多区域、PTY/进程跨 Worker 或跨主机迁移。
+- Redis、Kafka、Embedding/Semantic Search、CRDT。
+- Exactly-once shell/input delivery 承诺。
+- 完整 PTY clone、REPL memory clone 或任意 Shell 状态序列化。
+- 自动理解 psql/python/vim 的业务协议；只提供 screen/state heuristic。
+- 依靠 prompt 字符串或“输出安静了”判断命令完成。
+- 把命令规则/审批称为 OS sandbox。
+- Windows 原生 ConPTY 首发支持；MVP 先支持 macOS 与 Linux。
+
+---
+
+## 3. 竞品借鉴与差异化
+
+> 竞品能力来自 2026-08-28 的官方 README/文档快照；实现阶段应刷新。
+
+| 项目                                                                | 借鉴                                                                  | iTerminal 的明确差异                                                                      |
+| ------------------------------------------------------------------- | --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| [fzxbl/terminal-mcp](https://github.com/fzxbl/terminal-mcp)         | 真实 PTY、Shell boundary、Human 可见、按需探索大输出、审计回放        | 不以 Agent 驾驶/Human takeover 为主模型；所有 Actor 经统一 Action Runtime 协作            |
+| [kessler-frost/imprint](https://github.com/kessler-frost/imprint)   | shared terminal、screen text、wait stable、真实 TUI E2E、像素观察思路 | 核心不依赖 tmux/浏览器截图；先建立 Action/Event/Execution 与 VT Screen 领域语义           |
+| [Zw-awa/ssh-session-mcp](https://github.com/zw-awa/ssh-session-mcp) | Actor 标记、input policy、危险状态写入保护、自动清理                  | 本地 Persistent Shell 状态共享优先，不是 SSH wrapper；忙时 fail-fast + fork，而非无限队列 |
+| [tddh/clum](https://github.com/tddh/clum)                           | 审计链、terminal state、凭据隔离、远程 owner/bridge 思路              | 不做远程运维大工具面；v1 聚焦单 Workspace 的共享终端正确性                                |
+
+差异化验收：
+
+- [ ] 同 Session 共享真实 Shell Context 达到 L3。
+- [ ] Action attribution + target execution + screen freshness 达到 L3。
+- [ ] `PTY_BUSY -> wait/input/control/fork` 的结构化冲突恢复达到 L3。
+- [ ] Persistent Shell crash/owner loss 不伪装为可恢复 Session。
+- [ ] Agent 大输出按需寻址，不依赖对全量日志做 LLM summary。
+
+如果以上五项少于四项通过 L3，应重新评估定位，而不是继续堆远程/编排功能。
+
+---
+
+## 4. 不可破坏的领域契约
+
+### 4.1 Session-centric
+
+```text
+Session generation N
+  └── ONE Persistent PTY
+       └── ONE Persistent Shell
+            └── ZERO or ONE Foreground Execution
+```
+
+- 一个 Session generation 只有一个真实 PTY、一个 Shell、一个有效 Executor owner。
+- 同一 Session 的 Actor 共享 Shell state；需要隔离或并行时创建新的 Session。
+- `fork_session` 创建新 Session/generation，不是复制旧 PTY。
+- Persistent Shell/PTY 丢失后，旧 generation 永远不会“复活”；恢复会创建新 generation 并保留 lineage。
+
+### 4.2 Actor 对等
+
+Actor 类型：`human | agent | scheduler | system`。Actor 身份影响审计、capability、approval、优先级与输入策略，但不形成全局 `current_owner`。
+
+每个写 Action 必须记录：
+
+- actor identity/type；
+- authenticated principal/client；
+- session/generation；
+- idempotency key 与 request hash；
+- accepted/rejected policy result；
+- target execution/screen precondition（如适用）。
+
+### 4.3 Communication 与 Execution 分离
+
+API/MCP/WS 成功只表示 Action 已接受或已拒绝，不能把 transport response 当成 foreground program result。
+
+```text
+Human Console ─┐
+               ├─> Action Service -> PostgreSQL -> Session Executor -> PTY
+Agent MCP ─────┘                         |
+                                          -> Event/Screen Projection
+```
+
+所有 transport 调用同一 Application Service；WebSocket、MCP、HTTP 不得直接持有 PTY 写权限。
+
+### 4.4 Live truth 与 durable truth
+
+- PTY/Shell 是当前 live process state 的事实源。
+- PostgreSQL 是已接受 Action、观察到的 Execution/Event、Snapshot、Approval 与 ownership 的 durable truth。
+- Snapshot 是带 `observed_at`、generation、confidence 的 cache，不等同于 Shell 本身。
+- Runtime 只能陈述它观察到的事实；没有 marker/exit/owner 证据时必须用 `UNKNOWN/BROKEN`。
+
+---
+
+## 5. Action、Execution 与 Session 状态模型
+
+### 5.1 三类核心 Action
+
+```text
+SessionAction = ExecuteAction | InputAction | ControlAction
+```
+
+#### ExecuteAction
+
+语义：请求当前 Persistent Shell 执行一段新的顶层 Shell input。
+
+最小字段：
+
+- `action_id`, `session_id`, `session_generation`
+- `actor_id`, `actor_type`
+- `command`（显式 Shell grammar，不伪装为 argv exec）
+- `idempotency_key`, `request_hash`
+- `status`
+- `execution_id`
+- accepted/started/finished time、exit code、event range
+
+状态：
+
+```text
+ACCEPTED -> DISPATCHING -> RUNNING -> COMPLETED
+                          |          -> FAILED
+                          |          -> INTERRUPTED
+                          -> UNKNOWN
+ACCEPTED -> CANCELLED（尚未写 PTY 前）
+```
+
+`COMPLETED` 表示 Shell Integration 观察到 command end；exit code 可以非零。`FAILED` 表示 Runtime/Shell integration failure，而不是简单等同于非零 exit code。
+
+#### InputAction
+
+语义：向当前 foreground execution 写入一个不可拆分的 input batch。
+
+必须字段：
+
+- `target_execution_id`
+- `session_generation`
+- `data` 或结构化 key batch
+- 可选 `expected_screen_version`
+- `idempotency_key`, `request_hash`
+
+状态：
+
+```text
+ACCEPTED -> DELIVERED
+         -> REJECTED
+         -> UNKNOWN
+```
+
+`DELIVERED` 只表示 Runtime 成功调用 PTY write；不表示 foreground application 已理解、接受或完成该输入。
+
+#### ControlAction
+
+语义：显式选择 TTY control bytes 或 process-group signal。
+
+```text
+TTY_CONTROL: CTRL_C | CTRL_D | CTRL_Z | ESC
+PROCESS_SIGNAL: SIGINT | SIGTERM | SIGKILL | SIGTSTP | SIGCONT
+```
+
+- TTY control 写入 PTY input；process signal 调用 `killpg`/平台等价能力。
+- `CTRL_D` 只有在终端 line discipline/foreground program 的具体状态下才可能表达 EOF，Runtime 不把“已写 Ctrl+D”误报成“程序已收到 EOF”。
+- 两条路径可能产生不同程序行为，事件必须记录 delivery mode。
+- `SIGKILL` 仅限授权的强制终止流程，不作为普通 Agent 工具默认选项。
+
+### 5.2 Action 与 Execution
+
+- Action 是 Actor 的不可变请求与审计单元。
+- Execution 是 ExecuteAction 被 Session Executor 实际写入并由 Shell Integration 跟踪的一次运行事实。
+- MVP 中一个 ExecuteAction 最多对应一个 Execution；任何人工 retry 都创建新 Action，并用 `retry_of_action_id` 建 lineage。
+- 相同 idempotency key + 相同 request hash 返回原 Action；相同 key + 不同 hash 返回 `IDEMPOTENCY_KEY_REUSED`。
+- 对写入是否发生不确定的 Action，禁止在同一 Action 下重发 command/input。
+
+### 5.3 Session 状态机
+
+```text
+STARTING -> READY -> RESERVED -> RUNNING -> READY
+    |        |          |          |
+    |        |          |          -> BROKEN
+    |        |          -> READY（确定未写 PTY）
+    |        -> CLOSED
+    -> BROKEN -> CLOSED / REBUILD_AS_NEW_GENERATION
+```
+
+- `STARTING`：PTY/Shell 创建中，Shell Integration 尚未证明 ready。
+- `READY`：可以 CAS 接受一个 ExecuteAction。
+- `RESERVED`：Action 已持久接受，尚未证明 command 已开始。
+- `RUNNING`：已观察到 active Execution；ExecuteAction 不区分 batch/long-running/interactive。
+- `BROKEN`：Shell/PTY/owner/control protocol 已丢失或结果不可信。
+- `CLOSED`：显式终态。
+
+### 5.4 Execute 并发与 Busy
+
+同一 Session 同时最多一个 active ExecuteAction。接受 Execute 的事务必须对 Session 做 CAS：
+
+```text
+READY -> RESERVED
+```
+
+竞争失败立即返回：
+
+```json
+{
+  "code": "PTY_BUSY",
+  "active_execution_id": "exec_101",
+  "available_actions": ["wait", "send_input", "control", "fork_session"]
+}
+```
+
+- MVP 不提供 Session 内无限 Execute Queue。
+- Client 可以 wait、与当前 Execution 交互、Control/Interrupt，或 fork 新 Session。
+- `PTY_BUSY` 请求默认不创建 ExecuteAction；可写入轻量 rejected audit event，避免 Action 表被轮询污染。
+
+### 5.5 Input 并发与 Interaction Guard
+
+Runtime 为所有 accepted Action 分配 Session Action Sequence。每个 InputAction payload 以一次不可拆分 write 提交，但这只保证字节不交织。
+
+进一步规则：
+
+- `target_execution_id` 必须等于当前 active execution，否则 `EXECUTION_CHANGED`。
+- Input/Control 默认只允许命中 `RUNNING` Session 的 active execution；READY 状态必须提交 ExecuteAction。
+- Agent 配置要求 fresh screen 时必须携带 `expected_screen_version`，不相等返回 `SCREEN_CHANGED`。
+- 默认 `human_guarded`：Human 正在形成 raw interaction batch 的短窗口内，Agent input 暂缓或返回 `INPUT_GUARDED`。
+- 支持 `common | human_guarded | human_only | agent_only`，策略变化形成事件；不把策略称为 Session ownership。
+- Guard 必须有 actor、reason、TTL、续租上限；Human emergency ControlAction 可按权限绕过。
+- Human 在 `READY` 使用独立 command composer，Enter 后提交 ExecuteAction；在 `RUNNING` 才发送 Input/Control，避免绕过 Execute 仲裁。
+
+### 5.6 Stale protection
+
+任何写 PTY 的请求至少校验：
+
+```text
+session_id
+session_generation
+target_execution_id（Input/Control）
+expected_screen_version（需要 fresh screen 时）
+```
+
+错误码：`SESSION_GENERATION_CHANGED | EXECUTION_CHANGED | SCREEN_CHANGED`。Human 默认可不带 screen precondition，但仍必须命中当前 generation/execution。
+
+---
+
+## 6. Persistent Shell 与 Shell Integration
+
+### 6.1 基本原则
+
+- 每条 ExecuteAction 不得用新的 `spawn(command)` 或 subshell 隔离，否则 `cd/export/source/nvm/conda` 状态会丢失。
+- ExecuteAction 必须在 Session 的真实顶层 Shell 中执行。
+- 不使用 prompt 字符串、静默时间或 stdout 结束猜测 command completion。
+- 首发 Shell：bash + zsh；fish/PowerShell 延后并需要独立 adapter/ADR。
+- 后台化命令（`&`、`nohup`、daemonize）MVP 不保证生命周期追踪；UI/文档明确建议使用新 Session，而不是把后台进程藏在同一 Shell。
+
+### 6.2 Integration 必须观察的事实
+
+- Shell ready。
+- Action/Execution start。
+- Command end 与 exit code。
+- 当前 cwd。
+- Shell pid、foreground process group/pid（平台允许时）。
+- Session generation 与 integration protocol version。
+
+### 6.3 Control protocol 方案门
+
+M0 必须对两种方案做 spike 并形成 ADR：
+
+1. **独立 control FD/channel（优先）**：Shell hooks 向 Runtime 专用 channel 写 framed messages；PTY 只承载用户可见 bytes。控制 FD 应 close-on-exec，避免普通 child process 继承；Shell builtin hook 仍可写入。
+2. **Authenticated OSC/DCS fallback**：marker 带不可预测 session nonce、length framing、严格 parser；从 Human rendering stream 中剥离。
+
+验收要求：
+
+- [ ] 普通 command 输出仿造 marker 不会结束别的 Execution。
+- [ ] command 输出被任意 chunk boundary 切割仍可正确解析。
+- [ ] 多行 command、empty command、syntax error、nonzero exit、Ctrl+C 都能闭合状态机。
+- [ ] `cd/export/source` 在真实 Shell 中持久生效。
+- [ ] `ssh/su/docker exec` 等 shell switch 在 MVP 可以明确标记 unsupported/broken，不得静默误判。
+- [ ] Shell rc/theme/prompt 不影响 boundary；Runtime hook 在用户 rc 后重新安装并校验。
+
+### 6.4 Shell 启动策略
+
+- 提供 Runtime-managed clean profile，保证 integration 可预测。
+- 可选 source 用户 shell rc，但必须在之后重新安装 hook；用户 rc 被视为同用户权限代码，不是安全隔离对象。
+- 记录 shell executable、version、argv、integration version；不持久化敏感 env 原文。
+- Shell Integration 自检失败时 Session 停在 `STARTING/BROKEN`，不得返回 READY。
+
+### 6.5 Checkpoint
+
+每次 `SHELL_READY` 后可以生成 best-effort checkpoint：
+
+- cwd realpath；
+- shell executable/type；
+- workspace root；
+- 经过 allowlist/denylist 与 secret policy 的 exported env；
+- checkpoint version、source generation、observed time。
+
+Checkpoint 不包含 alias、function、trap、job table、REPL memory、file descriptor 或进程树。它只服务 fork/rebuild，不能宣称完整 Shell snapshot。
+
+---
+
+## 7. Observation、Event 与 Virtual Screen
+
+### 7.1 两种 Observation
+
+- `SessionEvent`：append-only 历史，回答“发生了什么”。
+- `VirtualScreen`：PTY bytes 投影出的 materialized view，回答“现在看起来是什么”。
+
+Human 默认消费实时 PTY bytes +结构化 Action/Event metadata；Agent 默认 pull bounded events/screen，不订阅无界 stream。
+
+### 7.2 Event 最小集合
+
+- Session：created、shell_starting、shell_ready、broken、rebuild_started、closed。
+- Action：accepted、rejected、dispatching、cancelled。
+- Execution：started、completed、failed、interrupted、unknown。
+- Interaction：input_delivered/rejected/unknown、control_delivered/rejected、guard_changed。
+- Terminal：`pty_output`、screen_changed、cwd_observed、foreground_observed、resize_applied。
+- Reliability：owner_acquired/lost、outbox_published、delivery_ambiguous。
+- Security：policy_denied、approval_requested/granted/expired、secret_input_completed/cancelled。
+
+PTY output 以 4–16 KiB 或 50–100 ms 聚合为 chunk；具体阈值通过 benchmark 决定。Event payload 默认不存 secret 原文，大内容只保存 artifact ref/metadata。
+
+### 7.3 Event 序号
+
+- `action_sequence`：Session 内 accepted Action 的单调序号。
+- `event_sequence`：Session generation 内持久事件的单调序号。
+- API cursor 必须携带 scope/generation，禁止把旧 generation cursor 当成新 live stream cursor。
+- Live buffer 丢失时返回 `RESYNC_REQUIRED`，从 durable event + screen snapshot 恢复；不得静默跳过。
+
+### 7.4 Virtual Screen
+
+```text
+PTY bytes -> ANSI/VT parser -> versioned screen buffer -> full/diff/region/search
+```
+
+最小字段：generation、screen version、rows/cols、cursor、alternate buffer、content、observed time。
+
+- Agent 读取 normalized screen text，不直接消费大坨 ANSI。
+- Human xterm.js 与 headless parser 必须用同一 canonical geometry 做 fixture 对照。
+- TerminalState 如 `shell_ready | running | editor | pager | password | confirm | repl | unknown` 必须带 confidence/evidence，只作为辅助观察，不作为唯一安全依据。
+- Pixel screenshot/diff 是 v1.x 扩展，用于颜色、布局、对比度等 text screen 无法判断的 TUI QA。
+
+### 7.5 有界 Agent Observation
+
+- execution metadata 默认只返回 status、exit code、event range、byte count、tail preview/ref。
+- query 支持 after/before sequence、time、execution、type、limit。
+- search 首版使用 PostgreSQL trigram/FTS，不引入 Embedding。
+- 所有结果有服务端 hard limit、truncated 标记、next cursor/ref。
+- 10 万行 fixture 下，Agent 必须只靠 query/search 找到稀疏错误，不读取全量。
+
+---
+
+## 8. fork_session 的准确语义
+
+`fork_session(parent)` 创建一个新的、独立的 Session 与 Persistent PTY；准确语义是 fork/rebuild shell context，不是 clone process state。
+
+继承：
+
+- workspace root；
+- 最近有效 checkpoint 的 cwd；
+- shell type/config profile；
+- policy 允许的 exported env；
+- parent session/generation/checkpoint lineage。
+
+不继承：
+
+- active/foreground/background process；
+- Python/Node/psql REPL memory/transaction；
+- vim unsaved buffer；
+- socket、file descriptor、job control；
+- alias/function/trap 等未纳入 checkpoint 的隐式状态。
+
+规则：
+
+- [ ] parent `READY` 时优先生成 fresh checkpoint 后 fork。
+- [ ] parent `RUNNING/BROKEN` 时只能使用最近一次有效 checkpoint，并在结果中返回 staleness。
+- [ ] checkpoint 缺失或 cwd 不存在时返回结构化错误，不默默 fallback 到 workspace root。
+- [ ] fork 创建事件、lineage 与新 generation；失败不修改 parent。
+- [ ] 同一 workspace 的文件系统仍然共享；fork 不是 git checkout/worktree 隔离。
+
+---
+
+## 9. 持久化模型
+
+### 9.1 核心表
+
+- [ ] `sessions`：status、current generation、workspace root、shell profile、active execution、next action sequence。
+- [ ] `session_generations`：owner、PTY/Shell metadata、integration version、started/broken/closed reason。
+- [ ] `actors` / `session_actors`：identity、type、capability、display metadata。
+- [ ] `actions`：kind、immutable payload、actor、sequence、idempotency key、request hash、status、lineage。
+- [ ] `executions`：execute action、generation、owner/fencing、write/start/end state、exit/outcome/unknown reason。
+- [ ] `session_events`：generation、event sequence、action/execution/actor、type、payload/ref、created time。
+- [ ] `session_snapshots`：cwd、foreground observation、last exit、screen version、confidence、observed time。
+- [ ] `shell_checkpoints`：filtered reconstructable context、source generation、staleness/hash。
+- [ ] `screen_snapshots`：geometry/cursor/content or artifact ref、screen version。
+- [ ] `interaction_guards`：mode、actor、TTL、reason、version。
+- [ ] `approvals`：exact action hash、actor/approver、expiry、one-time use。
+- [ ] `outbox`：待发布 ExecutionReady/Event。
+- [ ] `artifacts`：大输出、录制、导出文件 metadata/hash/size/retention。
+- [ ] `worker_registry` / `session_leases`：M9 才引入。
+
+### 9.2 关键约束
+
+- [ ] `UNIQUE(session_id, action_sequence)`。
+- [ ] `UNIQUE(session_id, actor_id, idempotency_key)`。
+- [ ] `UNIQUE(session_id, generation)`。
+- [ ] `UNIQUE(session_id, generation, event_sequence)`。
+- [ ] 同 idempotency key 不同 request hash 返回 `IDEMPOTENCY_KEY_REUSED`。
+- [ ] `sessions.status = RUNNING` 时 active execution 必须属于 current generation。
+- [ ] Session CAS Reservation、Action、Execution、accepted event、Outbox 同事务创建。
+- [ ] 所有 Execution 状态更新使用 expected version；多 Worker 阶段额外校验 fencing token。
+
+### 9.3 Reservation 事务
+
+```text
+BEGIN
+1. authenticate actor + evaluate capability/policy
+2. validate session/generation is READY
+3. check idempotency key + request hash
+4. CAS session READY -> RESERVED and bind execution_id
+5. allocate action sequence
+6. insert Action + Execution + accepted Event + Outbox
+COMMIT
+```
+
+CAS 失败返回 `PTY_BUSY`；API 不做内存级“先检查再写”。
+
+---
+
+## 10. 建议系统架构与进程演进
+
+```text
+Human Console                       Agent / Scheduler
+  HTTP + WS                         MCP stdio / HTTP
+       \                               /
+        +------ API / Action Service -+
+                     |
+                 PostgreSQL
+             Action/Event/Outbox
+                     |
+                Session Router
+                     |
+           Session Executor owner
+              PTY + Shell hooks
+                /           \
+        Event Ingestor   VT Projector
+```
+
+进程演进：
+
+1. M0–M7：模块化单体；API、Application、Executor 同进程，PostgreSQL 持久化。
+2. M8：拆 Outbox Publisher/Worker，引入 RabbitMQ；消息只唤醒当前 Session owner。
+3. M9：多 Worker，Session 固定到唯一 owner；router 将 Action 投递到 owner。
+4. Owner 丢失：generation BROKEN；新 owner 只能从 checkpoint 创建新 generation，不能接管旧 PTY。
+
+RabbitMQ 不负责 Action ordering，也不表达 exactly-once。`ExecutionReady` 是 wake-up；Worker 仍读取 PostgreSQL 状态并校验 generation/owner。
+
+多 Worker 必须先解决路由再谈 Lease：
+
+- 方案 A：owner-specific queue/consumer routing。
+- 方案 B：central router RPC 到 owner Worker。
+- 方案 C：每个 Session Executor 是独立 supervisor process，Worker 只与 supervisor 通信。
+
+M9 spike/ADR 选型；不能让任意 Worker 消费后新建第二个“同 Session”PTY。
+
+---
+
+## 11. Protocol 草案
+
+### 11.1 MCP 第一版工具
+
+Session：
+
+- `terminal_create_session`
+- `terminal_get_session`
+- `terminal_close_session`
+- `terminal_fork_session`
+
+Action/Execution：
+
+- `terminal_execute`
+- `terminal_get_execution`
+- `terminal_wait_execution`
+- `terminal_send_input`
+- `terminal_send_control`
+
+Observation：
+
+- `terminal_get_screen`
+- `terminal_get_event`
+- `terminal_query_events`
+- `terminal_search_events`
+
+工具按能力分阶段注册：M4 提供 Session（不含 fork）、Execute、Input、Control 与 Event；M6 增加 Screen/interactive wait；M7 增加 Fork。未实现的能力不注册空壳工具。
+
+约束：
+
+- [ ] 所有 write tool 接受 idempotency key；Input/Control 接受 generation + target execution。
+- [ ] Agent fresh-screen 策略开启时，Input 要求 expected screen version。
+- [ ] Tool description 清楚解释 Execute/Input/Control 的选择边界。
+- [ ] `PTY_BUSY` 返回当前 execution 与 allowed next actions，不只返回字符串。
+- [ ] MCP stdio stdout 只能有合法 JSON-RPC，诊断写 stderr。
+- [ ] MCP adapter 不复制 Application 逻辑；新 MCP Tasks 能力只做 adapter，不替换 Action/Execution 模型。
+
+### 11.2 HTTP / WebSocket
+
+建议资源：
+
+- `/api/sessions`
+- `/api/sessions/:sessionId/fork`
+- `/api/sessions/:sessionId/actions`
+- `/api/executions/:executionId`
+- `/api/executions/:executionId/input`
+- `/api/executions/:executionId/control`
+- `/api/executions/:executionId/screen`
+- `/api/sessions/:sessionId/events`
+- `/api/approvals/:approvalId`
+
+WebSocket 只承载 live event/screen/action transport，不是真相源。重连携带 generation + last durable event cursor；server 可返回 event batch、screen snapshot/diff、guard/policy、backpressure、resync required。
+
+### 11.3 稳定错误码
+
+- `SESSION_NOT_FOUND`
+- `SESSION_NOT_READY`
+- `SESSION_BROKEN`
+- `SESSION_GENERATION_CHANGED`
+- `PTY_BUSY`
+- `EXECUTION_CHANGED`
+- `SCREEN_CHANGED`
+- `INPUT_GUARDED`
+- `IDEMPOTENCY_KEY_REUSED`
+- `POLICY_DENIED`
+- `APPROVAL_REQUIRED`
+- `OUTPUT_TRUNCATED`
+- `DELIVERY_UNKNOWN`
+- `CHECKPOINT_UNAVAILABLE`
+- `RESYNC_REQUIRED`
+
+错误响应统一带 request ID、domain IDs、current state、retryability 与 allowed next actions。
+
+---
+
+## 12. Human Console 交互模型
+
+### 12.1 READY 模式
+
+- xterm 显示 Shell output/prompt，但键盘焦点默认进入独立 command composer。
+- Human 本地编辑完整 command，Enter 后提交 ExecuteAction。
+- 不把每个 keydown 直接写入 READY Shell，避免绕过 Reservation/Action attribution。
+- 支持历史、取消草稿、明确 actor label；autocomplete 属于后续功能。
+
+### 12.2 RUNNING 模式
+
+- 当前是 REPL/TUI/long-running process 时，Human 可进入 interactive focus。
+- 文本尽量以 batch 发送；raw keys 在 10–30 ms 小窗口聚合，具体阈值实测。
+- UI 显示 active execution、generation、screen freshness、input policy、当前 guard。
+- Ctrl+C UI 必须让用户选择/明确映射 TTY control 或 process signal；默认采用终端语义并记录。
+
+### 12.3 Console 第一版功能
+
+- [ ] 创建/关闭/重建/fork Session。
+- [ ] 实时 Terminal + current execution + Session status。
+- [ ] command composer、Input、Control、wait、PTY_BUSY 操作建议。
+- [ ] Human/Agent/System Action 标签与 Timeline。
+- [ ] event cursor 重连、screen resync、live gap 提示。
+- [ ] 预留 Approval/secret prompt 状态展示；完整交互与脱敏在 M10 实现。
+- [ ] canonical terminal geometry，避免多个 viewer resize 抖动。
+- [ ] 键盘可达、焦点清晰、状态不只依赖颜色。
+
+---
+
+## 13. 安全、隐私与资源边界
+
+### 13.1 MVP 威胁模型
+
+MVP 假设单机受信用户；Agent 可能犯错或受提示注入影响，但 Runtime/宿主用户未被攻陷。Shell rc 与 Shell 中运行的代码拥有宿主用户权限，策略层不是 sandbox。
+
+### 13.2 必做项
+
+- [ ] HTTP/MCP 默认仅监听 loopback；拒绝无显式配置的 `0.0.0.0`。
+- [ ] 校验 Origin/Host/WebSocket upgrade；短期 token 不放 URL query。
+- [ ] workspace root 与 fork cwd 使用 realpath/containment 校验。
+- [ ] 明确声明：workspace containment 不阻止 Shell command 访问 root 外路径。
+- [ ] 不继承完整宿主 env；Runtime env、Shell env、checkpoint env 分开定义。
+- [ ] Secret 不进入 Action payload、Event、Snapshot、Checkpoint、MCP result、普通 log/recording。
+- [ ] Human-only secret channel 直接写 PTY，只记录完成/取消 metadata；敏感期间暂停/脱敏 screen/event recording。
+- [ ] Approval 绑定 immutable Action request hash + session generation + actor + expiry；任何变化使批准失效。
+- [ ] PTY/Shell 独立 process group/session；close/timeout 使用可配置 Control -> SIGTERM -> SIGKILL，并验证子进程回收。
+- [ ] 限制 Session、event bytes、artifact bytes、单次返回、WS backlog、screen geometry、Action rate。
+- [ ] Shell marker parser 抵抗注入、oversize frame、partial frame 与 nonce replay。
+- [ ] CI 做 secret scan、dependency audit、SBOM 与 release provenance。
+
+### 13.3 Remote/硬隔离后续边界
+
+- Remote Executor 必须使用独立身份/Bridge，不把 SSH key 直接暴露给 MCP Client/Agent。
+- Linux isolation 可评估 namespace/cgroup/seccomp/container provider；不把 macOS `sandbox-exec` 当长期通用方案。
+- 对外开放 Streamable HTTP MCP 前，按当时稳定 MCP Authorization 规范实现并独立安全评审。
+
+---
+
+## 14. 技术栈与仓库结构
+
+### 14.1 技术栈基线
+
+- TypeScript + 实现时受支持的 Node.js LTS。
+- pnpm workspace；首版不引入 Nx/Turborepo。
+- Fastify + WebSocket + JSON Schema/TypeBox 或 Zod。
+- PostgreSQL；关键 CAS/locking SQL 显式可审阅。
+- `node-pty`；Virtual Screen 先评估 `@xterm/headless`，通过 adapter 隔离。
+- React + xterm.js Human Console。
+- 官方 MCP TypeScript SDK；M4 先 stdio，后续 Streamable HTTP。
+- RabbitMQ 仅 M8 引入。
+- Vitest + Testcontainers + Playwright +真实 Shell/TUI fixtures。
+- 结构化 JSON log + OpenTelemetry 接口；本地默认不上传 telemetry。
+
+### 14.2 建议结构
+
+```text
+apps/
+  api/
+  worker/
+  mcp/
+  web/
+  cli/
+packages/
+  domain/
+    session/
+    action/
+    execution/
+    event/
+  application/
+    create-session/
+    execute/
+    send-input/
+    send-control/
+    query-events/
+    fork-session/
+  protocol/
+  persistence/
+  executor-pty/
+  shell-integration/
+  terminal-screen/
+  policy/
+  observability/
+  testkit/
+docs/
+  adr/
+  architecture/
+  protocol/
+  threat-model/
+  verification/
+infra/
+  compose/
+```
+
+依赖方向：`domain <- application <- adapters/apps`。任何 transport 都不能直接写 PTY 或更新 Session 状态。
+
+---
+
+## 15. Development Roadmap
+
+### M0 — 契约冻结与 Shell Integration Feasibility Spike（目标：L2 spike）
+
+- [x] 新增 README/AGENTS/术语表/验证模板。
+- [x] ADR-001：Session-centric shared Shell 与 generation。
+- [x] ADR-002：Action/Execution/Session 状态机与 Busy fail-fast。
+- [x] ADR-003：Shell Integration control channel 与 marker trust boundary。
+- [x] ADR-004：PTY merged output、Event 与 Virtual Screen。
+- [x] ADR-005：Input Guard、target execution、screen freshness。
+- [x] ADR-006：Checkpoint/fork 的可复制与不可复制状态。
+- [x] 建立最小 pnpm workspace、format/lint/typecheck/unit/build 脚本，足以运行和丢弃 spike。
+- [x] 最小 node-pty bash/zsh spike：同一 Shell 连续执行 `cd/export/pwd/echo`。
+- [x] 对比独立 control FD 与 authenticated OSC/DCS；保存兼容矩阵。
+- [x] 验证 multiline/syntax error/nonzero/Ctrl+C/large output/marker spoof。
+- [x] Spike 可以丢弃，不能在未评审时直接演化成生产 Runtime。
+
+Exit Gate：真实 bash/zsh 下可靠观察 start/end/exit/cwd；`cd/export` 持久共享；marker spoof/partial frame 测试有明确结果。核心假设失败则先调整架构，不开始 M1。
+
+### M1 — 单进程 Persistent PTY Core + CLI（目标：L2）
+
+- [ ] 补齐 CI matrix、domain package、协议 fixture 与验证报告门禁。
+- [ ] Session create/close，generation，单 Executor owner。
+- [ ] Execute/Input/Control Application Service 与内存 repository。
+- [ ] READY/RESERVED/RUNNING/BROKEN/CLOSED 状态机。
+- [ ] Session CAS/mutex Reservation；同一 Session 单 active Execute。
+- [ ] Shell Integration production adapter（bash/zsh）。
+- [ ] PTY output bounded ring buffer；process group/control/cleanup。
+- [ ] CLI 创建 Session、Execute、Input、Control、status、events。
+- [ ] Human/Agent fake client 同时操作同一 Session。
+
+验收：
+
+- [ ] Agent `cd packages/web` 后 Human `pwd` 得到共享 cwd。
+- [ ] Human `export DEBUG=1` 后 Agent `echo $DEBUG` 得到 `1`。
+- [ ] `pnpm dev` RUNNING 时另一个 Execute 返回 PTY_BUSY。
+- [ ] Python/psql fixture 中两个 Actor 的 InputAction 命中同一 Execution。
+- [ ] stale target execution 被拒绝；Ctrl+C 后 Shell 回到 READY。
+
+Exit Gate：L2 核心链路通过；仍不声明 durability、MCP 或 Web 已完成。
+
+### M2 — PostgreSQL Domain Persistence 与 Reservation（目标：L2）
+
+- [ ] migrations：Session/Generation/Actor/Action/Execution/Event/Snapshot/Checkpoint/Outbox。
+- [ ] Action idempotency + request hash conflict。
+- [ ] Session READY -> RESERVED CAS 事务。
+- [ ] accepted Action/Execution/Event/Outbox 同事务。
+- [ ] Event sequence 分配与 chunk persistence。
+- [ ] Runtime restart 将失联 live generation 标记 BROKEN；模糊 Execution 标 UNKNOWN。
+- [ ] Snapshot/checkpoint best-effort 更新，不覆盖历史事实。
+- [ ] retention/quota 最小实现。
+
+验收：
+
+- [ ] 100 个并发 Execute 只有一个 Reservation 成功，其余 PTY_BUSY。
+- [ ] 相同 idempotency key/hash 返回原 Action，不同 hash 冲突。
+- [ ] DB commit 前失败不留下半个 Action；commit 后 crash 可发现 RESERVED/UNKNOWN。
+- [ ] Runtime 重启不伪造旧 PTY 恢复。
+
+### M3 — Bounded Event Observation（目标：L2）
+
+- [ ] get execution/event、query by sequence/time/execution/type。
+- [ ] keyword search（trigram/FTS）与有界上下文。
+- [ ] output chunk/artifact 阈值、byte count、tail preview/ref。
+- [ ] cursor scope/generation、truncated/next cursor、RESYNC_REQUIRED。
+- [ ] 结构化 timeline attribution。
+- [ ] 10 万行与慢消费者 benchmark。
+
+Exit Gate：Agent 测试程序只靠 metadata/query/search 定位稀疏 FAIL，不读取全量；内存不随总输出无界增长。
+
+### M4 — MCP Adapter（目标：L3 Agent 路径）
+
+- [ ] stdio MCP server，stdout 零污染。
+- [ ] Session/Execute/Input/Control/Event 工具 schema；Fork 与 Screen 按后续里程碑注册。
+- [ ] Tool descriptions 明确 Action 选择与 PTY_BUSY next actions。
+- [ ] idempotency、generation、target execution precondition 透传。
+- [ ] 真实 Codex/Claude/OpenCode 中至少两个 Client 兼容验证。
+- [ ] MCP Client 重启后凭 Action/Execution/Event cursor 恢复观察。
+
+Exit Gate：真实 MCP Agent 完成 create -> shared state -> execute -> busy/wait/input/control -> observe；协议结果与 CLI 一致。
+
+### M5 — Human Console（目标：L3 shared path）
+
+- [ ] React/xterm.js、HTTP/WS、Session 页面。
+- [ ] READY command composer 与 RUNNING interactive focus 分离。
+- [ ] current execution、Action actor label、Timeline、PTY_BUSY UI。
+- [ ] Input/Control 与基础 actor/policy 状态 UI；Guard、Approval、secret 按后续里程碑增强。
+- [ ] durable event cursor reconnect 与 live gap 提示。
+- [ ] canonical geometry、多 viewer、基本可访问性。
+
+Exit Gate：真实 Human +真实 MCP Agent 共享 cwd/env/REPL；所有 Action 经 Application Service，有事件归属，无旁路 PTY write。
+
+### M6 — Virtual Screen 与交互并发安全（目标：L3 MVP）
+
+- [ ] ANSI/VT parser、alternate screen、Unicode/wide chars、resize。
+- [ ] screen full/diff/region/search/version。
+- [ ] terminal get screen/wait for text/version/stable/exit。
+- [ ] 注册 MCP Screen/interactive wait 工具，并为 Human Console 增加 screen resync。
+- [ ] expected screen version 与 SCREEN_CHANGED。
+- [ ] common/human_guarded/human_only/agent_only 与短期 Guard。
+- [ ] TerminalState heuristic + confidence/evidence。
+- [ ] shell/REPL/vim/nano/top/pager/confirm/password-like fixtures。
+
+核心场景：
+
+- [ ] Agent read screen v100，Human 改到 v105，Agent stale input 被拒绝。
+- [ ] Agent 看到 psql exec_101，Human Ctrl+C 后启动 python exec_102，旧 SQL 被拒绝。
+- [ ] Human raw input 活跃时 Agent input 不插入半行；guard 释放后可继续。
+- [ ] Human xterm.js 与 Agent headless screen 在固定 geometry 下内容一致。
+
+Exit Gate：M0–M6 的 L3 证据齐全；到此才能称为 MVP。
+
+### M7 — fork_session 与 Rebuild（目标：L3）
+
+- [ ] checkpoint schema、filter/redaction、hash/staleness。
+- [ ] fork from READY fresh checkpoint。
+- [ ] fork from RUNNING/BROKEN last valid checkpoint + staleness warning。
+- [ ] cwd/env/workspace/shell profile 恢复。
+- [ ] parent/child lineage、fork/rebuild events。
+- [ ] 缺失 cwd/checkpoint 结构化失败。
+- [ ] UI/MCP 明确“不复制 process/REPL/vim state”。
+- [ ] 注册 MCP Fork 工具并提供 Human Console fork/rebuild 操作。
+
+Exit Gate：parent busy 时 fork 后可独立 `git status`；child 继承可复现 context，不影响 parent PTY。
+
+### M8 — Outbox、RabbitMQ 与 Crash Semantics（目标：L4）
+
+- [ ] Outbox claim/publish/mark、重复 publish、停机恢复。
+- [ ] RabbitMQ `ExecutionReady` wake-up、ACK/NACK/requeue/DLQ。
+- [ ] Consumer 读取 DB Execution/owner/generation，不信任 message ordering。
+- [ ] 写 PTY 前/后 crash injection 与 delivery uncertainty。
+- [ ] Input/Control write 后 crash 不自动重发。
+- [ ] duplicate/delayed message 不重复 Shell input。
+- [ ] DB/MQ outage 的 admission/backpressure 行为。
+
+故障矩阵：
+
+- [ ] DB commit 前 crash。
+- [ ] DB commit 后、outbox publish 前 crash。
+- [ ] publish 后 mark 前 crash。
+- [ ] Worker claim 后、PTY write 前 crash。
+- [ ] PTY write 后、start marker 前 crash。
+- [ ] command completed 后、DB update 前 crash。
+
+Exit Gate：每个故障点有确定期望；不确定写入进入 UNKNOWN，文档无 exactly-once 误导。
+
+### M9 — Multi-Worker Session Ownership、Lease 与 Router（目标：L4）
+
+- [ ] Worker registry、heartbeat、drain。
+- [ ] Session owner routing 方案 ADR 与实现。
+- [ ] generation-scoped Lease、renewal、fencing token。
+- [ ] 所有 Execution 状态提交校验 owner/generation/fencing。
+- [ ] 非 owner Worker 无法创建/写第二个同 Session PTY。
+- [ ] owner lost -> generation BROKEN；checkpoint rebuild 创建新 generation。
+- [ ] stale owner DB writes 被拒绝；旧 process group 尽力回收并告警。
+- [ ] 多 Session 的公平分配与 per-actor/session rate limit。
+
+Exit Gate：3+ Worker chaos 下每个 generation 最多一个有效 PTY owner；不宣称 live PTY failover。
+
+### M10 — Security、Release 与 Dogfood（目标：v1.0 L4）
+
+- [ ] Capability/Policy/Approval 完整矩阵。
+- [ ] secret channel、敏感期 recording redaction、审计抽检。
+- [ ] Human Console Approval 与 Human-only secret input 完整交互。
+- [ ] origin/DNS rebinding/WS hijack/token/log/marker/path/resource exhaustion 测试。
+- [ ] event/artifact retention/export/cleanup 与磁盘上限。
+- [ ] 一条命令启动 PostgreSQL + Runtime + Web；MCP 配置可复制。
+- [ ] macOS/Linux clean-machine install、node-pty platform matrix。
+- [ ] 至少两个真实 MCP Client 版本矩阵。
+- [ ] 连续两周真实开发 dogfood：shared cwd/env、dev server、REPL、TUI、fork、crash、reconnect。
+- [ ] operator/recovery/security/protocol/troubleshooting 文档。
+- [ ] SBOM、provenance、release notes 链接全部 L3/L4 证据。
+
+---
+
+## 16. 必测场景总表
+
+1. **Shared cwd**：Agent `cd frontend`，Human `pwd` -> frontend。
+2. **Shared env**：Human `export DEBUG=1`，Agent `echo $DEBUG` -> 1。
+3. **Busy**：Human `pnpm dev`，Agent `git status` -> PTY_BUSY + next actions。
+4. **Shared REPL**：Human 进入 psql，Human/Agent Input 命中同一 connection/execution。
+5. **Stale execution**：Agent 针对旧 psql exec 发 SQL，当前已是 python -> EXECUTION_CHANGED。
+6. **Screen race**：Agent screen v100，Human 改到 v105，Agent write -> SCREEN_CHANGED。
+7. **Input race**：Human raw batch 未结束时 Agent write -> guarded，不产生半行混写。
+8. **Huge output**：10 万行 Human 实时看，Agent bounded query/search。
+9. **Idempotency**：重复 key/hash 返回原 Action；key 相同 payload 不同返回冲突。
+10. **Unknown execute**：`npm publish` 已写 PTY 后 Worker crash -> UNKNOWN，不 retry。
+11. **Unknown input**：SQL write 后 crash -> UNKNOWN，不自动重发。
+12. **Shell mutation**：`source`/`nvm`/`conda` 中至少选择两个真实 fixture 验证持久 state。
+13. **Shell integration attack**：command 输出伪 marker/partial/oversize frame，不越权闭合 Execution。
+14. **Fork**：parent busy，child 从 checkpoint 启动；不复制 foreground state。
+15. **Runtime restart**：旧 PTY generation BROKEN；rebuild 是新 generation。
+16. **Reconnect**：Human/MCP 重连恢复 durable facts；live gap 显式 resync。
+
+---
+
+## 17. 测试与质量门
+
+### 17.1 每个 PR 固定门禁
+
+- [ ] format/lint/typecheck/unit/build。
+- [ ] 受影响模块 integration/contract tests。
+- [ ] migration forward/rollback plan。
+- [ ] `git diff --check`；无 DB/log/recording/secret/cache 混入。
+- [ ] 状态机/协议变更同步 ADR/schema fixture/兼容说明。
+- [ ] 验证报告标注 L0–L4，不把 build 写成真实协作完成。
+
+### 17.2 测试分层
+
+- Domain：Action/Execution/Session 状态机、CAS、idempotency、stale protection、policy。
+- Shell Integration：bash/zsh hooks、marker/control channel、multiline、signals、rc 冲突。
+- PTY：foreground group、TTY controls、resize、Unicode、process tree cleanup。
+- Persistence：真实 PostgreSQL 事务、event sequence、outbox、unknown recovery。
+- Screen：ANSI/alternate buffer/diff/version 与 xterm.js 对照。
+- Protocol：CLI/HTTP/MCP/WS schema、errors、pagination、backpressure、reconnect。
+- Scenario：真实 Human browser +真实 MCP Agent +真实 Shell/TUI fixture。
+- Chaos：kill API/worker/shell、DB/MQ outage、duplicate message、owner loss。
+- Security：marker spoof、origin/auth/secret/path/resource exhaustion。
+- Performance：大输出、快速 redraw、多 Session、慢 consumer。
+
+不可用 mock 替代：真实 PTY/Shell mutation、真实 xterm/headless screen、真实 PostgreSQL race、真实 MCP Client、真实 browser input race、真实 crash 后 UNKNOWN。
+
+---
+
+## 18. 性能与可观测性目标草案
+
+先测量再冻结 v1 SLO，初始目标：
+
+- ExecuteAction admission（不含执行）本机 p95 < 100 ms。
+- Input/Control accepted -> PTY write 本机 p95 < 50 ms（不含 guard wait）。
+- PTY bytes -> Human WS p95 < 100 ms；-> screen projection p95 < 150 ms。
+- 100k 行输出时 Runtime RSS 不随总输出线性无界增长。
+- 慢 consumer 不阻塞 PTY reader；超过 buffer 触发 resync。
+- Session owner lost 后 10 s 内 durable state 可见 BROKEN/UNKNOWN（规模基线需记录）。
+
+必须采集：Session status/generation、active execution age、Action outcome、PTY bytes/chunks、screen lag、WS backlog/resync、outbox age、MQ redelivery/DLQ、owner lease/fencing rejection、policy/approval latency、artifact/disk growth。
+
+---
+
+## 19. 高风险与止损条件
+
+| 风险                                                | 最早验证       | 止损/调整条件                                                 |
+| --------------------------------------------------- | -------------- | ------------------------------------------------------------- |
+| Shell Integration 无法跨 bash/zsh 稳定闭合 boundary | M0             | 缩小首发 Shell 或采用 sidecar/control FD，不进入持久化扩展    |
+| marker 可被输出伪造或被 chunking 破坏               | M0             | 禁止仅靠裸 OSC 文本；切换独立 control channel                 |
+| command composer 与真实 Shell editing 体验割裂      | M1/M5          | 增加明确模式/UX，不允许 READY raw bypass 破坏 Action 模型     |
+| 原子 Input 仍发生语义竞争                           | M6             | 默认收紧为 short turn lease，而不是宣称对等输入已解决         |
+| headless screen 与 xterm.js 漂移                    | M6             | 共享 parser core 或提前像素 screenshot provider               |
+| PG event 成本过高                                   | M3             | raw chunks 转 artifact/file，PG 只存索引与 ref                |
+| fork context 对用户预期过度承诺                     | M7             | UI 改称 rebuild-from-checkpoint，并显示字段/staleness         |
+| MQ/多 Worker 无法路由到 live PTY owner              | M8/M9          | 保持单 Worker 产品，不用 Lease 伪装迁移能力                   |
+| 项目滑向低配 clum/SSH 平台                          | Roadmap review | 冻结 remote 功能，优先 Shared Shell/Action/Observation 正确性 |
+
+---
+
+## 20. 开工前 ADR 清单（含建议默认值）
+
+- [ ] 项目/包名暂用 `iTerminal`，发布前查 npm/GitHub/商标冲突。
+- [ ] License 建议 Apache-2.0，由项目所有者确认。
+- [ ] 首发 macOS arm64/x64 + Linux x64/arm64；Windows 延后。
+- [ ] bash/zsh 为首发 Shell；默认 Runtime-managed profile，可选 source user rc。
+- [ ] Shell Integration 优先独立 control FD；OSC/DCS 只作带 nonce fallback。
+- [ ] Persistent Shell ExecuteAction 接受 Shell command string；不与 direct argv API 混为一谈。
+- [ ] Session 忙时 fail-fast，不建 Execute Queue；并行用 fork Session。
+- [ ] Human READY 使用 composer，RUNNING 使用 interactive input。
+- [ ] 默认 input policy 为 `human_guarded`；Human emergency control 可按权限绕过。
+- [ ] Checkpoint 只保存 cwd + shell + filtered exported env + workspace。
+- [ ] PostgreSQL 为 durable truth；raw output 达阈值转 artifact。
+- [ ] MCP M4 先 stdio；对外 HTTP 后续实现 Origin/Auth。
+- [ ] 开发 retention 默认 7 天或固定磁盘上限，以先到者为准。
+- [ ] Multi Worker 先 owner routing，后 Lease/Fencing；owner loss 不迁移旧 PTY。
+
+---
+
+## 21. MVP 与 v1.0 Definition of Done
+
+只有以下全部满足，才能称为 MVP：
+
+- [ ] M0–M6 Exit Gate 全部通过并链接验证证据。
+- [ ] 真实 Human Console 与真实 MCP Agent 共享 cwd/env/REPL/TUI，达到 L3。
+- [ ] 所有 Human/Agent 写操作都形成 Action，无 READY/WS 旁路 PTY write。
+- [ ] Busy、target execution、screen freshness、Input Guard 均有自动化回归。
+- [ ] Shell Integration 不猜 prompt/静默时间；marker/control channel 有 spoof/chunk 测试。
+- [ ] PTY merged output 与 Agent bounded observation 语义一致。
+- [ ] Runtime crash 后旧 generation 明确 BROKEN/UNKNOWN，不伪恢复。
+- [ ] Secret 不出现在 Action/Event/Snapshot/Checkpoint/MCP result/普通 log 抽检中。
+- [ ] README 明确安全假设、非沙箱、支持 Shell/平台与未完成项。
+
+v1.0 还必须满足 M7–M10、fork 语义、故障矩阵、owner routing、multi-worker chaos、安全审阅和持续 dogfood。
+
+---
+
+## 22. 第一批建议 PR 切片
+
+1. `docs: establish shared-shell runtime contracts`：README/AGENTS/术语/ADR/verification template，无业务实现。
+2. `chore: bootstrap minimal spike workspace`：pnpm、最小 scripts 与本地质量门。
+3. `spike: validate bash and zsh integration channels`：一次性 PTY spike + fixtures + ADR 结论。
+4. `feat(domain): model sessions actions and executions`：纯状态机、错误码、属性测试。
+5. `feat(runtime): create persistent shell sessions`：Session lifecycle、generation、Shell Integration。
+6. `feat(runtime): execute input and control actions`：Reservation、stale target、process group、CLI。
+7. `feat(persistence): persist actions executions and events`：PostgreSQL、CAS、idempotency、unknown recovery。
+8. `feat(observation): add bounded event queries`：完成 M3 后再开始 MCP adapter。
+
+当前只完成规划更新；是否开始第 1 个 PR，等待项目所有者明确授权。

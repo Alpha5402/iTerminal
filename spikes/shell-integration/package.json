@@ -1,0 +1,9 @@
+{
+  "name": "@iterminal/shell-integration-spike",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "node-pty": "1.2.0-beta.12"
+  }
+}
