@@ -154,7 +154,8 @@ export class ShellSpikeSession {
     this.#pendingExecution = pending;
     this.#state = "reserved";
     this.#debug(`dispatching ${executionId}: ${JSON.stringify(command)}`);
-    this.#pty.write(`${wrapForTopLevelEval(command)}\r`);
+    const ptyBarrier = `\x1b]1337;iTerminalBarrier=${executionId}\x07`;
+    this.#pty.write(`${wrapForTopLevelEval(command, executionId)}\r`);
 
     try {
       const event = await this.#waitFor(
@@ -164,6 +165,9 @@ export class ShellSpikeSession {
       );
       if (event.type !== "ready") {
         throw new Error("Expected READY control event");
+      }
+      if (pending.resultExitCode !== undefined) {
+        await this.#waitForPtyText(ptyBarrier, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
       }
       return {
         command,
@@ -299,6 +303,24 @@ export class ShellSpikeSession {
     });
   }
 
+  #waitForPtyText(expected: string, timeoutMs: number): Promise<void> {
+    if (this.#capturedOutput.includes(expected)) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve, reject) => {
+      const startedAt = Date.now();
+      const poll = setInterval(() => {
+        if (this.#capturedOutput.includes(expected)) {
+          clearInterval(poll);
+          resolve();
+        } else if (Date.now() - startedAt >= timeoutMs) {
+          clearInterval(poll);
+          reject(new Error("Timed out waiting for PTY output barrier"));
+        }
+      }, 2);
+    });
+  }
+
   #fail(error: Error): void {
     this.#fatalError ??= error;
     if (this.#state !== "closed") {
@@ -326,8 +348,8 @@ function createChildEnvironment(extra: Readonly<Record<string, string>>): Record
   };
 }
 
-function wrapForTopLevelEval(command: string): string {
-  return `__it_execute ${quoteForShell(command)}`;
+function wrapForTopLevelEval(command: string, barrierToken: string): string {
+  return `__it_execute ${quoteForShell(command)} ${quoteForShell(barrierToken)}`;
 }
 
 function quoteForShell(value: string): string {

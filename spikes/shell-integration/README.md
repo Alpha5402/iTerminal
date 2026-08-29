@@ -26,6 +26,10 @@ READY   NUL exit-code NUL cwd NUL
 interactive Shell has returned to its prompt; its exit code is retained as the fallback when
 an interrupt prevents the wrapper from emitting `RESULT`.
 
+The wrapper also writes a per-dispatch OSC barrier to the PTY before RESULT. The control channel
+still decides completion; the barrier only proves that PTY bytes preceding completion have reached
+the reader when two independent streams are scheduled in different orders.
+
 ## Run
 
 ```bash

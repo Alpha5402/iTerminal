@@ -54,12 +54,14 @@ __it_execute() {
   local __it_syntax_status=$?
   if [[ "$__it_syntax_status" -ne 0 ]]; then
     trap '__it_debug' DEBUG
+    builtin printf '\033]1337;iTerminalBarrier=%s\007' "$2"
     __it_control 'RESULT' "$__it_syntax_status" ''
     return "$__it_syntax_status"
   fi
   builtin eval "$1"
   local __it_status=$?
   trap '__it_debug' DEBUG
+  builtin printf '\033]1337;iTerminalBarrier=%s\007' "$2"
   __it_control 'RESULT' "$__it_status" ''
   return "$__it_status"
 }
@@ -101,6 +103,7 @@ __it_control() {
 __it_execute() {
   builtin eval "$1"
   local __it_status=$?
+  builtin printf '\033]1337;iTerminalBarrier=%s\007' "$2"
   __it_control 'RESULT' "$__it_status" ''
   return "$__it_status"
 }

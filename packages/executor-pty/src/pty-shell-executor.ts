@@ -32,6 +32,8 @@ const START_TIMEOUT_MS = 5_000;
 const EXECUTE_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
 const SESSION_RING_BYTES = 8 * 1024 * 1024;
 const EXECUTION_RING_BYTES = 2 * 1024 * 1024;
+const PTY_BARRIER_PREFIX = "\x1b]1337;iTerminalBarrier=";
+const PTY_BARRIER_SUFFIX = "\x07";
 
 interface PendingExecution {
   readonly token: string;
@@ -41,6 +43,8 @@ interface PendingExecution {
   readonly reject: (error: Error) => void;
   readonly timer: NodeJS.Timeout;
   resultExitCode?: number;
+  readyEvent?: Readonly<{ exitCode: number; cwd: string }>;
+  barrierSeen: boolean;
   started: boolean;
 }
 
@@ -71,6 +75,7 @@ export class PtyShellExecutor implements ShellExecutor {
   readonly #onOutput: (data: string) => void;
 
   #pending: PendingExecution | undefined;
+  #pendingPtyText = "";
   #closed = false;
   #fatalError?: Error;
 
@@ -122,13 +127,7 @@ export class PtyShellExecutor implements ShellExecutor {
       throw error;
     }
     this.#pty.onData((data) => {
-      this.#sessionOutput.append(data);
-      this.#pending?.capture.append(data);
-      try {
-        this.#onOutput(data);
-      } catch (error) {
-        this.#fail(error instanceof Error ? error : new Error(String(error)));
-      }
+      this.#handlePtyData(data);
     });
     this.#pty.onExit(({ exitCode, signal }) => {
       if (!this.#closed) {
@@ -170,6 +169,7 @@ export class PtyShellExecutor implements ShellExecutor {
     return new Promise<ShellExecutionResult>((resolve, reject) => {
       const pending: PendingExecution = {
         callbacks,
+        barrierSeen: false,
         capture: new BoundedByteRing(EXECUTION_RING_BYTES),
         reject,
         resolve,
@@ -183,7 +183,7 @@ export class PtyShellExecutor implements ShellExecutor {
         token,
       };
       this.#pending = pending;
-      this.#pty.write(`${wrapCommand(command)}\r`);
+      this.#pty.write(`${wrapCommand(command, token)}\r`);
     });
   }
 
@@ -245,15 +245,8 @@ export class PtyShellExecutor implements ShellExecutor {
     } else if (event.type === "result" && pending !== undefined) {
       pending.resultExitCode = event.exitCode;
     } else if (event.type === "ready" && pending !== undefined && pending.started) {
-      clearTimeout(pending.timer);
-      this.#pending = undefined;
-      const output = pending.capture.snapshot();
-      pending.resolve({
-        cwd: event.cwd,
-        exitCode: pending.resultExitCode ?? event.exitCode,
-        output: output.data,
-        outputTruncated: output.truncated,
-      });
+      pending.readyEvent = { cwd: event.cwd, exitCode: event.exitCode };
+      this.#tryFinishPending(pending);
     }
     const eventIndex = this.#events.length - 1;
     for (const waiter of this.#waiters) {
@@ -285,6 +278,70 @@ export class PtyShellExecutor implements ShellExecutor {
         this.#fail(error instanceof Error ? error : new Error(String(error)));
       }
     }
+  }
+
+  #handlePtyData(data: string): void {
+    this.#pendingPtyText += data;
+    for (;;) {
+      const markerStart = this.#pendingPtyText.indexOf(PTY_BARRIER_PREFIX);
+      if (markerStart < 0) {
+        const retained = partialPrefixLength(this.#pendingPtyText, PTY_BARRIER_PREFIX);
+        const visibleLength = this.#pendingPtyText.length - retained;
+        this.#emitPty(this.#pendingPtyText.slice(0, visibleLength));
+        this.#pendingPtyText = this.#pendingPtyText.slice(visibleLength);
+        return;
+      }
+      this.#emitPty(this.#pendingPtyText.slice(0, markerStart));
+      const tokenStart = markerStart + PTY_BARRIER_PREFIX.length;
+      const markerEnd = this.#pendingPtyText.indexOf(PTY_BARRIER_SUFFIX, tokenStart);
+      if (markerEnd < 0) {
+        this.#pendingPtyText = this.#pendingPtyText.slice(markerStart);
+        return;
+      }
+      const token = this.#pendingPtyText.slice(tokenStart, markerEnd);
+      const rawMarker = this.#pendingPtyText.slice(markerStart, markerEnd + 1);
+      this.#pendingPtyText = this.#pendingPtyText.slice(markerEnd + 1);
+      const pending = this.#pending;
+      if (pending?.token === token) {
+        pending.barrierSeen = true;
+        this.#tryFinishPending(pending);
+      } else {
+        this.#emitPty(rawMarker);
+      }
+    }
+  }
+
+  #emitPty(data: string): void {
+    if (data.length === 0) {
+      return;
+    }
+    this.#sessionOutput.append(data);
+    this.#pending?.capture.append(data);
+    try {
+      this.#onOutput(data);
+    } catch (error) {
+      this.#fail(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
+  #tryFinishPending(pending: PendingExecution): void {
+    if (pending.readyEvent === undefined) {
+      return;
+    }
+    if (pending.resultExitCode !== undefined && !pending.barrierSeen) {
+      return;
+    }
+    clearTimeout(pending.timer);
+    if (this.#pending?.token === pending.token) {
+      this.#pending = undefined;
+    }
+    const output = pending.capture.snapshot();
+    pending.resolve({
+      cwd: pending.readyEvent.cwd,
+      exitCode: pending.resultExitCode ?? pending.readyEvent.exitCode,
+      output: output.data,
+      outputTruncated: output.truncated,
+    });
   }
 
   #waitFor(
@@ -329,8 +386,8 @@ export class PtyShellExecutor implements ShellExecutor {
   }
 }
 
-function wrapCommand(command: string): string {
-  return `__it_execute ${quote(command)}`;
+function wrapCommand(command: string, barrierToken: string): string {
+  return `__it_execute ${quote(command)} ${quote(barrierToken)}`;
 }
 
 function quote(value: string): string {
@@ -369,4 +426,14 @@ function wouldBlock(error: unknown): boolean {
     "code" in error &&
     (error.code === "EAGAIN" || error.code === "EWOULDBLOCK")
   );
+}
+
+function partialPrefixLength(value: string, prefix: string): number {
+  const maximum = Math.min(value.length, prefix.length - 1);
+  for (let length = maximum; length > 0; length -= 1) {
+    if (value.endsWith(prefix.slice(0, length))) {
+      return length;
+    }
+  }
+  return 0;
 }
