@@ -56,3 +56,4 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:m2
+      - run: pnpm test:m3

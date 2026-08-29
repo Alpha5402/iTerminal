@@ -73,8 +73,10 @@ export class PostgresRuntimeRepository {
   }
 
   public async migrate(): Promise<void> {
-    const sql = await readFile(new URL("../migrations/001_initial.sql", import.meta.url), "utf8");
-    await this.#pool.query(sql);
+    for (const migration of ["001_initial.sql", "002_bounded_observation.sql"]) {
+      const sql = await readFile(new URL(`../migrations/${migration}`, import.meta.url), "utf8");
+      await this.#pool.query(sql);
+    }
   }
 
   public async close(): Promise<void> {
@@ -362,8 +364,8 @@ export class PostgresRuntimeRepository {
       await client.query(
         `INSERT INTO session_events
           (id, session_id, session_generation, event_sequence, event_type,
-           execution_id, payload, created_at)
-         VALUES ($1, $2, $3, $4, 'terminal.pty_output', $5, $6, $7)`,
+           execution_id, payload, created_at, search_text)
+         VALUES ($1, $2, $3, $4, 'terminal.pty_output', $5, $6, $7, $8)`,
         [
           input.eventId,
           input.sessionId,
@@ -375,6 +377,7 @@ export class PostgresRuntimeRepository {
             data: input.data,
           }),
           input.createdAt,
+          input.data,
         ],
       );
       return sequence;

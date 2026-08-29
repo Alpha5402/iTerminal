@@ -1,10 +1,10 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
-> 状态：Planning Baseline v2
+> 状态：Implementation Baseline v3 — M0–M3 已通过 L2
 >
 > 基线日期：2026-08-30
 >
-> 当前仓库状态：空仓库，仅存在 `.git` 与本规划文件；本文描述目标与验收，不代表功能已经实现。
+> 当前仓库状态：M0–M3 已实现并保存 L2 证据；M4 MCP、M5 Human Console 及其后的 L3/L4 路径仍未完成。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -31,7 +31,7 @@
 6. **Shell marker 可能被命令输出伪造。**优先使用独立 control channel；若使用 OSC/DCS，必须带 session nonce、严格 parser 和信任边界说明。
 7. **`fork_session` 只能复制可重建的 Shell Checkpoint。**不能复制 foreground process、REPL memory、数据库事务、vim buffer、socket 或 file descriptor。
 
-本轮只更新规划，不进入代码实现。
+上述模型已经成为实现基线；各里程碑的真实完成范围仍以 `docs/verification/` 中的证据与 `Not proven` 边界为准。
 
 ---
 
@@ -802,14 +802,14 @@ Exit Gate：L2 核心链路通过；仍不声明 durability、MCP 或 Web 已完
 
 ### M3 — Bounded Event Observation（目标：L2）
 
-- [ ] get execution/event、query by sequence/time/execution/type。
-- [ ] keyword search（trigram/FTS）与有界上下文。
-- [ ] output chunk/artifact 阈值、byte count、tail preview/ref。
-- [ ] cursor scope/generation、truncated/next cursor、RESYNC_REQUIRED。
-- [ ] 结构化 timeline attribution。
-- [ ] 10 万行与慢消费者 benchmark。
+- [x] get execution/event、query by sequence/time/execution/type。
+- [x] keyword search（PostgreSQL FTS）与有界上下文。
+- [x] output chunk/artifact 阈值、byte count、tail preview/ref。
+- [x] cursor scope/generation、truncated/next cursor、RESYNC_REQUIRED。
+- [x] 结构化 timeline attribution。
+- [x] 10 万行与慢消费者 benchmark。
 
-Exit Gate：Agent 测试程序只靠 metadata/query/search 定位稀疏 FAIL，不读取全量；内存不随总输出无界增长。
+Exit Gate：已在 PostgreSQL 17 通过。Agent 测试程序只靠 metadata/query/search 定位第 25k/50k/75k/100k 行的稀疏 FAIL，不读取全量；查询响应大小受 page/context/artifact read 上限约束，不随总输出无界增长。
 
 ### M4 — MCP Adapter（目标：L3 Agent 路径）
 
