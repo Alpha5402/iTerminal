@@ -12,6 +12,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0006](./0006-checkpoint-fork.md)              | Limited Shell Checkpoint and fork semantics              | Accepted for post-MVP M7 |
 | [0007](./0007-runtime-daemon-mcp-bridge.md)    | Runtime daemon separated from MCP stdio lifecycle        | Accepted for M4          |
 | [0008](./0008-live-runtime-durable-journal.md) | Live PTY truth plus PostgreSQL durable journal           | Accepted for M4.1        |
+| [0009](./0009-outbox-rabbitmq-inbox.md)        | At-least-once Outbox wake-up plus Consumer Inbox         | Accepted for M8.1        |
 
 Statuses:
 

@@ -48,13 +48,15 @@ Most terminal tools optimize for command execution or remote administration. iTe
 | Freshness    | Session generation, target execution, and screen version checks     |
 | Observation  | Append-only events plus a versioned virtual screen                  |
 | Recovery     | Durable facts in PostgreSQL; live PTY loss becomes `BROKEN/UNKNOWN` |
-| Reliability  | Outbox/MQ wake-ups later; no exactly-once fiction                   |
+| Reliability  | PostgreSQL Outbox + RabbitMQ wake-up + Inbox; no exactly-once claim |
 
 ## Current status
 
-**M0–M4.1 gates passed at L2: shared Shell, Action Runtime, integrated durable transactions/observation, and a real stdio MCP bridge.**
+**M0–M4.1 and the M8.1 notification plane pass at L2: shared Shell, durable Action Runtime, real stdio MCP, and reliable Outbox/RabbitMQ/Inbox delivery.**
 
 Real local bash and zsh PTY scenarios prove command boundaries, shared state, fail-fast Busy, structured Input/Control, stale-target rejection, marker-spoof isolation, large output, and Ctrl+C recovery. With `ITERM_DATABASE_URL`, the live daemon now commits Execute/Input/Control admission before PTY delivery, sends attributed output through a bounded per-Session ingest loop, serves durable cursors, and marks a `SIGKILL`-lost owner generation `BROKEN/UNKNOWN` on restart. An official MCP SDK Client drives the same live zsh across stdio bridge restarts; OpenCode and Claude Code handshakes also pass. In-memory development mode remains available, but no model-driven Agent has been authorized and the Human Console is not complete.
+
+M8.1 adds a standalone leased Outbox relay, RabbitMQ publisher confirms, durable quorum main/retry/DLQ queues, manual ACK with bounded prefetch, canonical Consumer Inbox deduplication, and database revalidation of delayed `ExecutionReady` messages. It is an at-least-once notification plane: actual PTY dispatch remains inside the owner-local M4.1 daemon until M8.2 proves the write crash matrix.
 
 See:
 
@@ -72,6 +74,8 @@ See:
 - [M4 verification](./docs/verification/M4/2026-08-30-mcp-adapter.md) — official SDK, OpenCode, Claude Code, and remaining L3 boundary.
 - [M4.1 durability decision](./docs/adr/0008-live-runtime-durable-journal.md) — live PTY truth, write-ahead facts, and the bounded ingest loop.
 - [M4.1 verification](./docs/verification/M4/2026-08-30-durable-runtime.md) — real PostgreSQL/MCP Actions and daemon crash recovery.
+- [M8.1 messaging decision](./docs/adr/0009-outbox-rabbitmq-inbox.md) — why confirms, ACKs, Inbox leases, and DB rechecks are separate boundaries.
+- [M8.1 verification](./docs/verification/M8/2026-08-30-reliable-messaging.md) — real PostgreSQL/RabbitMQ duplicate, retry, DLQ, and relay lifecycle evidence.
 
 ## Planned shape
 
@@ -106,6 +110,7 @@ pnpm verify
 pnpm cli
 ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm daemon
 ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm mcp
+ITERM_DATABASE_URL=postgresql://... ITERM_RABBITMQ_URL=amqp://... pnpm outbox-relay
 pnpm spike:shell -- --shell zsh
 pnpm spike:shell -- --shell bash
 ```

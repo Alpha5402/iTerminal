@@ -35,4 +35,4 @@ Snapshots and Shell Checkpoints use observed-time conditional upserts. An older 
 
 ## Current boundary
 
-The M2 adapter and its transaction scenarios are proven independently against PostgreSQL 17. The M1 in-process Runtime still uses MemoryRuntimeStore for its live CLI path. Replacing that port requires an async ingest/dispatch loop so PTY callbacks never block on SQL; this is intentionally not hidden inside a synchronous adapter.
+M4.1 integrates this transaction with the live daemon while keeping PTY callbacks on a bounded asynchronous ingest loop. M8.1 adds leased Outbox publication, RabbitMQ confirms, and Consumer Inbox deduplication. Actual PTY dispatch is still owner-local after admission; moving it behind an `ExecutionReady` wake-up remains M8.2 work and must preserve the same fail-fast Session reservation.

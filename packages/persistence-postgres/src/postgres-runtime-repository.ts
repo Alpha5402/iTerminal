@@ -1,9 +1,10 @@
-import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 
 import type { Actor, SessionStatus, ShellKind } from "@iterminal/domain";
 import { RuntimeError } from "@iterminal/domain";
 import { Pool, type PoolClient } from "pg";
+
+import { migrateDatabase } from "./migrate.js";
 
 export interface CreateDurableSession {
   readonly id: string;
@@ -82,10 +83,7 @@ export class PostgresRuntimeRepository {
   }
 
   public async migrate(): Promise<void> {
-    for (const migration of ["001_initial.sql", "002_bounded_observation.sql"]) {
-      const sql = await readFile(new URL(`../migrations/${migration}`, import.meta.url), "utf8");
-      await this.#pool.query(sql);
-    }
+    await migrateDatabase(this.#pool);
   }
 
   public async close(): Promise<void> {

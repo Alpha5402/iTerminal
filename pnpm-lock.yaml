@@ -97,6 +97,18 @@ importers:
         specifier: 2.0.0
         version: 2.0.0
 
+  apps/outbox-relay:
+    dependencies:
+      '@iterminal/messaging':
+        specifier: workspace:*
+        version: link:../../packages/messaging
+      '@iterminal/persistence-postgres':
+        specifier: workspace:*
+        version: link:../../packages/persistence-postgres
+      '@iterminal/queue-rabbitmq':
+        specifier: workspace:*
+        version: link:../../packages/queue-rabbitmq
+
   apps/runtime-daemon:
     dependencies:
       '@iterminal/application':
@@ -145,6 +157,8 @@ importers:
         specifier: 1.2.0-beta.12
         version: 1.2.0-beta.12
 
+  packages/messaging: {}
+
   packages/persistence-postgres:
     dependencies:
       '@iterminal/application':
@@ -153,6 +167,9 @@ importers:
       '@iterminal/domain':
         specifier: workspace:*
         version: link:../domain
+      '@iterminal/messaging':
+        specifier: workspace:*
+        version: link:../messaging
       pg:
         specifier: ^8.16.3
         version: 8.23.0
@@ -162,6 +179,25 @@ importers:
         version: 8.23.1
 
   packages/protocol: {}
+
+  packages/queue-rabbitmq:
+    dependencies:
+      '@iterminal/messaging':
+        specifier: workspace:*
+        version: link:../messaging
+      amqplib:
+        specifier: 2.0.1
+        version: 2.0.1
+    devDependencies:
+      '@iterminal/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@iterminal/persistence-postgres':
+        specifier: workspace:*
+        version: link:../persistence-postgres
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
 
   packages/runtime-memory:
     dependencies:
@@ -663,6 +699,10 @@ packages:
 
   ajv@6.15.0:
     resolution: {integrity: sha512-fgFx7Hfoq60ytK2c7DhnF8jIvzYgOMxfugjLOSMHjLIPgenqa7S7oaagATUq99mV6IYvN2tRmC0wnTYX6iPbMw==}
+
+  amqplib@2.0.1:
+    resolution: {integrity: sha512-a3P2MgfCf9nzVis12VxWEn0dS6hcqve7dlEAhXDtIWR27BlhtMkILOc+H9aeHjDi6i6r94dYKc2Kx2OFe3avvg==}
+    engines: {node: '>=18'}
 
   assertion-error@2.0.1:
     resolution: {integrity: sha512-Izi8RQcffqCeNVgFigKli1ssklIbpHnCYc6AknXGYoB6grJqyeby7jv12JUQgmTAnIDnbck1uxksT4dzN3PWBA==}
@@ -1624,6 +1664,8 @@ snapshots:
       fast-json-stable-stringify: 2.1.0
       json-schema-traverse: 0.4.1
       uri-js: 4.4.1
+
+  amqplib@2.0.1: {}
 
   assertion-error@2.0.1: {}
 

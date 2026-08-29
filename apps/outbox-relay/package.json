@@ -1,0 +1,11 @@
+{
+  "name": "@iterminal/outbox-relay",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@iterminal/messaging": "workspace:*",
+    "@iterminal/persistence-postgres": "workspace:*",
+    "@iterminal/queue-rabbitmq": "workspace:*"
+  }
+}

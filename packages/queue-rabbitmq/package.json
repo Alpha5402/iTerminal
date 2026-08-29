@@ -1,16 +1,16 @@
 {
-  "name": "@iterminal/persistence-postgres",
+  "name": "@iterminal/queue-rabbitmq",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
-    "@iterminal/application": "workspace:*",
-    "@iterminal/domain": "workspace:*",
     "@iterminal/messaging": "workspace:*",
-    "pg": "^8.16.3"
+    "amqplib": "2.0.1"
   },
   "devDependencies": {
-    "@types/pg": "^8.15.5"
+    "@iterminal/domain": "workspace:*",
+    "@iterminal/persistence-postgres": "workspace:*",
+    "pg": "^8.16.3"
   }
 }

@@ -43,8 +43,18 @@ jobs:
           --health-retries 20
         ports:
           - 5432:5432
+      rabbitmq:
+        image: rabbitmq:4.3-alpine
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 30
+        ports:
+          - 5672:5672
     env:
       ITERM_DATABASE_URL: postgresql://iterminal_test:iterminal_test@127.0.0.1:5432/iterminal_test
+      ITERM_RABBITMQ_URL: amqp://guest:guest@127.0.0.1:5672
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -59,3 +69,4 @@ jobs:
       - run: pnpm test:m2
       - run: pnpm test:m3
       - run: pnpm test:m4:durable
+      - run: pnpm test:m8:messaging

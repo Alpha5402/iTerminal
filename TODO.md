@@ -1,10 +1,10 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
-> 状态：Implementation Baseline v4.1 — M0–M4.1 已通过 L2，M4 L3 待真实模型调用
+> 状态：Implementation Baseline v4.2 — M0–M4.1 与 M8.1 通知平面已通过 L2，M4 L3 待真实模型调用
 >
 > 基线日期：2026-08-30
 >
-> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live MCP daemon 已接入 PostgreSQL write-ahead journal 与 bounded ingest loop。M4 的模型驱动 Agent 验收、M5 Human Console 及其后的 L3/L4 路径仍未完成。
+> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live MCP daemon 已接入 PostgreSQL write-ahead journal 与 bounded ingest loop。M8.1 已独立证明 Outbox/RabbitMQ/Inbox 可靠通知，但尚未接管 owner-local PTY dispatch。M4 的模型驱动 Agent 验收、M5 Human Console 及其后的 L3/L4 路径仍未完成。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -479,7 +479,8 @@ PTY bytes -> ANSI/VT parser -> versioned screen buffer -> full/diff/region/searc
 - [ ] `screen_snapshots`：geometry/cursor/content or artifact ref、screen version。
 - [ ] `interaction_guards`：mode、actor、TTL、reason、version。
 - [ ] `approvals`：exact action hash、actor/approver、expiry、one-time use。
-- [ ] `outbox`：`ExecutionReady` 已写入；Event publisher/mark/retry 待 M8。
+- [x] `outbox`：`ExecutionReady`、leased claim、confirm publish、mark/retry 与 publish Event。
+- [x] `consumer_inbox`：payload hash、processing lease、attempt/outcome 与完成去重。
 - [ ] `artifacts`：大输出 metadata/hash/size/retention 已完成；录制/导出待 M10。
 - [ ] `worker_registry` / `session_leases`：M9 才引入。
 
@@ -873,19 +874,21 @@ Exit Gate：parent busy 时 fork 后可独立 `git status`；child 继承可复�
 
 ### M8 — Outbox、RabbitMQ 与 Crash Semantics（目标：L4）
 
-- [ ] Outbox claim/publish/mark、重复 publish、停机恢复。
-- [ ] RabbitMQ `ExecutionReady` wake-up、ACK/NACK/requeue/DLQ。
-- [ ] Consumer 读取 DB Execution/owner/generation，不信任 message ordering。
+- [x] Outbox claim/publish/mark、重复 publish、lease recovery 与 relay 优雅停机。
+- [x] RabbitMQ `ExecutionReady` confirm transport、manual ACK、confirmed retry queue 与 DLQ。
+- [ ] retry publisher outage 时的 NACK/requeue 与无 hot-loop 故障注入。
+- [x] Consumer Inbox 去重并读取 DB Execution/owner/generation，不信任 message ordering。
+- [ ] 将 owner-local PTY dispatch 从 admission 调用栈迁到 `ExecutionReady` handler。
 - [ ] 写 PTY 前/后 crash injection 与 delivery uncertainty。
 - [ ] Input/Control write 后 crash 不自动重发。
-- [ ] duplicate/delayed message 不重复 Shell input。
-- [ ] DB/MQ outage 的 admission/backpressure 行为。
+- [x] duplicate/delayed message 不重复调用已注入 handler；真实 Shell input 待 dispatch 迁移后验证。
+- [ ] DB/MQ outage 的完整 admission/backpressure 行为；MQ publish failure 保留 Outbox 已证明。
 
 故障矩阵：
 
 - [ ] DB commit 前 crash。
-- [ ] DB commit 后、outbox publish 前 crash。
-- [ ] publish 后 mark 前 crash。
+- [x] DB commit 后、outbox publish 前由 pending row/expired lease 恢复。
+- [x] publish confirm 后 mark 前丢失状态会重复 publish，并由 Inbox 去重。
 - [ ] Worker claim 后、PTY write 前 crash。
 - [ ] PTY write 后、start marker 前 crash。
 - [ ] command completed 后、DB update 前 crash。
