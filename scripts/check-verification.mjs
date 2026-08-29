@@ -1,0 +1,20 @@
+import { readFile } from "node:fs/promises";
+import process from "node:process";
+import { URL } from "node:url";
+
+const requiredReports = [
+  "docs/verification/M0/2026-08-30-shell-integration.md",
+  "docs/verification/M1/2026-08-30-runtime-cli.md",
+];
+
+for (const report of requiredReports) {
+  const contents = await readFile(new URL(`../${report}`, import.meta.url), "utf8");
+  if (!contents.includes("**Result: PASS at L2")) {
+    throw new Error(`${report} must contain an explicit L2 PASS claim`);
+  }
+  if (!contents.includes("## Not proven")) {
+    throw new Error(`${report} must retain a Not proven boundary`);
+  }
+}
+
+process.stdout.write(`Verified ${requiredReports.length.toString()} milestone reports\n`);

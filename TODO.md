@@ -355,10 +355,10 @@ M0 必须对两种方案做 spike 并形成 ADR：
 
 验收要求：
 
-- [ ] 普通 command 输出仿造 marker 不会结束别的 Execution。
-- [ ] command 输出被任意 chunk boundary 切割仍可正确解析。
-- [ ] 多行 command、empty command、syntax error、nonzero exit、Ctrl+C 都能闭合状态机。
-- [ ] `cd/export/source` 在真实 Shell 中持久生效。
+- [x] 普通 command 输出仿造 marker 不会结束别的 Execution。
+- [x] command 输出被任意 chunk boundary 切割仍可正确解析。
+- [x] 多行 command、empty command、syntax error、nonzero exit、Ctrl+C 都能闭合状态机。
+- [x] `cd/export/source` 在真实 Shell 中持久生效。
 - [ ] `ssh/su/docker exec` 等 shell switch 在 MVP 可以明确标记 unsupported/broken，不得静默误判。
 - [ ] Shell rc/theme/prompt 不影响 boundary；Runtime hook 在用户 rc 后重新安装并校验。
 
@@ -762,23 +762,23 @@ Exit Gate：真实 bash/zsh 下可靠观察 start/end/exit/cwd；`cd/export` 持
 
 ### M1 — 单进程 Persistent PTY Core + CLI（目标：L2）
 
-- [ ] 补齐 CI matrix、domain package、协议 fixture 与验证报告门禁。
-- [ ] Session create/close，generation，单 Executor owner。
-- [ ] Execute/Input/Control Application Service 与内存 repository。
-- [ ] READY/RESERVED/RUNNING/BROKEN/CLOSED 状态机。
-- [ ] Session CAS/mutex Reservation；同一 Session 单 active Execute。
-- [ ] Shell Integration production adapter（bash/zsh）。
-- [ ] PTY output bounded ring buffer；process group/control/cleanup。
-- [ ] CLI 创建 Session、Execute、Input、Control、status、events。
-- [ ] Human/Agent fake client 同时操作同一 Session。
+- [x] 补齐 CI matrix、domain package、协议 fixture 与验证报告门禁。
+- [x] Session create/close，generation，单 Executor owner。
+- [x] Execute/Input/Control Application Service 与内存 repository。
+- [x] READY/RESERVED/RUNNING/BROKEN/CLOSED 状态机。
+- [x] Session CAS/mutex Reservation；同一 Session 单 active Execute。
+- [x] Shell Integration production adapter（bash/zsh）。
+- [x] PTY output bounded ring buffer；process group/control/cleanup。
+- [x] CLI 创建 Session、Execute、Input、Control、status、events。
+- [x] Human/Agent fake client 同时操作同一 Session。
 
 验收：
 
-- [ ] Agent `cd packages/web` 后 Human `pwd` 得到共享 cwd。
-- [ ] Human `export DEBUG=1` 后 Agent `echo $DEBUG` 得到 `1`。
-- [ ] `pnpm dev` RUNNING 时另一个 Execute 返回 PTY_BUSY。
-- [ ] Python/psql fixture 中两个 Actor 的 InputAction 命中同一 Execution。
-- [ ] stale target execution 被拒绝；Ctrl+C 后 Shell 回到 READY。
+- [x] Agent `cd packages/web` 后 Human `pwd` 得到共享 cwd。
+- [x] Human `export DEBUG=1` 后 Agent `echo $DEBUG` 得到 `1`。
+- [x] 长运行 fixture（M1 使用 Python/sleep，API `pnpm dev` 尚未存在）RUNNING 时另一个 Execute 返回 PTY_BUSY。
+- [x] Python fixture 中两个 Actor 的 InputAction 命中同一 Execution。
+- [x] stale target execution 被拒绝；Ctrl+C 后 Shell 回到 READY。
 
 Exit Gate：L2 核心链路通过；仍不声明 durability、MCP 或 Web 已完成。
 

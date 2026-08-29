@@ -1,0 +1,44 @@
+{
+  "execute": {
+    "sessionId": "ses_example",
+    "sessionGeneration": 1,
+    "actor": {
+      "id": "agent_example",
+      "type": "agent",
+      "principal": "local-agent",
+      "client": "mcp"
+    },
+    "command": "cd packages/web && pwd",
+    "idempotencyKey": "execute-001"
+  },
+  "input": {
+    "sessionId": "ses_example",
+    "sessionGeneration": 1,
+    "actor": {
+      "id": "human_example",
+      "type": "human",
+      "principal": "local-human",
+      "client": "console"
+    },
+    "targetExecutionId": "exe_example",
+    "data": "yes\n",
+    "expectedScreenVersion": 12,
+    "idempotencyKey": "input-001"
+  },
+  "control": {
+    "sessionId": "ses_example",
+    "sessionGeneration": 1,
+    "actor": {
+      "id": "human_example",
+      "type": "human",
+      "principal": "local-human",
+      "client": "console"
+    },
+    "targetExecutionId": "exe_example",
+    "delivery": {
+      "mode": "TTY_CONTROL",
+      "control": "CTRL_C"
+    },
+    "idempotencyKey": "control-001"
+  }
+}

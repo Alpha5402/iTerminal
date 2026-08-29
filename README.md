@@ -52,9 +52,9 @@ Most terminal tools optimize for command execution or remote administration. iTe
 
 ## Current status
 
-**M0 Shell Integration feasibility gate passed at L2. M1 production Runtime work has not started.**
+**M0 and the single-process M1 Runtime/CLI gates passed at L2. Durable storage and MCP are next.**
 
-Real local bash and zsh PTY scenarios now prove command boundaries, shared `cwd`/environment, syntax and nonzero exits, marker-spoof isolation, large output, and Ctrl+C recovery. No production Runtime, MCP server, database, or web console is complete yet.
+Real local bash and zsh PTY scenarios now prove command boundaries, shared `cwd`/environment, fail-fast Busy, structured Input/Control, stale-target rejection, marker-spoof isolation, large output, and Ctrl+C recovery. The current Runtime is single-process and in-memory; no MCP server, database, or web console is complete yet.
 
 See:
 
@@ -63,6 +63,7 @@ See:
 - [Terminology](./docs/TERMINOLOGY.md) — canonical domain language.
 - [M0 spike](./spikes/shell-integration/README.md) — the highest-risk hypothesis and its evidence.
 - [M0 verification](./docs/verification/M0/2026-08-30-shell-integration.md) — environment, scenarios, limits, and L2 boundary.
+- [M1 verification](./docs/verification/M1/2026-08-30-runtime-cli.md) — Runtime/CLI scenarios and remaining durability boundary.
 
 ## Planned shape
 
@@ -94,6 +95,7 @@ After dependencies are installed:
 
 ```bash
 pnpm verify
+pnpm cli
 pnpm spike:shell -- --shell zsh
 pnpm spike:shell -- --shell bash
 ```

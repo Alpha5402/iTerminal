@@ -10,15 +10,24 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "cli": "tsx apps/cli/src/main.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
     "spike:shell": "tsx spikes/shell-integration/src/cli.ts",
     "test": "vitest run",
+    "test:m1": "vitest run packages/application/src/runtime-service.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build"
+    "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm verify:docs && pnpm build",
+    "verify:docs": "node scripts/check-verification.mjs"
   },
   "devDependencies": {
+    "@iterminal/application": "workspace:*",
+    "@iterminal/domain": "workspace:*",
+    "@iterminal/executor-pty": "workspace:*",
+    "@iterminal/protocol": "workspace:*",
+    "@iterminal/runtime-memory": "workspace:*",
+    "@iterminal/testkit": "workspace:*",
     "@eslint/js": "^10.0.1",
     "@types/node": "^26.4.0",
     "eslint": "^10.9.1",

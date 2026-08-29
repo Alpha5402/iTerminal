@@ -17,5 +17,5 @@
     "target": "ES2023",
     "types": ["node"]
   },
-  "include": ["eslint.config.js", "spikes/**/*.ts"]
+  "include": ["apps/**/*.ts", "eslint.config.js", "packages/**/*.ts", "spikes/**/*.ts"]
 }

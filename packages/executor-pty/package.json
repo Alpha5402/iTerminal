@@ -1,0 +1,12 @@
+{
+  "name": "@iterminal/executor-pty",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@iterminal/application": "workspace:*",
+    "@iterminal/domain": "workspace:*",
+    "node-pty": "1.2.0-beta.12"
+  }
+}

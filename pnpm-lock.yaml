@@ -11,6 +11,24 @@ importers:
       '@eslint/js':
         specifier: ^10.0.1
         version: 10.0.1(eslint@10.9.1)
+      '@iterminal/application':
+        specifier: workspace:*
+        version: link:packages/application
+      '@iterminal/domain':
+        specifier: workspace:*
+        version: link:packages/domain
+      '@iterminal/executor-pty':
+        specifier: workspace:*
+        version: link:packages/executor-pty
+      '@iterminal/protocol':
+        specifier: workspace:*
+        version: link:packages/protocol
+      '@iterminal/runtime-memory':
+        specifier: workspace:*
+        version: link:packages/runtime-memory
+      '@iterminal/testkit':
+        specifier: workspace:*
+        version: link:packages/testkit
       '@types/node':
         specifier: ^26.4.0
         version: 26.4.0
@@ -32,6 +50,67 @@ importers:
       vitest:
         specifier: ^4.1.11
         version: 4.1.11(@types/node@26.4.0)(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(tsx@4.23.12))
+
+  apps/cli:
+    dependencies:
+      '@iterminal/application':
+        specifier: workspace:*
+        version: link:../../packages/application
+      '@iterminal/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
+      '@iterminal/executor-pty':
+        specifier: workspace:*
+        version: link:../../packages/executor-pty
+      '@iterminal/runtime-memory':
+        specifier: workspace:*
+        version: link:../../packages/runtime-memory
+
+  packages/application:
+    dependencies:
+      '@iterminal/domain':
+        specifier: workspace:*
+        version: link:../domain
+
+  packages/domain: {}
+
+  packages/executor-pty:
+    dependencies:
+      '@iterminal/application':
+        specifier: workspace:*
+        version: link:../application
+      '@iterminal/domain':
+        specifier: workspace:*
+        version: link:../domain
+      node-pty:
+        specifier: 1.2.0-beta.12
+        version: 1.2.0-beta.12
+
+  packages/protocol: {}
+
+  packages/runtime-memory:
+    dependencies:
+      '@iterminal/application':
+        specifier: workspace:*
+        version: link:../application
+      '@iterminal/domain':
+        specifier: workspace:*
+        version: link:../domain
+
+  packages/testkit:
+    dependencies:
+      '@iterminal/application':
+        specifier: workspace:*
+        version: link:../application
+      '@iterminal/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@iterminal/executor-pty':
+        specifier: workspace:*
+        version: link:../executor-pty
+      '@iterminal/runtime-memory':
+        specifier: workspace:*
+        version: link:../runtime-memory
 
   spikes/shell-integration:
     dependencies:
