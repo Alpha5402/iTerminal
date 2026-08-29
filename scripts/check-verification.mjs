@@ -7,6 +7,7 @@ const requiredReports = [
   "docs/verification/M1/2026-08-30-runtime-cli.md",
   "docs/verification/M2/2026-08-30-postgres-persistence.md",
   "docs/verification/M3/2026-08-30-bounded-observation.md",
+  "docs/verification/M4/2026-08-30-mcp-adapter.md",
 ];
 
 for (const report of requiredReports) {

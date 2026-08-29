@@ -1,0 +1,13 @@
+{
+  "name": "@iterminal/runtime-daemon",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/server.ts",
+  "dependencies": {
+    "@iterminal/application": "workspace:*",
+    "@iterminal/executor-pty": "workspace:*",
+    "@iterminal/runtime-memory": "workspace:*",
+    "@iterminal/runtime-rpc": "workspace:*"
+  }
+}

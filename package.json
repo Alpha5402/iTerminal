@@ -11,14 +11,17 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "cli": "tsx apps/cli/src/main.ts",
+    "daemon": "tsx apps/runtime-daemon/src/main.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
+    "mcp": "tsx apps/mcp/src/main.ts",
     "spike:shell": "tsx spikes/shell-integration/src/cli.ts",
     "test": "vitest run",
     "test:m1": "vitest run packages/application/src/runtime-service.test.ts",
     "test:m2": "vitest run packages/persistence-postgres/src/postgres-runtime-repository.test.ts",
     "test:m3": "vitest run packages/persistence-postgres/src/postgres-observation-repository.test.ts",
+    "test:m4": "vitest run apps/mcp/src/mcp-stdio.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm verify:docs && pnpm build",
     "verify:docs": "node scripts/check-verification.mjs"

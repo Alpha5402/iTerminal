@@ -1,10 +1,10 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
-> 状态：Implementation Baseline v3 — M0–M3 已通过 L2
+> 状态：Implementation Baseline v4 — M0–M4 已通过 L2，M4 L3 待真实模型调用
 >
 > 基线日期：2026-08-30
 >
-> 当前仓库状态：M0–M3 已实现并保存 L2 证据；M4 MCP、M5 Human Console 及其后的 L3/L4 路径仍未完成。
+> 当前仓库状态：M0–M4 已实现并保存 L2 证据；M4 的模型驱动 Agent 验收、M5 Human Console 及其后的 L3/L4 路径仍未完成。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -813,14 +813,15 @@ Exit Gate：已在 PostgreSQL 17 通过。Agent 测试程序只靠 metadata/quer
 
 ### M4 — MCP Adapter（目标：L3 Agent 路径）
 
-- [ ] stdio MCP server，stdout 零污染。
-- [ ] Session/Execute/Input/Control/Event 工具 schema；Fork 与 Screen 按后续里程碑注册。
-- [ ] Tool descriptions 明确 Action 选择与 PTY_BUSY next actions。
-- [ ] idempotency、generation、target execution precondition 透传。
-- [ ] 真实 Codex/Claude/OpenCode 中至少两个 Client 兼容验证。
-- [ ] MCP Client 重启后凭 Action/Execution/Event cursor 恢复观察。
+- [x] stdio MCP server，stdout 零污染。
+- [x] Session/Execute/Input/Control/Event 工具 schema；Fork 与 Screen 按后续里程碑注册。
+- [x] Tool descriptions 明确 Action 选择与 PTY_BUSY next actions。
+- [x] idempotency、generation、target execution precondition 透传。
+- [x] OpenCode 1.18.25 与 Claude Code 2.1.251 完成本地 stdio handshake。
+- [x] MCP Client 重启后凭 Action/Execution/Event cursor 恢复观察。
+- [ ] 真实模型驱动 Agent 自主完成完整工具路径（需要显式外发授权）。
 
-Exit Gate：真实 MCP Agent 完成 create -> shared state -> execute -> busy/wait/input/control -> observe；协议结果与 CLI 一致。
+Exit Gate：L2 协议/Runtime 路径已完成；官方 SDK Client 已完成 create -> shared state -> execute -> busy/wait/input/control -> observe，OpenCode/Claude Code handshake 通过。尚未由真实模型自主完成该路径，因此不声明 L3，不开始依赖 L3 的 M5。
 
 ### M5 — Human Console（目标：L3 shared path）
 

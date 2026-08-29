@@ -10,6 +10,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0004](./0004-pty-output-observation.md)    | Merged PTY output plus Event/Virtual Screen observations | Accepted for M0          |
 | [0005](./0005-interaction-freshness.md)     | Target execution, screen freshness, and Input Guard      | Accepted for MVP         |
 | [0006](./0006-checkpoint-fork.md)           | Limited Shell Checkpoint and fork semantics              | Accepted for post-MVP M7 |
+| [0007](./0007-runtime-daemon-mcp-bridge.md) | Runtime daemon separated from MCP stdio lifecycle        | Accepted for M4          |
 
 Statuses:
 

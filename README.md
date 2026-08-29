@@ -52,9 +52,9 @@ Most terminal tools optimize for command execution or remote administration. iTe
 
 ## Current status
 
-**M0–M3 gates passed at L2: shared Shell, single-process Action Runtime, durable transactions, and bounded observation.**
+**M0–M4 gates passed at L2: shared Shell, Action Runtime, durable transactions, bounded observation, and a real stdio MCP bridge.**
 
-Real local bash and zsh PTY scenarios prove command boundaries, shared state, fail-fast Busy, structured Input/Control, stale-target rejection, marker-spoof isolation, large output, and Ctrl+C recovery. PostgreSQL 17 independently proves durable reservation/idempotency/outbox/recovery plus bounded event queries, FTS over 100,000 lines, scoped cursors, retention resync, and chunked artifact reads. The live Runtime is still single-process and in-memory; the async database ingest loop, MCP server, and web console are not complete yet.
+Real local bash and zsh PTY scenarios prove command boundaries, shared state, fail-fast Busy, structured Input/Control, stale-target rejection, marker-spoof isolation, large output, and Ctrl+C recovery. PostgreSQL 17 independently proves durable reservation/idempotency/outbox/recovery plus bounded event queries, FTS over 100,000 lines, scoped cursors, retention resync, and chunked artifact reads. An official MCP SDK Client now drives the same live zsh across stdio Client restarts through a separate Runtime daemon; OpenCode and Claude Code handshakes also pass. The live daemon still uses in-memory state, no model-driven Agent has been authorized, and the Human Console is not complete.
 
 See:
 
@@ -67,6 +67,9 @@ See:
 - [M2 verification](./docs/verification/M2/2026-08-30-postgres-persistence.md) — real PostgreSQL concurrency, rollback, and recovery evidence.
 - [M3 observation architecture](./docs/architecture/bounded-observation.md) — query, cursor, search, and artifact bounds.
 - [M3 verification](./docs/verification/M3/2026-08-30-bounded-observation.md) — real PostgreSQL 100k-line and slow-consumer evidence.
+- [M4 daemon/MCP decision](./docs/adr/0007-runtime-daemon-mcp-bridge.md) — why Client lifecycle cannot own the PTY.
+- [M4 MCP protocol](./docs/protocol/m4-mcp-tools.md) — tools, Actor binding, results, and errors.
+- [M4 verification](./docs/verification/M4/2026-08-30-mcp-adapter.md) — official SDK, OpenCode, Claude Code, and remaining L3 boundary.
 
 ## Planned shape
 
@@ -99,6 +102,8 @@ After dependencies are installed:
 ```bash
 pnpm verify
 pnpm cli
+ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm daemon
+ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm mcp
 pnpm spike:shell -- --shell zsh
 pnpm spike:shell -- --shell bash
 ```
