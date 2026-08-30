@@ -11,6 +11,7 @@ const requiredReports = [
   "docs/verification/M4/2026-08-30-durable-runtime.md",
   "docs/verification/M6/2026-08-30-live-virtual-screen.md",
   "docs/verification/M6/2026-08-30-reactive-screen-observation.md",
+  "docs/verification/M6/2026-08-30-bounded-screen-sync.md",
   "docs/verification/M8/2026-08-30-reliable-messaging.md",
   "docs/verification/M8/2026-08-30-owner-dispatch.md",
   "docs/verification/M8/2026-08-30-interaction-crash-retry-outage.md",

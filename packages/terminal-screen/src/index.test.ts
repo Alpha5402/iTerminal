@@ -114,6 +114,76 @@ describe("XtermScreenProjection", () => {
       screen.dispose();
     }
   });
+
+  it("reads bounded terminal-cell regions without leaking clipped wide glyphs", async () => {
+    const screen = createScreen();
+    try {
+      screen.write("A界B\r\nsecond", 1);
+
+      await expect(
+        screen.region({ columnCount: 3, rowCount: 2, startColumn: 1, startRow: 0 }),
+      ).resolves.toMatchObject({
+        columnCount: 3,
+        frame: { screenVersion: 1 },
+        lines: ["界B", "eco"],
+        rowCount: 2,
+        startColumn: 1,
+        startRow: 0,
+      });
+      await expect(
+        screen.region({ columnCount: 2, rowCount: 1, startColumn: 2, startRow: 0 }),
+      ).resolves.toMatchObject({ lines: [" B"] });
+      await expect(
+        screen.region({ columnCount: 2, rowCount: 1, startColumn: 0, startRow: 0 }),
+      ).resolves.toMatchObject({ lines: ["A"] });
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("returns retained row diffs and an explicit full resync outside bounded history", async () => {
+    const screen = new XtermScreenProjection(
+      { sessionGeneration: 1, sessionId: "screen-test" },
+      { historyEntries: 3 },
+    );
+    try {
+      screen.write("alpha\r\nbeta", 1);
+      screen.write("\u001B[2;1Hgamma", 2);
+
+      await expect(screen.diff(1)).resolves.toMatchObject({
+        afterVersion: 1,
+        changedRows: [{ row: 1, text: "gamma" }],
+        frame: {
+          buffer: "normal",
+          cursor: { column: 5, row: 1 },
+          screenVersion: 2,
+        },
+        resyncRequired: false,
+      });
+      await expect(screen.diff(2)).resolves.toMatchObject({
+        afterVersion: 2,
+        changedRows: [],
+        resyncRequired: false,
+      });
+
+      screen.write("\u001B[1;1Hnew", 3);
+      screen.write("!", 4);
+      await expect(screen.diff(1)).resolves.toMatchObject({
+        afterVersion: 1,
+        reason: "history_unavailable",
+        resyncRequired: true,
+        snapshot: { screenVersion: 4 },
+      });
+      await expect(screen.diff(5)).resolves.toMatchObject({
+        afterVersion: 5,
+        reason: "future_version",
+        resyncRequired: true,
+        snapshot: { screenVersion: 4 },
+      });
+    } finally {
+      screen.dispose();
+    }
+  });
 });
 
 function createScreen(): XtermScreenProjection {

@@ -21,17 +21,49 @@ export type ControlDelivery =
 
 export const CANONICAL_TERMINAL_COLUMNS = 120;
 export const CANONICAL_TERMINAL_ROWS = 40;
+export const TERMINAL_SCREEN_HISTORY_ENTRIES = 64;
 
-export interface TerminalScreenSnapshot {
+export interface TerminalScreenFrame {
   readonly buffer: "normal" | "alternate";
   readonly columns: number;
   readonly cursor: Readonly<{ column: number; row: number }>;
-  readonly lines: readonly string[];
   readonly rows: number;
   readonly screenVersion: number;
   readonly sessionGeneration: number;
   readonly sessionId: string;
 }
+
+export interface TerminalScreenSnapshot extends TerminalScreenFrame {
+  readonly lines: readonly string[];
+}
+
+export interface TerminalScreenRegionResult {
+  readonly columnCount: number;
+  readonly frame: TerminalScreenFrame;
+  readonly lines: readonly string[];
+  readonly rowCount: number;
+  readonly startColumn: number;
+  readonly startRow: number;
+}
+
+export interface TerminalScreenChangedRow {
+  readonly row: number;
+  readonly text: string;
+}
+
+export type TerminalScreenDiffResult =
+  | Readonly<{
+      afterVersion: number;
+      changedRows: readonly TerminalScreenChangedRow[];
+      frame: TerminalScreenFrame;
+      resyncRequired: false;
+    }>
+  | Readonly<{
+      afterVersion: number;
+      reason: "future_version" | "history_unavailable";
+      resyncRequired: true;
+      snapshot: TerminalScreenSnapshot;
+    }>;
 
 export interface TerminalScreenMatch {
   readonly endColumn: number;

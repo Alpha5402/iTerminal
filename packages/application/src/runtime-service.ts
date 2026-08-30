@@ -12,11 +12,17 @@ import type {
   SessionAction,
   SessionEvent,
   ShellKind,
+  TerminalScreenDiffResult,
+  TerminalScreenRegionResult,
   TerminalScreenSnapshot,
   TerminalScreenSearchResult,
   TerminalScreenWaitResult,
 } from "@iterminal/domain";
-import { RuntimeError } from "@iterminal/domain";
+import {
+  CANONICAL_TERMINAL_COLUMNS,
+  CANONICAL_TERMINAL_ROWS,
+  RuntimeError,
+} from "@iterminal/domain";
 
 import type {
   DurableSessionEvent,
@@ -79,6 +85,21 @@ export interface ScreenSearchRequest {
   readonly maxMatches?: number;
   readonly query: string;
   readonly sessionId: string;
+}
+
+export interface ScreenDiffRequest {
+  readonly afterVersion: number;
+  readonly generation: number;
+  readonly sessionId: string;
+}
+
+export interface ScreenRegionRequest {
+  readonly columnCount: number;
+  readonly generation: number;
+  readonly rowCount: number;
+  readonly sessionId: string;
+  readonly startColumn: number;
+  readonly startRow: number;
 }
 
 export type ScreenWaitCondition =
@@ -290,11 +311,47 @@ export class RuntimeService {
     }
     const screen = this.#requireScreen(request.sessionId, request.generation);
     try {
-      return await screen.search({
+      const result = await screen.search({
         caseSensitive: request.caseSensitive ?? false,
         maxMatches,
         query: request.query,
       });
+      this.#requireGeneration(request.sessionId, request.generation);
+      return result;
+    } catch (error) {
+      throw this.#screenFailure(request.sessionId, request.generation, error);
+    }
+  }
+
+  public async getScreenDiff(request: ScreenDiffRequest): Promise<TerminalScreenDiffResult> {
+    if (!Number.isSafeInteger(request.afterVersion) || request.afterVersion < 0) {
+      throw new RuntimeError(
+        "INVALID_REQUEST",
+        "Screen diff afterVersion must be a non-negative integer",
+      );
+    }
+    const screen = this.#requireScreen(request.sessionId, request.generation);
+    try {
+      const result = await screen.diff(request.afterVersion);
+      this.#requireGeneration(request.sessionId, request.generation);
+      return result;
+    } catch (error) {
+      throw this.#screenFailure(request.sessionId, request.generation, error);
+    }
+  }
+
+  public async getScreenRegion(request: ScreenRegionRequest): Promise<TerminalScreenRegionResult> {
+    validateScreenRegion(request);
+    const screen = this.#requireScreen(request.sessionId, request.generation);
+    try {
+      const result = await screen.region({
+        columnCount: request.columnCount,
+        rowCount: request.rowCount,
+        startColumn: request.startColumn,
+        startRow: request.startRow,
+      });
+      this.#requireGeneration(request.sessionId, request.generation);
+      return result;
     } catch (error) {
       throw this.#screenFailure(request.sessionId, request.generation, error);
     }
@@ -1408,6 +1465,31 @@ function validateScreenWait(request: ScreenWaitRequest): void {
       }
       break;
   }
+}
+
+function validateScreenRegion(request: ScreenRegionRequest): void {
+  if (!validScreenRange(request.startRow, request.rowCount, CANONICAL_TERMINAL_ROWS)) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      `Screen row region must fit within ${CANONICAL_TERMINAL_ROWS.toString()} rows`,
+    );
+  }
+  if (!validScreenRange(request.startColumn, request.columnCount, CANONICAL_TERMINAL_COLUMNS)) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      `Screen column region must fit within ${CANONICAL_TERMINAL_COLUMNS.toString()} columns`,
+    );
+  }
+}
+
+function validScreenRange(start: number, count: number, maximum: number): boolean {
+  return (
+    Number.isSafeInteger(start) &&
+    Number.isSafeInteger(count) &&
+    start >= 0 &&
+    count >= 1 &&
+    start + count <= maximum
+  );
 }
 
 function validateScreenText(value: string, label: string): void {

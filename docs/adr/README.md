@@ -24,6 +24,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0018](./0018-rabbitmq-quorum-endpoint-failover.md)     | Pair quorum election with client endpoint failover       | Accepted for M8.9        |
 | [0019](./0019-live-virtual-screen-projection.md)        | Keep one bounded live ANSI/VT screen projection          | Accepted for M6.1        |
 | [0020](./0020-reactive-screen-observation.md)           | Wait and search one bounded live screen reactively       | Accepted for M6.2        |
+| [0021](./0021-bounded-screen-region-diff.md)            | Bound viewport regions, row diffs, and resync            | Accepted for M6.3        |
 
 Statuses:
 

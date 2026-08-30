@@ -129,6 +129,8 @@ function stubGateway(): RuntimeGateway {
     dispatchExecution: unsupported,
     getExecution: unsupported,
     getScreen: unsupported,
+    getScreenDiff: unsupported,
+    getScreenRegion: unsupported,
     getSession: unsupported,
     listSessions: () => Promise.resolve([]),
     queryEvents: unsupported,

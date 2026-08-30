@@ -10,6 +10,8 @@ import type {
   SessionEvent,
   ShellKind,
   TerminalScreenSnapshot,
+  TerminalScreenDiffResult,
+  TerminalScreenRegionResult,
   TerminalScreenSearchResult,
 } from "@iterminal/domain";
 
@@ -44,7 +46,14 @@ export interface ShellExecutorFactory {
 }
 
 export interface TerminalScreenProjection {
+  diff(afterVersion: number): Promise<TerminalScreenDiffResult>;
   dispose(): void;
+  region(input: {
+    readonly columnCount: number;
+    readonly rowCount: number;
+    readonly startColumn: number;
+    readonly startRow: number;
+  }): Promise<TerminalScreenRegionResult>;
   search(input: {
     readonly caseSensitive: boolean;
     readonly maxMatches: number;
