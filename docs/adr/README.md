@@ -52,6 +52,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0046](./0046-bounded-postgres-pools-and-rolling-soak.md)         | Bound Runtime DB pools and scale rolling soak              | Accepted for M9.18       |
 | [0047](./0047-actor-capability-policy-and-immutable-identity.md)  | Make Actor capability explicit and durable identity fixed  | Accepted for M10.1       |
 | [0048](./0048-authenticated-runtime-rpc-grants.md)                | Authenticate scoped caller grants across Router and owner  | Accepted for M10.2       |
+| [0049](./0049-durable-agent-execute-approval.md)                  | Bind Human Approval atomically to one Agent Execute        | Accepted for M10.3       |
 
 Statuses:
 

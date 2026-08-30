@@ -1032,6 +1032,8 @@ Exit Gate：已通过 8 Worker 持续 chaos/pressure；每个 generation 最多�
 
 - [x] M10.1 capability policy core：closed canonical vocabulary、显式 Human/Agent/Scheduler/System profile、Execute/Fork/Input/Control/Resize/Policy/Guard admission、immutable durable Actor identity（L2；不等于 RPC authentication）。
 - [x] M10.2 authenticated Runtime RPC Actor grant：HMAC-SHA256 signed/expiring grant 绑定 canonical operation allowlist 与 exact/paired-prefix Actor scope；direct daemon、central Router verified-context forwarding + owner re-verification、Worker exact service identity 均通过真实路径（L2；同 OS user local trust domain，不等于 remote/multi-user sandbox）。
+- [x] M10.3a Approval contract：ADR-0049 冻结 Agent Execute 的 optional/required policy、exact proposed-Action identity、PENDING→APPROVED/DENIED/EXPIRED→CONSUMED 状态机、Human-only decision、DB-time TTL 与 Action admission 同事务一次性消费；尚未计作实现证据。
+- [ ] M10.3b durable Agent Execute Approval：domain/Application/PostgreSQL/Runtime RPC/MCP/Human Console 实现与真实 Browser Human + official MCP Agent 验证。
 - [ ] Capability/Policy/Approval 完整矩阵。
 - [ ] secret channel、敏感期 recording redaction、审计抽检。
 - [ ] Human Console Approval 与 Human-only secret input 完整交互。
