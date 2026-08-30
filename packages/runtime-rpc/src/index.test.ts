@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { createConnection } from "node:net";
 
 import type { RuntimeError } from "@iterminal/domain";
 import { describe, expect, it } from "vitest";
@@ -56,6 +57,62 @@ describe("UnixRuntimeClient delivery classification", () => {
       await rm(fixture, { force: true, recursive: true });
     }
   });
+
+  it("aborts a bounded screen wait when its RPC client disconnects", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-screen-abort-"));
+    let announceStarted!: () => void;
+    let announceAborted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      announceStarted = resolve;
+    });
+    const aborted = new Promise<void>((resolve) => {
+      announceAborted = resolve;
+    });
+    const server = await startRuntimeRpcServer({
+      gateway: {
+        ...stubGateway(),
+        waitForScreen: (_request, signal) =>
+          new Promise((_resolve, reject) => {
+            announceStarted();
+            signal?.addEventListener(
+              "abort",
+              () => {
+                announceAborted();
+                reject(new Error("aborted by test client"));
+              },
+              { once: true },
+            );
+          }),
+      },
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    const socket = createConnection(server.socketPath);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.once("connect", resolve);
+        socket.once("error", reject);
+      });
+      socket.write(
+        `${JSON.stringify({
+          id: "screen-abort-test",
+          input: {
+            condition: { stableMilliseconds: 1_000, type: "stable" },
+            generation: 1,
+            sessionId: "session-test",
+            timeoutMilliseconds: 5_000,
+          },
+          operation: "screen.wait",
+        })}\n`,
+      );
+      await started;
+      socket.destroy();
+      await aborted;
+    } finally {
+      socket.destroy();
+      await server.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
 });
 
 function missingSocket(suffix: string): string {
@@ -75,9 +132,11 @@ function stubGateway(): RuntimeGateway {
     getSession: unsupported,
     listSessions: () => Promise.resolve([]),
     queryEvents: unsupported,
+    searchScreen: unsupported,
     sendControl: unsupported,
     sendInput: unsupported,
     startExecute: unsupported,
     waitExecution: unsupported,
+    waitForScreen: unsupported,
   };
 }

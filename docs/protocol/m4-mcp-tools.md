@@ -1,6 +1,6 @@
 # M4 MCP stdio protocol
 
-M6.1 extends this protocol with the read-only `screen_get` tool while preserving the M4 Action and Event contracts.
+M6.1–M6.2 extend this protocol with bounded read-only screen observation while preserving the M4 Action and Event contracts.
 
 iTerminal uses the official Model Context Protocol TypeScript SDK v2 and `serveStdio`. The bridge logs only to stderr because stdout is the MCP framing channel. A separate Runtime daemon owns all live state; set `ITERM_RUNTIME_SOCKET` to its absolute Unix socket path before starting the bridge.
 
@@ -25,19 +25,21 @@ The Actor type is always `agent` in M4. Tool arguments cannot claim to be Human 
 
 ## Tools
 
-| Tool             | Result/behavior                                                                      |
-| ---------------- | ------------------------------------------------------------------------------------ |
-| `session_create` | Starts one persistent bash/zsh PTY at an existing workspace                          |
-| `session_get`    | Returns current live projection and active Execution                                 |
-| `session_list`   | Lists daemon-owned Sessions                                                          |
-| `session_close`  | Terminates the exact generation's PTY/process group                                  |
-| `execute`        | Returns accepted Action and DISPATCHING/RUNNING Execution immediately                |
-| `execution_get`  | Reads current bounded Execution projection                                           |
-| `execution_wait` | Waits for a terminal Execution state without replay                                  |
-| `input`          | Writes one batch to an exact generation/Execution, optionally screen-version guarded |
-| `control`        | Delivers explicit TTY control bytes or process-group signal                          |
-| `events_query`   | Returns at most 500 Events after a generation-scoped sequence                        |
-| `screen_get`     | Returns the bounded live ANSI/VT viewport, cursor, buffer, and screen version        |
+| Tool             | Result/behavior                                                                       |
+| ---------------- | ------------------------------------------------------------------------------------- |
+| `session_create` | Starts one persistent bash/zsh PTY at an existing workspace                           |
+| `session_get`    | Returns current live projection and active Execution                                  |
+| `session_list`   | Lists daemon-owned Sessions                                                           |
+| `session_close`  | Terminates the exact generation's PTY/process group                                   |
+| `execute`        | Returns accepted Action and DISPATCHING/RUNNING Execution immediately                 |
+| `execution_get`  | Reads current bounded Execution projection                                            |
+| `execution_wait` | Waits for a terminal Execution state without replay                                   |
+| `input`          | Writes one batch to an exact generation/Execution, optionally screen-version guarded  |
+| `control`        | Delivers explicit TTY control bytes or process-group signal                           |
+| `events_query`   | Returns at most 500 Events after a generation-scoped sequence                         |
+| `screen_get`     | Returns the bounded live ANSI/VT viewport, cursor, buffer, and screen version         |
+| `screen_search`  | Searches literal text in the current viewport with bounded terminal-cell coordinates  |
+| `screen_wait`    | Reactively waits for text, version, stability, or an exact Execution's terminal state |
 
 Every successful tool result contains a JSON text block and `structuredContent: { result }`. Domain failures are tool-level errors with a JSON text envelope:
 
@@ -58,6 +60,8 @@ Every successful tool result contains a JSON text block and `structuredContent: 
 `execute`, `input`, and `control` require caller-generated idempotency keys. The namespace is one Session + Actor across all three Action kinds, so reusing a key for another kind or payload returns `IDEMPOTENCY_KEY_REUSED`. A transport disconnect after a mutating RPC returns `DELIVERY_UNKNOWN`; inspect state using the same idempotency key or Events before any deliberate retry.
 
 `BACKPRESSURE` means the durable delivery backlog is at its configured bound. No new Action or Session reservation was created, the READY Session remains usable, and the caller may retry the same request/idempotency key after Outbox capacity drains. `RUNTIME_UNAVAILABLE` instead means the durable journal or Runtime boundary is unhealthy; callers must inspect/reconnect rather than assuming the old PTY survived.
+
+`screen_search` and `screen_wait` observe only the live current viewport; neither scans scrollback nor durable Events. A wait timeout is bounded to 1–300,000 ms and returns `matched: false`, `reason: "timeout"`, and the latest snapshot instead of raising a transport error. A stable condition means only that no `screenVersion` was applied during its interval—it does not prove prompt readiness or command completion. If an RPC client disconnects, the daemon aborts that client's server-side wait.
 
 ## Run locally
 

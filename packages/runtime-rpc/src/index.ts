@@ -7,6 +7,8 @@ import type {
   CreateSessionRequest,
   ExecuteRequest,
   InputRequest,
+  ScreenSearchRequest,
+  ScreenWaitRequest,
 } from "@iterminal/application";
 import type { RuntimeService } from "@iterminal/application";
 import type {
@@ -16,7 +18,9 @@ import type {
   Execution,
   InputAction,
   Session,
+  TerminalScreenSearchResult,
   TerminalScreenSnapshot,
+  TerminalScreenWaitResult,
 } from "@iterminal/domain";
 import { RuntimeError } from "@iterminal/domain";
 import * as z from "zod/v4";
@@ -90,6 +94,33 @@ const operationSchemas = {
     targetExecutionId: z.string().min(1).max(256),
   }),
   "screen.get": sessionIdentitySchema,
+  "screen.search": sessionIdentitySchema.extend({
+    caseSensitive: z.boolean().default(false),
+    maxMatches: z.number().int().min(1).max(100).default(20),
+    query: z.string().min(1).max(1_024),
+  }),
+  "screen.wait": sessionIdentitySchema.extend({
+    condition: z.discriminatedUnion("type", [
+      z.strictObject({
+        caseSensitive: z.boolean().default(false),
+        text: z.string().min(1).max(1_024),
+        type: z.literal("text"),
+      }),
+      z.strictObject({
+        afterVersion: z.number().int().nonnegative(),
+        type: z.literal("version"),
+      }),
+      z.strictObject({
+        stableMilliseconds: z.number().int().min(50).max(30_000),
+        type: z.literal("stable"),
+      }),
+      z.strictObject({
+        executionId: z.string().min(1).max(256),
+        type: z.literal("execution_exit"),
+      }),
+    ]),
+    timeoutMilliseconds: z.number().int().min(1).max(300_000).default(30_000),
+  }),
   "session.close": sessionIdentitySchema,
   "session.create": z.strictObject({
     shell: z.enum(["bash", "zsh"]),
@@ -111,6 +142,11 @@ export interface RuntimeGateway {
   getSession(sessionId: string): Promise<Session>;
   listSessions(): Promise<readonly Session[]>;
   getScreen(sessionId: string, generation: number): Promise<TerminalScreenSnapshot>;
+  searchScreen(request: ScreenSearchRequest): Promise<TerminalScreenSearchResult>;
+  waitForScreen(
+    request: ScreenWaitRequest,
+    signal?: AbortSignal,
+  ): Promise<TerminalScreenWaitResult>;
   startExecute(request: ExecuteRequest): Promise<StartedExecutionView>;
   dispatchExecution(executionId: string): Promise<StartedExecutionView>;
   getExecution(executionId: string): Promise<Execution>;
@@ -143,6 +179,17 @@ export class LocalRuntimeGateway implements RuntimeGateway {
 
   public getScreen(sessionId: string, generation: number): Promise<TerminalScreenSnapshot> {
     return this.runtime.getScreen(sessionId, generation);
+  }
+
+  public searchScreen(request: ScreenSearchRequest): Promise<TerminalScreenSearchResult> {
+    return this.runtime.searchScreen(request);
+  }
+
+  public waitForScreen(
+    request: ScreenWaitRequest,
+    signal?: AbortSignal,
+  ): Promise<TerminalScreenWaitResult> {
+    return this.runtime.waitForScreen(request, signal);
   }
 
   public async startExecute(request: ExecuteRequest): Promise<StartedExecutionView> {
@@ -272,6 +319,14 @@ export class UnixRuntimeClient implements RuntimeGateway {
 
   public getScreen(sessionId: string, generation: number): Promise<TerminalScreenSnapshot> {
     return this.#request("screen.get", { generation, sessionId });
+  }
+
+  public searchScreen(request: ScreenSearchRequest): Promise<TerminalScreenSearchResult> {
+    return this.#request("screen.search", request);
+  }
+
+  public waitForScreen(request: ScreenWaitRequest): Promise<TerminalScreenWaitResult> {
+    return this.#request("screen.wait", request, WAIT_REQUEST_TIMEOUT_MS);
   }
 
   public startExecute(request: ExecuteRequest): Promise<StartedExecutionView> {
@@ -428,6 +483,9 @@ async function respond(
   isReady: (() => boolean) | undefined,
 ): Promise<void> {
   let id = "unassigned";
+  const abortController = new AbortController();
+  const onSocketClose = (): void => abortController.abort();
+  socket.once("close", onSocketClose);
   try {
     const candidate: unknown = JSON.parse(line);
     if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
@@ -454,7 +512,7 @@ async function respond(
       );
     }
     const input = operationSchemas[operation].parse(parsed.input);
-    const result = await dispatch(gateway, operation, input);
+    const result = await dispatch(gateway, operation, input, abortController.signal);
     writeResponse(socket, { id, ok: true, result });
   } catch (error) {
     const runtimeError = normalizeError(error);
@@ -468,6 +526,8 @@ async function respond(
       id,
       ok: false,
     });
+  } finally {
+    socket.off("close", onSocketClose);
   }
 }
 
@@ -475,6 +535,7 @@ async function dispatch(
   gateway: RuntimeGateway,
   operation: RuntimeOperation,
   input: z.output<(typeof operationSchemas)[RuntimeOperation]>,
+  signal: AbortSignal,
 ): Promise<unknown> {
   switch (operation) {
     case "session.create": {
@@ -553,6 +614,28 @@ async function dispatch(
     case "screen.get": {
       const request = operationSchemas[operation].parse(input);
       return gateway.getScreen(request.sessionId, request.generation);
+    }
+    case "screen.search": {
+      const request = operationSchemas[operation].parse(input);
+      return gateway.searchScreen({
+        caseSensitive: request.caseSensitive,
+        generation: request.generation,
+        maxMatches: request.maxMatches,
+        query: request.query,
+        sessionId: request.sessionId,
+      });
+    }
+    case "screen.wait": {
+      const request = operationSchemas[operation].parse(input);
+      return gateway.waitForScreen(
+        {
+          condition: request.condition,
+          generation: request.generation,
+          sessionId: request.sessionId,
+          timeoutMilliseconds: request.timeoutMilliseconds,
+        },
+        signal,
+      );
     }
   }
 }

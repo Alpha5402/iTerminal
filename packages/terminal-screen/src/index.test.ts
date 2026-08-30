@@ -69,6 +69,51 @@ describe("XtermScreenProjection", () => {
       screen.dispose();
     }
   });
+
+  it("searches the active viewport with terminal-cell columns and bounded matches", async () => {
+    const screen = createScreen();
+    try {
+      screen.write("A界Needle needle", 1);
+      const result = await screen.search({
+        caseSensitive: false,
+        maxMatches: 1,
+        query: "NEEDLE",
+      });
+
+      expect(result.truncated).toBe(true);
+      expect(result.snapshot.screenVersion).toBe(1);
+      expect(result.matches).toEqual([{ endColumn: 9, row: 0, startColumn: 3, text: "Needle" }]);
+
+      screen.write("\u001B[2J\u001B[Hfoo\u001B[10Gbar", 2);
+      await expect(
+        screen.search({ caseSensitive: true, maxMatches: 5, query: "foobar" }),
+      ).resolves.toMatchObject({ matches: [] });
+      await expect(
+        screen.search({ caseSensitive: true, maxMatches: 5, query: "foo      bar" }),
+      ).resolves.toMatchObject({
+        matches: [{ endColumn: 12, row: 0, startColumn: 0, text: "foo      bar" }],
+      });
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("waits reactively for a parsed version, times out, and supports cancellation", async () => {
+    const screen = createScreen();
+    try {
+      const changed = screen.waitForVersion(0, 500);
+      setTimeout(() => screen.write("later", 1), 10);
+      expect(await changed).toMatchObject({ screenVersion: 1 });
+      await expect(screen.waitForVersion(1, 20)).resolves.toBeUndefined();
+
+      const abortController = new AbortController();
+      const aborted = screen.waitForVersion(1, 500, abortController.signal);
+      abortController.abort();
+      await expect(aborted).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      screen.dispose();
+    }
+  });
 });
 
 function createScreen(): XtermScreenProjection {

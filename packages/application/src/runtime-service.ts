@@ -13,6 +13,8 @@ import type {
   SessionEvent,
   ShellKind,
   TerminalScreenSnapshot,
+  TerminalScreenSearchResult,
+  TerminalScreenWaitResult,
 } from "@iterminal/domain";
 import { RuntimeError } from "@iterminal/domain";
 
@@ -33,6 +35,11 @@ const MAX_EVENT_LIMIT = 500;
 const MAX_PENDING_DURABLE_EVENTS = 10_000;
 const MAX_PENDING_DURABLE_BYTES = 8 * 1024 * 1024;
 const DURABLE_FLUSH_TIMEOUT_MS = 30_000;
+const MAX_SCREEN_QUERY_LENGTH = 1_024;
+const MAX_SCREEN_SEARCH_MATCHES = 100;
+const MAX_SCREEN_WAIT_TIMEOUT_MS = 5 * 60 * 1_000;
+const MAX_SCREEN_STABLE_MS = 30_000;
+const MIN_SCREEN_STABLE_MS = 50;
 
 export interface CreateSessionRequest {
   readonly shell: ShellKind;
@@ -64,6 +71,27 @@ export interface ControlRequest {
   readonly targetExecutionId: string;
   readonly delivery: ControlDelivery;
   readonly idempotencyKey: string;
+}
+
+export interface ScreenSearchRequest {
+  readonly caseSensitive?: boolean;
+  readonly generation: number;
+  readonly maxMatches?: number;
+  readonly query: string;
+  readonly sessionId: string;
+}
+
+export type ScreenWaitCondition =
+  | Readonly<{ type: "text"; text: string; caseSensitive?: boolean }>
+  | Readonly<{ type: "version"; afterVersion: number }>
+  | Readonly<{ type: "stable"; stableMilliseconds: number }>
+  | Readonly<{ type: "execution_exit"; executionId: string }>;
+
+export interface ScreenWaitRequest {
+  readonly condition: ScreenWaitCondition;
+  readonly generation: number;
+  readonly sessionId: string;
+  readonly timeoutMilliseconds: number;
 }
 
 export interface StartedExecution {
@@ -244,6 +272,102 @@ export class RuntimeService {
         { generation, reason: errorMessage(error), sessionId },
         true,
       );
+    }
+  }
+
+  public async searchScreen(request: ScreenSearchRequest): Promise<TerminalScreenSearchResult> {
+    validateScreenText(request.query, "Screen search query");
+    const maxMatches = request.maxMatches ?? 20;
+    if (
+      !Number.isSafeInteger(maxMatches) ||
+      maxMatches < 1 ||
+      maxMatches > MAX_SCREEN_SEARCH_MATCHES
+    ) {
+      throw new RuntimeError(
+        "INVALID_REQUEST",
+        `Screen maxMatches must be between 1 and ${MAX_SCREEN_SEARCH_MATCHES.toString()}`,
+      );
+    }
+    const screen = this.#requireScreen(request.sessionId, request.generation);
+    try {
+      return await screen.search({
+        caseSensitive: request.caseSensitive ?? false,
+        maxMatches,
+        query: request.query,
+      });
+    } catch (error) {
+      throw this.#screenFailure(request.sessionId, request.generation, error);
+    }
+  }
+
+  public async waitForScreen(
+    request: ScreenWaitRequest,
+    signal?: AbortSignal,
+  ): Promise<TerminalScreenWaitResult> {
+    validateScreenWait(request);
+    const startedAt = Date.now();
+    const deadline = startedAt + request.timeoutMilliseconds;
+    const screen = this.#requireScreen(request.sessionId, request.generation);
+    try {
+      if (request.condition.type === "execution_exit") {
+        const execution = this.#requireExecution(request.condition.executionId);
+        if (
+          execution.sessionId !== request.sessionId ||
+          execution.sessionGeneration !== request.generation
+        ) {
+          throw new RuntimeError(
+            "EXECUTION_CHANGED",
+            "Screen wait Execution does not belong to the requested Session generation",
+            {
+              executionId: execution.id,
+              generation: request.generation,
+              sessionId: request.sessionId,
+            },
+          );
+        }
+        let terminal = execution;
+        if (!isExecutionTerminal(terminal.status)) {
+          const waited = await waitForPromise(
+            this.waitExecution(terminal.id),
+            remainingMilliseconds(deadline),
+            signal,
+          );
+          if (!waited.completed) {
+            return waitResult(false, await screen.snapshot(), startedAt);
+          }
+          terminal = waited.value;
+        }
+        return waitResult(true, await screen.snapshot(), startedAt, terminal);
+      }
+
+      let snapshot = await screen.snapshot();
+      for (;;) {
+        if (screenConditionMatches(snapshot, request.condition)) {
+          return waitResult(true, snapshot, startedAt);
+        }
+        const remaining = remainingMilliseconds(deadline);
+        if (remaining <= 0) return waitResult(false, snapshot, startedAt);
+        if (request.condition.type === "stable") {
+          const interval = Math.min(request.condition.stableMilliseconds, remaining);
+          const changed = await screen.waitForVersion(snapshot.screenVersion, interval, signal);
+          if (changed === undefined) {
+            return waitResult(
+              interval === request.condition.stableMilliseconds,
+              snapshot,
+              startedAt,
+            );
+          }
+          snapshot = changed;
+          continue;
+        }
+        const changed = await screen.waitForVersion(snapshot.screenVersion, remaining, signal);
+        if (changed === undefined) return waitResult(false, snapshot, startedAt);
+        snapshot = changed;
+      }
+    } catch (error) {
+      if (error instanceof RuntimeError) throw error;
+      if (error instanceof Error && error.name === "AbortError") throw error;
+      throw this.#screenFailure(request.sessionId, request.generation, error);
     }
   }
 
@@ -990,6 +1114,33 @@ export class RuntimeService {
     return executor;
   }
 
+  #requireScreen(sessionId: string, generation: number): TerminalScreenProjection {
+    this.#requireGeneration(sessionId, generation);
+    const screen = this.#screens.get(sessionId);
+    if (screen === undefined) {
+      throw new RuntimeError(
+        "RUNTIME_UNAVAILABLE",
+        "This Runtime has no live Virtual Screen projection",
+        { generation, sessionId },
+      );
+    }
+    return screen;
+  }
+
+  #screenFailure(sessionId: string, generation: number, error: unknown): RuntimeError {
+    try {
+      this.#requireGeneration(sessionId, generation);
+    } catch (stateError) {
+      if (stateError instanceof RuntimeError) return stateError;
+    }
+    return new RuntimeError(
+      "RUNTIME_UNAVAILABLE",
+      "Virtual Screen projection is unavailable",
+      { generation, reason: errorMessage(error), sessionId },
+      true,
+    );
+  }
+
   #requireExecution(executionId: string): Execution {
     const execution = this.store.getExecution(executionId);
     if (execution === undefined) {
@@ -1211,6 +1362,147 @@ export class RuntimeService {
   #timestamp(): string {
     return this.#now().toISOString();
   }
+}
+
+function validateScreenWait(request: ScreenWaitRequest): void {
+  if (
+    !Number.isSafeInteger(request.timeoutMilliseconds) ||
+    request.timeoutMilliseconds < 1 ||
+    request.timeoutMilliseconds > MAX_SCREEN_WAIT_TIMEOUT_MS
+  ) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      `Screen wait timeout must be between 1 and ${MAX_SCREEN_WAIT_TIMEOUT_MS.toString()} milliseconds`,
+    );
+  }
+  switch (request.condition.type) {
+    case "text":
+      validateScreenText(request.condition.text, "Screen wait text");
+      break;
+    case "version":
+      if (
+        !Number.isSafeInteger(request.condition.afterVersion) ||
+        request.condition.afterVersion < 0
+      ) {
+        throw new RuntimeError(
+          "INVALID_REQUEST",
+          "Screen wait afterVersion must be a non-negative integer",
+        );
+      }
+      break;
+    case "stable":
+      if (
+        !Number.isSafeInteger(request.condition.stableMilliseconds) ||
+        request.condition.stableMilliseconds < MIN_SCREEN_STABLE_MS ||
+        request.condition.stableMilliseconds > MAX_SCREEN_STABLE_MS
+      ) {
+        throw new RuntimeError(
+          "INVALID_REQUEST",
+          `Screen stable interval must be between ${MIN_SCREEN_STABLE_MS.toString()} and ${MAX_SCREEN_STABLE_MS.toString()} milliseconds`,
+        );
+      }
+      break;
+    case "execution_exit":
+      if (request.condition.executionId.length === 0) {
+        throw new RuntimeError("INVALID_REQUEST", "Screen wait executionId is required");
+      }
+      break;
+  }
+}
+
+function validateScreenText(value: string, label: string): void {
+  if (
+    value.length === 0 ||
+    value.length > MAX_SCREEN_QUERY_LENGTH ||
+    value.includes("\n") ||
+    value.includes("\r") ||
+    value.includes("\0")
+  ) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      `${label} must be 1-${MAX_SCREEN_QUERY_LENGTH.toString()} characters without line breaks or NUL`,
+    );
+  }
+}
+
+function screenConditionMatches(
+  snapshot: TerminalScreenSnapshot,
+  condition: Exclude<ScreenWaitCondition, { type: "execution_exit" }>,
+): boolean {
+  switch (condition.type) {
+    case "text": {
+      const needle =
+        condition.caseSensitive === true ? condition.text : condition.text.toLowerCase();
+      return snapshot.lines.some((line) =>
+        (condition.caseSensitive === true ? line : line.toLowerCase()).includes(needle),
+      );
+    }
+    case "version":
+      return snapshot.screenVersion > condition.afterVersion;
+    case "stable":
+      return false;
+  }
+}
+
+function waitResult(
+  matched: boolean,
+  snapshot: TerminalScreenSnapshot,
+  startedAt: number,
+  execution?: Execution,
+): TerminalScreenWaitResult {
+  return {
+    matched,
+    reason: matched ? "condition" : "timeout",
+    snapshot,
+    waitedMilliseconds: Math.max(0, Date.now() - startedAt),
+    ...(execution === undefined ? {} : { execution }),
+  };
+}
+
+function remainingMilliseconds(deadline: number): number {
+  return Math.max(0, deadline - Date.now());
+}
+
+type WaitForPromiseResult<T> =
+  Readonly<{ completed: true; value: T }> | Readonly<{ completed: false }>;
+
+function waitForPromise<T>(
+  work: Promise<T>,
+  timeoutMilliseconds: number,
+  signal?: AbortSignal,
+): Promise<WaitForPromiseResult<T>> {
+  if (timeoutMilliseconds <= 0) return Promise.resolve({ completed: false });
+  if (signal?.aborted === true) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let onAbort: (() => void) | undefined;
+    const finish = (result: WaitForPromiseResult<T>): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
+      resolve(result);
+    };
+    const fail = (error: unknown): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    };
+    const timer = setTimeout(() => finish({ completed: false }), timeoutMilliseconds);
+    if (signal !== undefined) {
+      onAbort = () => fail(abortError());
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+    void work.then((value) => finish({ completed: true, value }), fail);
+  });
+}
+
+function abortError(): Error {
+  const error = new Error("Screen wait aborted");
+  error.name = "AbortError";
+  return error;
 }
 
 function hashRequest(value: unknown): string {

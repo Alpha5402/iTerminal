@@ -10,6 +10,7 @@ import type {
   SessionEvent,
   ShellKind,
   TerminalScreenSnapshot,
+  TerminalScreenSearchResult,
 } from "@iterminal/domain";
 
 export interface ShellExecutionResult {
@@ -44,7 +45,17 @@ export interface ShellExecutorFactory {
 
 export interface TerminalScreenProjection {
   dispose(): void;
+  search(input: {
+    readonly caseSensitive: boolean;
+    readonly maxMatches: number;
+    readonly query: string;
+  }): Promise<TerminalScreenSearchResult>;
   snapshot(): Promise<TerminalScreenSnapshot>;
+  waitForVersion(
+    afterVersion: number,
+    timeoutMilliseconds: number,
+    signal?: AbortSignal,
+  ): Promise<TerminalScreenSnapshot | undefined>;
   write(data: string, screenVersion: number): void;
 }
 

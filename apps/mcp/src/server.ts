@@ -20,7 +20,7 @@ const idempotencyKey = z
 
 export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServer {
   const server = new McpServer(
-    { name: "iterminal", version: "0.6.1" },
+    { name: "iterminal", version: "0.6.2" },
     {
       instructions:
         "Create or select one shared Session, then pass its exact generation to every operation. " +
@@ -233,6 +233,76 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
     },
     async ({ generation: requestedGeneration, sessionId: requestedSessionId }) =>
       call(() => gateway.getScreen(requestedSessionId, requestedGeneration)),
+  );
+
+  server.registerTool(
+    "screen_search",
+    {
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      description:
+        "Search literal text only in the current active 120x40 viewport. Returns at most maxMatches terminal-cell row/column ranges tied to one exact screen snapshot; it does not search scrollback or durable Events.",
+      inputSchema: z.strictObject({
+        caseSensitive: z.boolean().default(false),
+        generation,
+        maxMatches: z.number().int().min(1).max(100).default(20),
+        query: z.string().min(1).max(1_024),
+        sessionId,
+      }),
+      title: "Search live terminal screen",
+    },
+    async (input) =>
+      call(() =>
+        gateway.searchScreen({
+          caseSensitive: input.caseSensitive,
+          generation: input.generation,
+          maxMatches: input.maxMatches,
+          query: input.query,
+          sessionId: input.sessionId,
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "screen_wait",
+    {
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      description:
+        "Wait without polling for visible text, a newer screen version, a no-change interval, or an exact Execution terminal state. Timeout returns matched=false with the latest bounded snapshot. Stable means no screenVersion change, not Shell readiness.",
+      inputSchema: z.strictObject({
+        condition: z.discriminatedUnion("type", [
+          z.strictObject({
+            caseSensitive: z.boolean().default(false),
+            text: z.string().min(1).max(1_024),
+            type: z.literal("text"),
+          }),
+          z.strictObject({
+            afterVersion: z.number().int().nonnegative(),
+            type: z.literal("version"),
+          }),
+          z.strictObject({
+            stableMilliseconds: z.number().int().min(50).max(30_000),
+            type: z.literal("stable"),
+          }),
+          z.strictObject({
+            executionId,
+            type: z.literal("execution_exit"),
+          }),
+        ]),
+        generation,
+        sessionId,
+        timeoutMilliseconds: z.number().int().min(1).max(300_000).default(30_000),
+      }),
+      title: "Wait for live terminal evidence",
+    },
+    async (input) =>
+      call(() =>
+        gateway.waitForScreen({
+          condition: input.condition,
+          generation: input.generation,
+          sessionId: input.sessionId,
+          timeoutMilliseconds: input.timeoutMilliseconds,
+        }),
+      ),
   );
 
   return server;

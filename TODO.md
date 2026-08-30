@@ -1,10 +1,10 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
-> 状态：Implementation Baseline v5.1 — M0–M4.1、M6.1 Virtual Screen base 与 M8.9 RabbitMQ quorum leader failover 已通过 L2，M4 L3 待真实模型调用
+> 状态：Implementation Baseline v5.2 — M0–M4.1、M6.2 reactive screen observation 与 M8.9 RabbitMQ quorum leader failover 已通过 L2，M4 L3 待真实模型调用
 >
 > 基线日期：2026-08-30
 >
-> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live MCP daemon 已接入 PostgreSQL write-ahead journal、bounded ingest loop，以及固定 120×40 的 live ANSI/VT Virtual Screen，Agent 可经 exact-generation `screen_get` 读取 normal/alternate buffer、cursor、plain-text rows 与 screen version。M8.9 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放、DB pre-commit crash/lock timeout/Outbox backlog admission、单节点 RabbitMQ/PostgreSQL 自动重连、standalone relay/Worker 恢复、真实 TCP byte-drop silent blackhole，以及三节点 RabbitMQ quorum 的实际 leader 停机、重新选举与多端点客户端恢复。Virtual Screen diff/region/search/wait、resize/reflow、style/cell metadata、Human Console，以及非对称/minority partition、相关性故障、long soak、M9 fencing、多 Worker 与完整 L3/L4 仍未完成。
+> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live MCP daemon 已接入 PostgreSQL write-ahead journal、bounded ingest loop，以及固定 120×40 的 live ANSI/VT Virtual Screen。Agent 可经 exact-generation `screen_get` 读完整 viewport，经 `screen_search` 做有界 literal search，并用非轮询 `screen_wait` 等待 visible text、version、stable interval 或 Execution terminal state。M8.9 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放、DB pre-commit crash/lock timeout/Outbox backlog admission、单节点 RabbitMQ/PostgreSQL 自动重连、standalone relay/Worker 恢复、真实 TCP byte-drop silent blackhole，以及三节点 RabbitMQ quorum 的实际 leader 停机、重新选举与多端点客户端恢复。Virtual Screen diff/region、resize/reflow、style/cell metadata、durable wait/subscription、Human Console，以及非对称/minority partition、相关性故障、long soak、M9 fencing、多 Worker 与完整 L3/L4 仍未完成。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -846,9 +846,11 @@ Exit Gate：真实 Human +真实 MCP Agent 共享 cwd/env/REPL；所有 Action �
 - [x] `@xterm/headless` ANSI/VT parser、alternate screen、Unicode/wide chars 与固定 120×40 canonical geometry。
 - [ ] 受控 resize/reflow 与多 viewer geometry ownership。
 - [x] bounded full viewport、active buffer、cursor 与 exact `screenVersion` snapshot。
-- [ ] screen diff/region/search 与 style/cell metadata。
+- [x] bounded current-viewport literal search 与 terminal-cell row/column match。
+- [ ] screen diff/region 与 style/cell metadata。
 - [x] exact-generation Runtime RPC `screen.get` 与 MCP `screen_get`。
-- [ ] wait for text/version/stable/exit，并为 Human Console 增加 screen resync。
+- [x] exact-generation Runtime RPC/MCP reactive wait for visible text/version/stable interval/Execution exit；timeout 返回最新 bounded snapshot，RPC disconnect 取消服务端 wait。
+- [ ] Human Console screen resync/subscription 与 daemon restart 后的 durable wait。
 - [x] expected screen version 与 `SCREEN_CHANGED`：Agent 读屏后 Human Actor 经 Runtime RPC 改屏，Agent stale input 被拒绝。
 - [ ] common/human_guarded/human_only/agent_only 与短期 Guard。
 - [ ] TerminalState heuristic + confidence/evidence。
@@ -1066,4 +1068,4 @@ v1.0 还必须满足 M7–M10、fork 语义、故障矩阵、owner routing、mul
 7. `feat(persistence): persist actions executions and events`：PostgreSQL、CAS、idempotency、unknown recovery。
 8. `feat(observation): add bounded event queries`：完成 M3 后再开始 MCP adapter。
 
-当前已完成建议切片 1–8，并追加 M4.1 live durable journal、M6.1 live Virtual Screen base、M8.1 reliable messaging、M8.2 owner-local queue dispatch、M8.3 Interaction/retry outage crash semantics、M8.4 admission/backpressure、M8.5 RabbitMQ process reconnect、M8.6 PostgreSQL owner recovery、M8.7 messaging-loop PostgreSQL recovery、M8.8 silent network blackhole recovery 与 M8.9 RabbitMQ quorum leader failover；后续仍严格按里程碑 Exit Gate 与 `docs/verification/` 证据推进。
+当前已完成建议切片 1–8，并追加 M4.1 live durable journal、M6.1 live Virtual Screen base、M6.2 reactive screen observation、M8.1 reliable messaging、M8.2 owner-local queue dispatch、M8.3 Interaction/retry outage crash semantics、M8.4 admission/backpressure、M8.5 RabbitMQ process reconnect、M8.6 PostgreSQL owner recovery、M8.7 messaging-loop PostgreSQL recovery、M8.8 silent network blackhole recovery 与 M8.9 RabbitMQ quorum leader failover；后续仍严格按里程碑 Exit Gate 与 `docs/verification/` 证据推进。

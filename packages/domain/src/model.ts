@@ -33,6 +33,27 @@ export interface TerminalScreenSnapshot {
   readonly sessionId: string;
 }
 
+export interface TerminalScreenMatch {
+  readonly endColumn: number;
+  readonly row: number;
+  readonly startColumn: number;
+  readonly text: string;
+}
+
+export interface TerminalScreenSearchResult {
+  readonly matches: readonly TerminalScreenMatch[];
+  readonly snapshot: TerminalScreenSnapshot;
+  readonly truncated: boolean;
+}
+
+export interface TerminalScreenWaitResult {
+  readonly matched: boolean;
+  readonly reason: "condition" | "timeout";
+  readonly snapshot: TerminalScreenSnapshot;
+  readonly waitedMilliseconds: number;
+  readonly execution?: Execution;
+}
+
 export interface Actor {
   readonly id: string;
   readonly type: ActorType;

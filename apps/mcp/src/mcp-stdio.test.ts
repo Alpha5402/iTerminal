@@ -42,6 +42,8 @@ describe("M4 stdio MCP bridge", () => {
       "execution_wait",
       "input",
       "screen_get",
+      "screen_search",
+      "screen_wait",
       "session_close",
       "session_create",
       "session_get",
