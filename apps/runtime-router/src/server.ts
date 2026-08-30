@@ -75,16 +75,19 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
   ) {}
 
   public async createSession(request: CreateSessionRequest): Promise<Session> {
-    if (request.idempotencyKey === undefined) {
+    const idempotencyKey = request.idempotencyKey;
+    if (idempotencyKey === undefined) {
       throw new RuntimeError(
         "INVALID_REQUEST",
         "Central Router Session creation requires an idempotency key",
       );
     }
-    const claim = await this.routes.claimSessionCreation({
-      idempotencyKey: request.idempotencyKey,
-      requestHash: sessionCreationRequestHash(request),
-    });
+    const claim = await this.#routeDatabase("session.create", () =>
+      this.routes.claimSessionCreation({
+        idempotencyKey,
+        requestHash: sessionCreationRequestHash(request),
+      }),
+    );
     if (claim === undefined) {
       throw new RuntimeError(
         "OWNER_ROUTE_UNAVAILABLE",
@@ -135,7 +138,9 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
   }
 
   public async listSessions(): Promise<readonly Session[]> {
-    const resolutions = await this.routes.listSessionOwnerRoutes();
+    const resolutions = await this.#routeDatabase("session.list", () =>
+      this.routes.listSessionOwnerRoutes(),
+    );
     const owners = resolutions.map((resolution) =>
       requiredRoute(resolution, "session", "*", "session.list"),
     );
@@ -324,7 +329,9 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
     operation: string,
     invoke: (client: RuntimeGateway) => Promise<T>,
   ): Promise<{ readonly owner: RuntimeOwnerRoute; readonly result: T }> {
-    const route = await this.routes.resolveSessionRoute(sessionId);
+    const route = await this.#routeDatabase(operation, () =>
+      this.routes.resolveSessionRoute(sessionId),
+    );
     const owner = requiredRoute(route, "session", sessionId, operation);
     return { owner, result: await this.#forward(owner, operation, invoke) };
   }
@@ -334,9 +341,25 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
     operation: string,
     invoke: (client: RuntimeGateway) => Promise<T>,
   ): Promise<T> {
-    const route = await this.routes.resolveExecutionRoute(executionId);
+    const route = await this.#routeDatabase(operation, () =>
+      this.routes.resolveExecutionRoute(executionId),
+    );
     const owner = requiredRoute(route, "execution", executionId, operation);
     return this.#forward(owner, operation, invoke);
+  }
+
+  async #routeDatabase<T>(operation: string, query: () => Promise<T>): Promise<T> {
+    try {
+      return await query();
+    } catch (error) {
+      if (error instanceof RuntimeError) throw error;
+      throw new RuntimeError(
+        "RUNTIME_UNAVAILABLE",
+        "Runtime Router durable route database is unavailable",
+        { component: "runtime-router", operation, phase: "route_resolution" },
+        true,
+      );
+    }
   }
 
   async #forward<T>(

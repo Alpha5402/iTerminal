@@ -37,6 +37,30 @@ describe("CentralRuntimeRouterGateway error classification", () => {
       retryable: false,
     });
   });
+
+  it("classifies route database failure before creating an owner client", async () => {
+    let ownerClientCreated = false;
+    const routes: RuntimeOwnerRegistry = {
+      ...routeRegistry(owner),
+      resolveSessionRoute: () => Promise.reject(new Error("database connection details")),
+    };
+    const gateway = new CentralRuntimeRouterGateway(routes, () => {
+      ownerClientCreated = true;
+      return new WrongOwnerClient();
+    });
+
+    await expect(gateway.getSession("session-database-partition")).rejects.toMatchObject({
+      code: "RUNTIME_UNAVAILABLE",
+      details: {
+        component: "runtime-router",
+        operation: "session.get",
+        phase: "route_resolution",
+      },
+      message: "Runtime Router durable route database is unavailable",
+      retryable: true,
+    });
+    expect(ownerClientCreated).toBe(false);
+  });
 });
 
 class BusinessUnavailableClient extends UnixRuntimeClient {

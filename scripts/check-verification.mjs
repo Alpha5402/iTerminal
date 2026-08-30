@@ -36,6 +36,7 @@ const requiredReports = [
   { level: "L2", path: "docs/verification/M9/2026-08-30-asymmetric-owner-partition.md" },
   { level: "L2", path: "docs/verification/M9/2026-08-30-router-in-flight-crash.md" },
   { level: "L2", path: "docs/verification/M9/2026-08-30-root-session-idempotency.md" },
+  { level: "L2", path: "docs/verification/M9/2026-08-30-router-database-partition.md" },
 ];
 
 for (const report of requiredReports) {

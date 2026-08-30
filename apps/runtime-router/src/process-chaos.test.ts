@@ -584,6 +584,133 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
     expect(completed.output).toContain("m98-root-create-replay");
   }, 120_000);
 
+  it("isolates a Router-only PostgreSQL blackhole while another Router and both owners progress", async () => {
+    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m99-router-part-")));
+    fixtures.push(root);
+    const workspace = join(root, "workspace");
+    await mkdir(workspace, { recursive: true });
+    const owners = await Promise.all([
+      startRuntimeChild(
+        root,
+        "owner-router-partition-a",
+        "instance-router-partition-a",
+        join(root, "a.sock"),
+      ),
+      startRuntimeChild(
+        root,
+        "owner-router-partition-b",
+        "instance-router-partition-b",
+        join(root, "b.sock"),
+      ),
+    ]);
+    children.push(...owners);
+    const proxy = await proxyFor(databaseUrl ?? "");
+    proxies.push(proxy);
+    const isolatedSocket = join(root, "router-isolated.sock");
+    const healthySocket = join(root, "router-healthy.sock");
+    const isolatedRouter = await startRouterChild(
+      isolatedSocket,
+      undefined,
+      throughProxy(databaseUrl ?? "", proxy),
+      300,
+    );
+    const healthyRouter = await startRouterChild(healthySocket);
+    children.push(isolatedRouter, healthyRouter);
+    const isolated = new UnixRuntimeClient(isolatedSocket);
+    const healthy = new UnixRuntimeClient(healthySocket);
+    const first = await isolated.createSession({
+      idempotencyKey: "m99-initial-session-create",
+      shell: "zsh",
+      workspaceRoot: workspace,
+    });
+
+    proxy.setMode("BLACKHOLE");
+    const unavailableAt = Date.now();
+    await expect(isolated.getSession(first.id)).rejects.toMatchObject({
+      code: "RUNTIME_UNAVAILABLE",
+      details: {
+        component: "runtime-router",
+        operation: "session.get",
+        phase: "route_resolution",
+      },
+      retryable: true,
+    });
+    expect(Date.now() - unavailableAt).toBeLessThan(3_000);
+    const isolatedCreate = {
+      idempotencyKey: "m99-isolated-session-create",
+      shell: "zsh" as const,
+      workspaceRoot: workspace,
+    };
+    await expect(isolated.createSession(isolatedCreate)).rejects.toMatchObject({
+      code: "RUNTIME_UNAVAILABLE",
+      details: {
+        component: "runtime-router",
+        operation: "session.create",
+        phase: "route_resolution",
+      },
+      retryable: true,
+    });
+    expect(isolatedRouter.process.exitCode).toBeNull();
+    expect(isolatedRouter.process.signalCode).toBeNull();
+    expect(
+      await pool.query("SELECT 1 FROM session_creation_requests WHERE idempotency_key = $1", [
+        isolatedCreate.idempotencyKey,
+      ]),
+    ).toMatchObject({ rowCount: 0 });
+
+    expect((await healthy.getSession(first.id)).id).toBe(first.id);
+    const healthyExecution = await healthy.startExecute({
+      actor: actor("router-partition-healthy"),
+      command: "printf m99-healthy-router",
+      idempotencyKey: "m99-healthy-router-execute",
+      sessionGeneration: first.generation,
+      sessionId: first.id,
+    });
+    const healthyCompleted = await healthy.waitExecution(healthyExecution.execution.id);
+    expect(healthyCompleted.status).toBe("COMPLETED");
+    expect(healthyCompleted.output).toContain("m99-healthy-router");
+    const duringPartition = await healthy.createSession({
+      idempotencyKey: "m99-healthy-session-create",
+      shell: "zsh",
+      workspaceRoot: workspace,
+    });
+    expect(duringPartition.id).not.toBe(first.id);
+
+    proxy.setMode("CUT");
+    proxy.setMode("FORWARD");
+    const recovered = await waitForSessionStatus(isolated, first.id, "READY", 10_000);
+    expect(recovered.id).toBe(first.id);
+    const settled = await isolated.createSession(isolatedCreate);
+    const durable = await pool.query<{
+      creation_count: string;
+      placement_count: string;
+      session_count: string;
+    }>(
+      `SELECT
+         (SELECT count(*)::text FROM session_creation_requests
+           WHERE idempotency_key = $1) AS creation_count,
+         (SELECT sum(placement_count)::text FROM runtime_workers
+           WHERE owner_id LIKE 'owner-router-partition-%') AS placement_count,
+         (SELECT count(*)::text FROM sessions
+           WHERE id IN (SELECT session_id FROM session_creation_requests
+                          WHERE idempotency_key = $1)) AS session_count`,
+      [isolatedCreate.idempotencyKey],
+    );
+    expect(durable.rows).toEqual([
+      { creation_count: "1", placement_count: "3", session_count: "1" },
+    ]);
+    const recoveredExecution = await isolated.startExecute({
+      actor: actor("router-partition-recovered"),
+      command: "printf m99-recovered-router",
+      idempotencyKey: "m99-recovered-router-execute",
+      sessionGeneration: settled.generation,
+      sessionId: settled.id,
+    });
+    const recoveredCompleted = await isolated.waitExecution(recoveredExecution.execution.id);
+    expect(recoveredCompleted.status).toBe("COMPLETED");
+    expect(recoveredCompleted.output).toContain("m99-recovered-router");
+  }, 120_000);
+
   async function startRuntimeChild(
     root: string,
     ownerId: string,
@@ -613,6 +740,8 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
     socketPath: string,
     failpoint?:
       "after-execution-start-forward" | "after-placement-claim" | "after-session-create-forward",
+    connectionString = databaseUrl ?? "",
+    databaseStatementTimeoutMilliseconds?: number,
   ): Promise<ManagedChild> {
     const child = startChild(
       failpoint === undefined ? "router" : `router-${failpoint}`,
@@ -620,8 +749,13 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
         ? "apps/runtime-router/src/main.ts"
         : "apps/runtime-router/src/fixtures/crash-router.ts",
       {
-        ITERM_DATABASE_URL: databaseUrl ?? "",
+        ITERM_DATABASE_URL: connectionString,
         ITERM_ROUTER_SOCKET: socketPath,
+        ...(databaseStatementTimeoutMilliseconds === undefined
+          ? {}
+          : {
+              ITERM_DATABASE_STATEMENT_TIMEOUT_MS: databaseStatementTimeoutMilliseconds.toString(),
+            }),
         ...(failpoint === undefined ? {} : { ITERM_TEST_FAILPOINT: failpoint }),
       },
     );
