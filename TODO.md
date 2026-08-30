@@ -1,10 +1,10 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
-> 状态：Implementation Baseline v5.4 — M0–M4.1、M6.4 stable styled-cell observation 与 M8.9 RabbitMQ quorum leader failover 已通过 L2，M4 L3 待真实模型调用
+> 状态：Planning Baseline v5.5 / Implementation Baseline v5.4 — M0–M4.1、M6.4 stable styled-cell observation 与 M8.9 RabbitMQ quorum leader failover 已通过 L2，M4 L3 待真实模型调用
 >
 > 基线日期：2026-08-30
 >
-> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live MCP daemon 已接入 PostgreSQL write-ahead journal、bounded ingest loop，以及固定 120×40 的 live ANSI/VT Virtual Screen。Agent 可经 exact-generation `screen_get` 读完整 viewport，经 `screen_region` 读 terminal-cell rectangle，经 `screen_cells` 读取 sparse material cells、palette/RGB colors 与标准 SGR attributes，经 64-revision `screen_diff` 获得 bounded plain-text row replacement 或显式 resync snapshot，经 `screen_search` 做有界 literal search，并用非轮询 `screen_wait` 等待 visible text、version、stable interval 或 Execution terminal state。M8.9 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放、DB pre-commit crash/lock timeout/Outbox backlog admission、单节点 RabbitMQ/PostgreSQL 自动重连、standalone relay/Worker 恢复、真实 TCP byte-drop silent blackhole，以及三节点 RabbitMQ quorum 的实际 leader 停机、重新选举与多端点客户端恢复。Virtual Screen resize/reflow、style diff、hyperlink/image、durable wait/subscription、Human Console，以及非对称/minority partition、相关性故障、long soak、M9 fencing、多 Worker 与完整 L3/L4 仍未完成。
+> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live MCP daemon 已接入 PostgreSQL write-ahead journal、bounded ingest loop，以及固定 120×40 的 live ANSI/VT Virtual Screen。Agent 可经 exact-generation `screen_get` 读完整 viewport，经 `screen_region` 读 terminal-cell rectangle，经 `screen_cells` 读取 sparse material cells、palette/RGB colors 与标准 SGR attributes，经 64-revision `screen_diff` 获得 bounded plain-text row replacement 或显式 resync snapshot，经 `screen_search` 做有界 literal search，并用非轮询 `screen_wait` 等待 visible text、version、stable interval 或 Execution terminal state。M8.9 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放、DB pre-commit crash/lock timeout/Outbox backlog admission、单节点 RabbitMQ/PostgreSQL 自动重连、standalone relay/Worker 恢复、真实 TCP byte-drop silent blackhole，以及三节点 RabbitMQ quorum 的实际 leader 停机、重新选举与多端点客户端恢复。M6.5 Input Policy/Interaction Guard 目前仅完成规划，尚未实现。Virtual Screen resize/reflow、style diff、hyperlink/image、durable wait/subscription、Human Console，以及非对称/minority partition、相关性故障、long soak、M9 fencing、多 Worker 与完整 L3/L4 仍未完成。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -32,6 +32,27 @@
 7. **`fork_session` 只能复制可重建的 Shell Checkpoint。**不能复制 foreground process、REPL memory、数据库事务、vim buffer、socket 或 file descriptor。
 
 上述模型已经成为实现基线；各里程碑的真实完成范围仍以 `docs/verification/` 中的证据与 `Not proven` 边界为准。
+
+### 0.1 对 2026-08-30 Final PLAN 调整稿的合并结论
+
+本次调整稿没有推翻现有领域模型。以下内容接受并强化：
+
+- Human/Agent 共享一个 Persistent PTY/Shell，所有写操作经过 Action Service。
+- Execute 忙时 fail-fast，Input/Control 命中当前 foreground Execution；独立工作显式 fork。
+- Human 使用实时高带宽观察，Agent 使用 pull-based、selective、bounded Observation。
+- Human 在 READY 使用 command composer，RUNNING 才进入 interactive input。
+- Snapshot 只是 Observation/cache；fork 只复制可重建 Shell Context；不确定副作用进入 `UNKNOWN`。
+
+以下内容不合并或按当前实现契约修正：
+
+1. 调整稿中的 Phase 0–9 是概念路线，不是当前进度表；不得把已有 L2 实现重置为未完成。
+2. 继续使用 `ControlAction`，不退回 `SignalAction`；它必须区分 TTY control bytes 与 process-group signal。
+3. 保留 `STARTING`、Action/Execution 分离与 generation 边界，不把生命周期压缩成单一 Session 状态。
+4. PTY 事件继续使用合并的 `pty_output`，不持久化虚构的 stdout/stderr 归属。
+5. durable truth 只使用 PostgreSQL；不新增 SQLite 与 PostgreSQL 双后端兼容成本。
+6. 原子 input batch 只解决字节交织，不能解决语义竞争；保留 target execution、screen freshness 与短期 Interaction Guard。
+7. MCP 工具按已实现能力注册；不提前暴露 fork/search 等空壳，也不在没有版本迁移 ADR 时重命名已发布工具。
+8. RabbitMQ/M8 虽已先行达到部分 L4 故障证据，但不会替代尚缺的 M4 L3、M5 Human Console 与 M6 交互安全 Exit Gate。
 
 ---
 
@@ -397,7 +418,7 @@ Human 默认消费实时 PTY bytes +结构化 Action/Event metadata；Agent 默�
 - Session：created、shell_starting、shell_ready、broken、rebuild_started、closed。
 - Action：accepted、rejected、dispatching、cancelled。
 - Execution：started、completed、failed、interrupted、unknown。
-- Interaction：input_delivered/rejected/unknown、control_delivered/rejected、guard_changed。
+- Interaction：input_delivered/rejected/unknown、control_delivered/rejected、policy_changed、guard_acquired/renewed/released/expired。
 - Terminal：`pty_output`、screen_changed、cwd_observed、foreground_observed、resize_applied。
 - Reliability：owner_acquired/lost、outbox_published、delivery_ambiguous。
 - Security：policy_denied、approval_requested/granted/expired、secret_input_completed/cancelled。
@@ -477,7 +498,7 @@ PTY bytes -> ANSI/VT parser -> versioned screen buffer -> full/diff/region/searc
 - [x] `session_snapshots`：cwd、foreground observation、last exit、screen version、confidence、observed time。
 - [ ] `shell_checkpoints`：基础表与 newest-observation 更新已完成；filtered context/staleness 生成待 M7。
 - [ ] `screen_snapshots`：geometry/cursor/content or artifact ref、screen version。
-- [ ] `interaction_guards`：mode、actor、TTL、reason、version。
+- [ ] `interaction_guards`：generation-scoped policy、guard actor/reason/TTL/renewal、state version；M6.5 实现。
 - [ ] `approvals`：exact action hash、actor/approver、expiry、one-time use。
 - [x] `outbox`：`ExecutionReady`、leased claim、confirm publish、mark/retry 与 publish Event。
 - [x] `consumer_inbox`：payload hash、processing lease、attempt/outcome 与完成去重。
@@ -552,36 +573,27 @@ M9 spike/ADR 选型；不能让任意 Worker 消费后新建第二个“同 Sess
 
 ## 11. Protocol 草案
 
-### 11.1 MCP 第一版工具
+### 11.1 MCP 工具面
 
-Session：
+当前已注册且有实现证据的工具：
 
-- `terminal_create_session`
-- `terminal_get_session`
-- `terminal_close_session`
-- `terminal_fork_session`
+- Session：`session_create`、`session_get`、`session_list`、`session_close`。
+- Action/Execution：`execute`、`execution_get`、`execution_wait`、`input`、`control`。
+- Event：`events_query`。
+- Screen：`screen_get`、`screen_region`、`screen_cells`、`screen_diff`、`screen_search`、`screen_wait`。
 
-Action/Execution：
+后续按能力分阶段增加：
 
-- `terminal_execute`
-- `terminal_get_execution`
-- `terminal_wait_execution`
-- `terminal_send_input`
-- `terminal_send_control`
+- M6.5：只读 `interaction_get`，让 Agent 在 Input/Control 前观察 policy、guard、version 与 expiry；Agent 默认不能经 MCP 修改 policy 或持有 Human Guard。
+- M7：`session_fork`；完成 checkpoint/fork 语义前不注册空壳。
+- Event exact-get/全文 search 只有在 bounded schema、权限与分页契约冻结后才注册；底层 repository 已有能力不等于 MCP 工具已交付。
 
-Observation：
-
-- `terminal_get_screen`
-- `terminal_get_event`
-- `terminal_query_events`
-- `terminal_search_events`
-
-工具按能力分阶段注册：M4 提供 Session（不含 fork）、Execute、Input、Control 与 Event；M6 增加 Screen/interactive wait；M7 增加 Fork。未实现的能力不注册空壳工具。
+调整稿使用的 `terminal_*` 名称仅视为产品草案。当前实现已使用上述稳定短名称；如发布前需要统一前缀，必须单独做命名 ADR、兼容别名与弃用周期，不能只改 TODO。
 
 约束：
 
-- [ ] 所有 write tool 接受 idempotency key；Input/Control 接受 generation + target execution。
-- [ ] Agent fresh-screen 策略开启时，Input 要求 expected screen version。
+- [x] 所有现有 write tool 接受 idempotency key；Input/Control 接受 generation + target execution。
+- [x] Input 可携带 expected screen version 并在不匹配时返回 `SCREEN_CHANGED`；强制 fresh-screen policy 待 M6.5 接入。
 - [x] Tool description 清楚解释 Execute/Input/Control 的选择边界。
 - [x] `PTY_BUSY` 返回当前 execution 与 allowed next actions，不只返回字符串。
 - [x] MCP stdio stdout 只能有合法 JSON-RPC，诊断写 stderr。
@@ -599,6 +611,8 @@ Observation：
 - `/api/executions/:executionId/control`
 - `/api/executions/:executionId/screen`
 - `/api/sessions/:sessionId/events`
+- `/api/sessions/:sessionId/interaction`
+- `/api/sessions/:sessionId/interaction/guard`
 - `/api/approvals/:approvalId`
 
 WebSocket 只承载 live event/screen/action transport，不是真相源。重连携带 generation + last durable event cursor；server 可返回 event batch、screen snapshot/diff、guard/policy、backpressure、resync required。
@@ -613,6 +627,7 @@ WebSocket 只承载 live event/screen/action transport，不是真相源。重�
 - `EXECUTION_CHANGED`
 - `SCREEN_CHANGED`
 - `INPUT_GUARDED`
+- `INTERACTION_GUARD_CHANGED`
 - `IDEMPOTENCY_KEY_REUSED`
 - `POLICY_DENIED`
 - `APPROVAL_REQUIRED`
@@ -835,7 +850,7 @@ Exit Gate：L2 协议/Runtime/持久化路径已完成；官方 SDK Client 已�
 - [ ] React/xterm.js、HTTP/WS、Session 页面。
 - [ ] READY command composer 与 RUNNING interactive focus 分离。
 - [ ] current execution、Action actor label、Timeline、PTY_BUSY UI。
-- [ ] Input/Control 与基础 actor/policy 状态 UI；Guard、Approval、secret 按后续里程碑增强。
+- [ ] Input/Control 与 actor/policy/guard 状态 UI；先消费 M6.5 的稳定交互契约，Approval/secret 按 M10 增强。
 - [ ] durable event cursor reconnect 与 live gap 提示。
 - [ ] canonical geometry、多 viewer、基本可访问性。
 
@@ -864,6 +879,65 @@ Exit Gate：真实 Human +真实 MCP Agent 共享 cwd/env/REPL；所有 Action �
 - [ ] Agent 看到 psql exec_101，Human Ctrl+C 后启动 python exec_102，旧 SQL 被拒绝。
 - [ ] Human raw input 活跃时 Agent input 不插入半行；guard 释放后可继续。
 - [ ] Human xterm.js 与 Agent headless screen 在固定 geometry 下内容一致。
+
+#### M6.5 — Input Policy 与 Interaction Guard（下一可执行切片，目标：L2）
+
+这是一项 generation-scoped 协调机制，不是 Human/Agent ownership，也不是长期锁。建议先在 ADR-0023 冻结下列精确契约，再写代码：
+
+| policy          | Human Input/Control       | Agent Input/Control | Guard 行为                                        |
+| --------------- | ------------------------- | ------------------- | ------------------------------------------------- |
+| `common`        | 允许                      | 允许                | 不获取、不阻塞                                    |
+| `human_guarded` | 允许；Guard holder 可继续 | 无 Guard 时允许     | Human 可短期持有；其他 Actor 返回 `INPUT_GUARDED` |
+| `human_only`    | 允许                      | `POLICY_DENIED`     | 不使用 Guard                                      |
+| `agent_only`    | `POLICY_DENIED`           | 允许                | 不使用 Guard                                      |
+
+`scheduler/system` 不自动继承 Human 或 Agent 权限；没有显式 interaction capability 时返回 `POLICY_DENIED`。Human emergency Control 的 `bypassGuard` 只绕过 Guard，不绕过 policy、generation、target execution、screen freshness 或 approval。
+
+建议冻结的数据契约：
+
+```ts
+type InputPolicyMode = "common" | "human_guarded" | "human_only" | "agent_only";
+
+interface InteractionState {
+  sessionId: string;
+  sessionGeneration: number;
+  policy: InputPolicyMode;
+  version: number;
+  guard?: {
+    id: string;
+    actor: Actor;
+    reason: string;
+    acquiredAt: Date;
+    expiresAt: Date;
+    renewals: number;
+    maxRenewals: number;
+  };
+}
+```
+
+建议默认值由 ADR 确认：`human_guarded`；TTL default 500 ms、min 50 ms、max 5 s；同一 Guard 最多续租 3 次。Guard 到期采用请求/读取时的惰性清理，通过 version CAS 只记录一次 `guard_expired`，不引入常驻 timer。
+
+实现 TODO：
+
+- [ ] ADR-0023 冻结 policy 矩阵、授权者、TTL/续租、emergency bypass、expiry 与幂等顺序；若选择直接扩展 ADR-0005，必须写清兼容与迁移影响。
+- [ ] Domain 增加 `InputPolicyMode`、`InteractionState/Guard`、`INPUT_GUARDED`、`POLICY_DENIED`、`INTERACTION_GUARD_CHANGED`；Control request/action 记录显式 `bypassGuard` 审计字段。
+- [ ] 每个新 Session generation 初始化 `human_guarded` + version 1；policy change 清除现有 Guard、version +1，并形成 durable event。
+- [ ] Application 在同一 per-session mutation serialization 内完成 idempotency replay、generation/execution/screen 校验、policy/guard 判定与 Action admission；已接受 Action 的同 key/hash replay 先返回原结果，不被后来 policy 变化改写。
+- [ ] Guard acquire/renew/release 使用 guard id + expected state version；仅 Human capability 可 acquire，renew/release 必须匹配完整 Actor identity；活跃 Guard 冲突返回 `INPUT_GUARDED`，stale guard/version 返回 `INTERACTION_GUARD_CHANGED`。
+- [ ] PostgreSQL migration 增加 generation-scoped `interaction_guards` 状态行与约束；policy/guard state update + Event 同事务提交，并在 `acceptInteraction` 事务内再次校验，避免 Application 检查与 durable admission 的 TOCTOU。
+- [ ] Runtime RPC 增加 `interaction.get`、`interaction.policy.set`、`interaction.guard.acquire|renew|release`；把它们纳入 mutating-operation delivery uncertainty 判定。
+- [ ] MCP 增加只读 `interaction_get`；`input`/`control` Tool description 与结构化 error 暴露 retryability、guard expiry/current version、allowed next actions，不给 Agent 暴露 Human Guard mutation。
+- [ ] Human Console 后续通过 HTTP/RPC 持有和续租 Guard；raw key batch 开始前 acquire，提交/blur/disconnect 时 release，断线不依赖 release 而由 TTL 收敛。
+- [ ] denied/guarded 请求不分配 accepted Action sequence、不触碰 PTY；记录不含 raw secret/input data 的 bounded rejection/security event。
+- [ ] 统一 clock 注入或受控 fake clock，覆盖 TTL 边界；数据库时间与 Runtime 时间差异不得造成已过期 Guard 永久阻塞。
+
+测试与证据：
+
+- [ ] L1 Domain/Application：四种 policy × Human/Agent/Scheduler/System 矩阵；acquire/renew/release/expire/version race；policy change 清 Guard；emergency Control 只绕过 Guard；rejected input 零 PTY write。
+- [ ] L1 Durability：migration constraints、state/event 原子性、expected-version CAS、事务回滚、idempotent accepted replay、并发 Guard acquire 只有一个成功。
+- [ ] L2 real PostgreSQL + PTY + official MCP Client：Human RPC 持有 Guard 时 Agent MCP input 返回 `INPUT_GUARDED` 且画面无半行；Guard 到期/释放后 Agent 可继续；`human_only/agent_only/common` 行为与矩阵一致。
+- [ ] L2 crash/restart：Guard 与 policy durable 可观察；旧 generation Guard 不影响新 generation；未知 Input/Control 仍遵守 ADR-0011，绝不因 Guard 过期自动重放。
+- [ ] 功能闭合后运行受影响测试、`pnpm verify`、`git diff --check`，保存 `docs/verification/M6/<date>-interaction-guard.md`；Human Console 尚未接入时只声明 L2，不声明 L3。
 
 Exit Gate：M0–M6 的 L3 证据齐全；到此才能称为 MVP。
 
@@ -1011,7 +1085,7 @@ Exit Gate：3+ Worker chaos 下每个 generation 最多一个有效 PTY owner；
 | Shell Integration 无法跨 bash/zsh 稳定闭合 boundary | M0             | 缩小首发 Shell 或采用 sidecar/control FD，不进入持久化扩展    |
 | marker 可被输出伪造或被 chunking 破坏               | M0             | 禁止仅靠裸 OSC 文本；切换独立 control channel                 |
 | command composer 与真实 Shell editing 体验割裂      | M1/M5          | 增加明确模式/UX，不允许 READY raw bypass 破坏 Action 模型     |
-| 原子 Input 仍发生语义竞争                           | M6             | 默认收紧为 short turn lease，而不是宣称对等输入已解决         |
+| 原子 Input 仍发生语义竞争                           | M6             | 默认收紧为短期 Interaction Guard，而不是宣称对等输入已解决    |
 | headless screen 与 xterm.js 漂移                    | M6             | 共享 parser core 或提前像素 screenshot provider               |
 | PG event 成本过高                                   | M3             | raw chunks 转 artifact/file，PG 只存索引与 ref                |
 | fork context 对用户预期过度承诺                     | M7             | UI 改称 rebuild-from-checkpoint，并显示字段/staleness         |
@@ -1031,7 +1105,8 @@ Exit Gate：3+ Worker chaos 下每个 generation 最多一个有效 PTY owner；
 - [x] Persistent Shell ExecuteAction 接受 Shell command string；不与 direct argv API 混为一谈。
 - [x] Session 忙时 fail-fast，不建 Execute Queue；并行用 fork Session。
 - [ ] Human READY 使用 composer，RUNNING 使用 interactive input。
-- [ ] 默认 input policy 为 `human_guarded`；Human emergency control 可按权限绕过。
+- [ ] ADR-0023 冻结 M6.5 policy/Guard 精确契约；建议默认 `human_guarded`、TTL 500 ms（50 ms–5 s）、最多续租 3 次。
+- [ ] Human emergency Control 的 `bypassGuard` 仅按 capability 绕过 Guard，不绕过 policy/stale/approval。
 - [ ] Checkpoint 只保存 cwd + shell + filtered exported env + workspace。
 - [x] PostgreSQL 为 durable truth；raw output 达阈值转 artifact。
 - [x] MCP M4 先 stdio；对外 HTTP 后续实现 Origin/Auth。
@@ -1071,3 +1146,13 @@ v1.0 还必须满足 M7–M10、fork 语义、故障矩阵、owner routing、mul
 8. `feat(observation): add bounded event queries`：完成 M3 后再开始 MCP adapter。
 
 当前已完成建议切片 1–8，并追加 M4.1 live durable journal、M6.1 live Virtual Screen base、M6.2 reactive screen observation、M6.3 bounded screen synchronization、M6.4 stable styled-cell observation、M8.1 reliable messaging、M8.2 owner-local queue dispatch、M8.3 Interaction/retry outage crash semantics、M8.4 admission/backpressure、M8.5 RabbitMQ process reconnect、M8.6 PostgreSQL owner recovery、M8.7 messaging-loop PostgreSQL recovery、M8.8 silent network blackhole recovery 与 M8.9 RabbitMQ quorum leader failover；后续仍严格按里程碑 Exit Gate 与 `docs/verification/` 证据推进。
+
+下一批按依赖顺序推进：
+
+9. `feat(interaction): enforce generation-scoped input policy and guards`：完成 M6.5 Domain/Application/PostgreSQL/RPC/MCP 与 L2 场景，不包含 Human Console。
+10. `feat(console): add shared human terminal path`：完成 M5 最小 HTTP/WS、composer、interactive focus、actor/timeline 与 policy/guard UI，形成首条 L3 Human + MCP Agent 路径。
+11. `feat(screen): add controlled resize and geometry ownership`：完成 canonical geometry owner、resize/reflow 与 Human/headless fixture 对照。
+12. `feat(screen): classify bounded terminal state evidence`：只实现有 confidence/evidence 的 heuristic 与 shell/REPL/TUI fixtures，不把 heuristic 当权限事实。
+13. `feat(session): fork from versioned shell checkpoint`：进入 M7；只复制明确列出的可重建 context。
+
+M6.5 未闭合前不开始第 10 项的 Guard 写路径；M5/M6 L3 未闭合前，不因为 M8 已有故障证据就宣称 MVP。
