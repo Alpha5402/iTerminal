@@ -25,6 +25,8 @@ M9.4 replaces Router-side list-and-pick with an atomic PostgreSQL placement clai
 
 M9.5 validates the same contracts with an independent Router process and three independent Runtime processes. Router restart is stateless. After Runtime `SIGKILL`, exact targets fail closed until owner-lease expiry; a boot-unique same-owner replacement advances registry epoch, exposes only bounded `BROKEN` Session reconstruction evidence, and creates a new PTY only for a newly placed Session. Historical durable `UNKNOWN` Executions are not reconstructed as fake live Execution objects. Graceful `SIGTERM` drains, closes local Sessions, releases leases, and persists `STOPPED`.
 
+M9.6 isolates one Runtime's PostgreSQL path behind a silent blackhole. Its query deadline trips only that owner's durability circuit, closes local PTYs, and lets its registry lease expire while the Router and healthy owners continue exact routing and placement. Recovery resets timed-out TCP streams before reconnecting; Pool and checked-out Client error listeners prevent late transport errors from terminating the process without changing query-rejection semantics. Re-registering the same boot incarnation may retain its registry epoch, but old Sessions remain `BROKEN`, ambiguous Executions remain `UNKNOWN`, and only a distinct new Session may own a new PTY.
+
 | Environment variable                | Default                         |
 | ----------------------------------- | ------------------------------- |
 | `ITERM_RUNTIME_OWNER_ID`            | derived from the Runtime socket |

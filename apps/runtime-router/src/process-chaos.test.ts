@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import type { Session } from "@iterminal/domain";
 import { PostgresRuntimeDurability } from "@iterminal/persistence-postgres";
 import { UnixRuntimeClient } from "@iterminal/runtime-rpc";
+import { startTcpFaultProxy, type TcpFaultProxy } from "@iterminal/testkit";
 import { Pool } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
@@ -22,6 +23,7 @@ describeDatabase("M9.5 independent-process multi-owner chaos", () => {
   const children: ManagedChild[] = [];
   const fixtures: string[] = [];
   const pool = new Pool({ connectionString: databaseUrl });
+  const proxies: TcpFaultProxy[] = [];
 
   beforeAll(async () => {
     const database = await pool.query<{ current_database: string }>("SELECT current_database()");
@@ -40,6 +42,7 @@ describeDatabase("M9.5 independent-process multi-owner chaos", () => {
   afterEach(async () => {
     for (const child of children.reverse()) await stopChild(child, "SIGTERM");
     children.length = 0;
+    for (const proxy of proxies.splice(0)) await proxy.close().catch(() => undefined);
     for (const fixture of fixtures.splice(0)) {
       await rm(fixture, { force: true, recursive: true });
     }
@@ -241,17 +244,144 @@ describeDatabase("M9.5 independent-process multi-owner chaos", () => {
     expect(victimLease.rows[0]?.released_at).toBeInstanceOf(Date);
   }, 120_000);
 
+  it("isolates one owner's PostgreSQL blackhole while healthy owners keep routing and placement", async () => {
+    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m96-part-")));
+    fixtures.push(root);
+    const workspace = join(root, "workspace");
+    await mkdir(workspace, { recursive: true });
+    const proxy = await proxyFor(databaseUrl ?? "");
+    proxies.push(proxy);
+    const victimDatabaseUrl = throughProxy(databaseUrl ?? "", proxy);
+    const owners = await Promise.all([
+      startRuntimeChild(root, "owner-partition-a", "instance-partition-a", join(root, "a.sock")),
+      startRuntimeChild(
+        root,
+        "owner-partition-b",
+        "instance-partition-b",
+        join(root, "b.sock"),
+        victimDatabaseUrl,
+      ),
+      startRuntimeChild(root, "owner-partition-c", "instance-partition-c", join(root, "c.sock")),
+    ]);
+    children.push(...owners);
+    const routerSocket = join(root, "router.sock");
+    children.push(await startRouterChild(routerSocket));
+    const client = new UnixRuntimeClient(routerSocket);
+    const firstWave = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        client.createSession({ shell: "zsh", workspaceRoot: workspace }),
+      ),
+    );
+    expect(ownerCounts(firstWave)).toEqual({
+      "owner-partition-a": 2,
+      "owner-partition-b": 2,
+      "owner-partition-c": 2,
+    });
+    const victimSession = requiredSession(
+      firstWave.filter((session) => session.ownerId === "owner-partition-b"),
+      0,
+    );
+    const healthySession = requiredSession(
+      firstWave.filter((session) => session.ownerId === "owner-partition-a"),
+      0,
+    );
+    const sleeping = await client.startExecute({
+      actor: actor("partition-victim"),
+      command: "sleep 30",
+      idempotencyKey: "m96-victim-sleep",
+      sessionGeneration: victimSession.generation,
+      sessionId: victimSession.id,
+    });
+    await waitForExecutionStatus(client, sleeping.execution.id, "RUNNING");
+    const shell = await pool.query<{ shell_pid: number }>(
+      `SELECT shell_pid FROM session_generations
+        WHERE session_id = $1 AND generation = $2`,
+      [victimSession.id, victimSession.generation],
+    );
+    const shellPid = shell.rows[0]?.shell_pid;
+    if (shellPid === undefined) throw new Error("Partition victim Shell PID is missing");
+    const victimOwner = requiredChild(owners, "runtime-owner-partition-b");
+    const initialReadyCount = occurrenceCount(victimOwner.stderr, "Runtime PostgreSQL ready");
+
+    proxy.setMode("BLACKHOLE");
+    await waitForText(victimOwner, "Runtime PostgreSQL unavailable", 10_000);
+    await waitUntilProcessGone(shellPid);
+    await waitForOwnerExpiry("owner-partition-b", 10_000);
+    await expect(client.getSession(victimSession.id)).rejects.toMatchObject({
+      code: "OWNER_ROUTE_UNAVAILABLE",
+      retryable: true,
+    });
+
+    const healthyExecution = await client.startExecute({
+      actor: actor("partition-healthy"),
+      command: "printf m96-healthy",
+      idempotencyKey: "m96-healthy-execute",
+      sessionGeneration: healthySession.generation,
+      sessionId: healthySession.id,
+    });
+    expect((await client.waitExecution(healthyExecution.execution.id)).status).toBe("COMPLETED");
+    const duringPartition = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        client.createSession({ shell: "zsh", workspaceRoot: workspace }),
+      ),
+    );
+    expect(ownerCounts(duringPartition)).toEqual({
+      "owner-partition-a": 2,
+      "owner-partition-c": 2,
+    });
+
+    proxy.setMode("CUT");
+    proxy.setMode("FORWARD");
+    await waitForOccurrence(victimOwner, "Runtime PostgreSQL ready", initialReadyCount + 1, 20_000);
+    const recovered = await waitForSessionStatus(client, victimSession.id, "BROKEN", 15_000);
+    expect(recovered.status).toBe("BROKEN");
+    const durableExecution = await pool.query<{ status: string }>(
+      "SELECT status FROM executions WHERE id = $1",
+      [sleeping.execution.id],
+    );
+    expect(durableExecution.rows).toEqual([{ status: "UNKNOWN" }]);
+    const owner = await pool.query<{ instance_id: string; registry_epoch: string }>(
+      `SELECT instance_id, registry_epoch::text
+         FROM runtime_workers WHERE owner_id = 'owner-partition-b'`,
+    );
+    expect(owner.rows).toEqual([{ instance_id: "instance-partition-b", registry_epoch: "1" }]);
+
+    const afterRecovery = await Promise.all(
+      Array.from({ length: 3 }, () =>
+        client.createSession({ shell: "zsh", workspaceRoot: workspace }),
+      ),
+    );
+    const replacementSession = requiredSession(
+      afterRecovery.filter((session) => session.ownerId === "owner-partition-b"),
+      0,
+    );
+    expect(replacementSession.id).not.toBe(victimSession.id);
+    const replacementExecution = await client.startExecute({
+      actor: actor("partition-recovered"),
+      command: "printf m96-recovered",
+      idempotencyKey: "m96-recovered-execute",
+      sessionGeneration: replacementSession.generation,
+      sessionId: replacementSession.id,
+    });
+    expect((await client.waitExecution(replacementExecution.execution.id)).status).toBe(
+      "COMPLETED",
+    );
+    expect((await client.getSession(victimSession.id)).status).toBe("BROKEN");
+  }, 120_000);
+
   async function startRuntimeChild(
     root: string,
     ownerId: string,
     instanceId: string,
     socketPath: string,
+    connectionString = databaseUrl ?? "",
   ): Promise<ManagedChild> {
     const child = startChild(`runtime-${ownerId}`, "apps/runtime-daemon/src/main.ts", {
       ITERM_DATABASE_HEALTH_CHECK_MS: "100",
       ITERM_DATABASE_RECONNECT_INITIAL_MS: "50",
       ITERM_DATABASE_RECONNECT_MAX_MS: "50",
-      ITERM_DATABASE_URL: databaseUrl ?? "",
+      ITERM_DATABASE_STATEMENT_TIMEOUT_MS: "500",
+      ITERM_DATABASE_URL: connectionString,
       ITERM_RUNTIME_OWNER_ID: ownerId,
       ITERM_RUNTIME_OWNER_INSTANCE_ID: instanceId,
       ITERM_RUNTIME_OWNER_LEASE_MS: "2000",
@@ -301,6 +431,19 @@ describeDatabase("M9.5 independent-process multi-owner chaos", () => {
       await delay(20);
     }
     throw new Error(`Owner ${ownerId} did not reach ${status}`);
+  }
+
+  async function waitForOwnerExpiry(ownerId: string, timeoutMilliseconds: number): Promise<void> {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMilliseconds) {
+      const result = await pool.query<{ expired: boolean }>(
+        "SELECT lease_expires_at <= now() AS expired FROM runtime_workers WHERE owner_id = $1",
+        [ownerId],
+      );
+      if (result.rows[0]?.expired === true) return;
+      await delay(25);
+    }
+    throw new Error(`Owner ${ownerId} lease did not expire`);
   }
 });
 
@@ -383,6 +526,27 @@ async function waitForText(
   throw new Error(`Timed out waiting for ${child.label} text ${expected}: ${child.stderr}`);
 }
 
+async function waitForOccurrence(
+  child: ManagedChild,
+  expected: string,
+  count: number,
+  timeoutMilliseconds: number,
+): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMilliseconds) {
+    if (occurrenceCount(child.stderr, expected) >= count) return;
+    if (child.process.exitCode !== null || child.process.signalCode !== null) {
+      throw new Error(`${child.label} exited before repeated ${expected}: ${child.stderr}`);
+    }
+    await delay(20);
+  }
+  throw new Error(`Timed out waiting for ${child.label} repeated ${expected}: ${child.stderr}`);
+}
+
+function occurrenceCount(value: string, expected: string): number {
+  return value.split(expected).length - 1;
+}
+
 async function waitForExit(child: ManagedChild, timeoutMilliseconds = 10_000): Promise<void> {
   if (child.process.exitCode !== null || child.process.signalCode !== null) return;
   await new Promise<void>((resolveExit, rejectExit) => {
@@ -426,4 +590,17 @@ function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoExcepti
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
+async function proxyFor(url: string): Promise<TcpFaultProxy> {
+  const parsed = new URL(url);
+  const upstreamPort = Number.parseInt(parsed.port || "5432", 10);
+  return startTcpFaultProxy({ upstreamHost: parsed.hostname, upstreamPort });
+}
+
+function throughProxy(url: string, proxy: TcpFaultProxy): string {
+  const parsed = new URL(url);
+  parsed.hostname = proxy.host;
+  parsed.port = proxy.port.toString();
+  return parsed.toString();
 }
