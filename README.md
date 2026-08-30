@@ -52,11 +52,11 @@ Most terminal tools optimize for command execution or remote administration. iTe
 
 ## Current status
 
-**M0–M4.1 and the M8.2 owner-local queue-dispatch path pass at L2: shared Shell, durable Action Runtime, real stdio MCP, and reliable Outbox/RabbitMQ/Inbox delivery into the live PTY owner.**
+**M0–M4.1 and the M8.3 local crash-semantics path pass at L2: shared Shell, durable Action Runtime, real stdio MCP, reliable queue-driven PTY dispatch, and non-replayable uncertain interactions.**
 
 Real local bash and zsh PTY scenarios prove command boundaries, shared state, fail-fast Busy, structured Input/Control, stale-target rejection, marker-spoof isolation, large output, and Ctrl+C recovery. With `ITERM_DATABASE_URL`, the live daemon now commits Execute/Input/Control admission before PTY delivery, sends attributed output through a bounded per-Session ingest loop, serves durable cursors, and marks a `SIGKILL`-lost owner generation `BROKEN/UNKNOWN` on restart. An official MCP SDK Client drives the same live zsh across stdio bridge restarts; OpenCode and Claude Code handshakes also pass. In-memory development mode remains available, but no model-driven Agent has been authorized and the Human Console is not complete.
 
-M8.2 keeps RabbitMQ as an at-least-once wake-up plane and adds a separately supervised Execution Worker. Durable Execute admission now remains `DISPATCHING` until that Worker reloads PostgreSQL owner/generation state and calls the matching daemon over internal Unix RPC. Duplicate delivery joins one owner-local dispatch state. Worker loss before RPC is retried; Runtime loss after the durable `execution.write_attempted` boundary becomes `BROKEN/UNKNOWN` and is never blindly replayed. This is not an exactly-once claim, and M8's complete L4 gate remains open.
+M8.2 keeps RabbitMQ as an at-least-once wake-up plane and adds a separately supervised Execution Worker. Durable Execute admission remains `DISPATCHING` until that Worker reloads PostgreSQL owner/generation state and calls the matching daemon over internal Unix RPC. M8.3 extends the conservative write-attempt boundary to Input/Control and rate-limits NACK/requeue when retry publication is unavailable. Worker loss before RPC is retried; Runtime loss after any PTY write-attempt boundary becomes `BROKEN/UNKNOWN` and is never blindly replayed. This is not an exactly-once claim, and M8's complete L4 outage/reconnect gate remains open.
 
 See:
 
@@ -78,6 +78,9 @@ See:
 - [M8.1 verification](./docs/verification/M8/2026-08-30-reliable-messaging.md) — real PostgreSQL/RabbitMQ duplicate, retry, DLQ, and relay lifecycle evidence.
 - [M8.2 dispatch decision](./docs/adr/0010-owner-local-queue-dispatch.md) — owner-local RPC, dispatch idempotency, and PTY write uncertainty.
 - [M8.2 verification](./docs/verification/M8/2026-08-30-owner-dispatch.md) — real queue-driven zsh and Worker/Runtime `SIGKILL` evidence.
+- [M8.3 interaction decision](./docs/adr/0011-interaction-write-uncertainty.md) — durable Input/Control intent and terminal uncertainty.
+- [M8.3 retry-outage decision](./docs/adr/0012-retry-publish-outage-backoff.md) — preserving the original delivery without a hot loop.
+- [M8.3 verification](./docs/verification/M8/2026-08-30-interaction-crash-retry-outage.md) — real PTY write-after-`SIGKILL` and retry-exchange outage evidence.
 
 ## Planned shape
 

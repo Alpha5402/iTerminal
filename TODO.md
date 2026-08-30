@@ -1,10 +1,10 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
-> 状态：Implementation Baseline v4.3 — M0–M4.1 与 M8.2 owner-local queue dispatch 已通过 L2，M4 L3 待真实模型调用
+> 状态：Implementation Baseline v4.4 — M0–M4.1 与 M8.3 crash semantics 已通过 L2，M4 L3 待真实模型调用
 >
 > 基线日期：2026-08-30
 >
-> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live MCP daemon 已接入 PostgreSQL write-ahead journal 与 bounded ingest loop。M8.2 已将 owner-local Execute PTY dispatch 移到 Inbox-protected RabbitMQ Worker 后，并通过重复投递、Worker 写前崩溃、Runtime 写后崩溃及完成前持久化崩溃测试。Input/Control 写后崩溃、broker reconnect/partition、M9 fencing、多 Worker 与完整 M8 L4 仍未完成；M4 的模型驱动 Agent 验收、M5 Human Console 及其后的 L3/L4 路径也仍未完成。
+> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live MCP daemon 已接入 PostgreSQL write-ahead journal 与 bounded ingest loop。M8.3 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放，以及 retry publisher outage 下的退避 NACK/requeue。Broker/channel reconnect、partition/long soak、完整 DB/MQ admission pressure、M9 fencing、多 Worker 与完整 M8 L4 仍未完成；M4 的模型驱动 Agent 验收、M5 Human Console 及其后的 L3/L4 路径也仍未完成。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -876,11 +876,11 @@ Exit Gate：parent busy 时 fork 后可独立 `git status`；child 继承可复�
 
 - [x] Outbox claim/publish/mark、重复 publish、lease recovery 与 relay 优雅停机。
 - [x] RabbitMQ `ExecutionReady` confirm transport、manual ACK、confirmed retry queue 与 DLQ。
-- [ ] retry publisher outage 时的 NACK/requeue 与无 hot-loop 故障注入。
+- [x] retry publisher outage 时的 NACK/requeue 与无 hot-loop 故障注入。
 - [x] Consumer Inbox 去重并读取 DB Execution/owner/generation，不信任 message ordering。
 - [x] 将 owner-local PTY dispatch 从 admission 调用栈迁到 `ExecutionReady` handler。
 - [x] 写 PTY 前/后 crash injection 与 delivery uncertainty（Execute owner-local 路径）。
-- [ ] Input/Control write 后 crash 不自动重发。
+- [x] Input/Control write 后 crash 不自动重发。
 - [x] duplicate/delayed message 不重复调用 handler 或真实 Shell input。
 - [ ] DB/MQ outage 的完整 admission/backpressure 行为；MQ publish failure 保留 Outbox 已证明。
 
@@ -1054,4 +1054,4 @@ v1.0 还必须满足 M7–M10、fork 语义、故障矩阵、owner routing、mul
 7. `feat(persistence): persist actions executions and events`：PostgreSQL、CAS、idempotency、unknown recovery。
 8. `feat(observation): add bounded event queries`：完成 M3 后再开始 MCP adapter。
 
-当前已完成建议切片 1–8，并追加 M4.1 live durable journal、M8.1 reliable messaging 与 M8.2 owner-local queue dispatch；后续仍严格按里程碑 Exit Gate 与 `docs/verification/` 证据推进。
+当前已完成建议切片 1–8，并追加 M4.1 live durable journal、M8.1 reliable messaging、M8.2 owner-local queue dispatch 与 M8.3 Interaction/retry outage crash semantics；后续仍严格按里程碑 Exit Gate 与 `docs/verification/` 证据推进。

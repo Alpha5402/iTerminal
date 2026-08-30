@@ -123,12 +123,14 @@ export class RabbitMqPublisher implements DurableMessagePublisher {
 
 export interface RabbitMqConsumerOptions {
   readonly prefetch?: number;
+  readonly retryPublishFailureBackoffMilliseconds?: number;
   readonly topology?: RabbitMqTopology;
 }
 
 export class RabbitMqExecutionReadyConsumer {
   readonly #inFlight = new Set<Promise<void>>();
   readonly #topology: RabbitMqTopology;
+  readonly #retryPublishFailureBackoffMilliseconds: number;
   #consumerTag: string | undefined;
   #retryTail: Promise<void> = Promise.resolve();
 
@@ -138,8 +140,10 @@ export class RabbitMqExecutionReadyConsumer {
     private readonly retryChannel: ConfirmChannel,
     private readonly processor: ExecutionReadyProcessor,
     topology: RabbitMqTopology,
+    retryPublishFailureBackoffMilliseconds: number,
   ) {
     this.#topology = topology;
+    this.#retryPublishFailureBackoffMilliseconds = retryPublishFailureBackoffMilliseconds;
   }
 
   public static async connect(
@@ -160,6 +164,7 @@ export class RabbitMqExecutionReadyConsumer {
       retryChannel,
       processor,
       topology,
+      Math.max(1, options.retryPublishFailureBackoffMilliseconds ?? topology.retryMilliseconds),
     );
     await consumer.#start();
     return consumer;
@@ -232,7 +237,12 @@ export class RabbitMqExecutionReadyConsumer {
       await retry;
       this.channel.ack(delivery);
     } catch {
-      this.channel.nack(delivery, false, true);
+      await delay(this.#retryPublishFailureBackoffMilliseconds);
+      try {
+        this.channel.nack(delivery, false, true);
+      } catch {
+        // Closing the consumer already returns unacked deliveries to RabbitMQ.
+      }
     }
   }
 }
@@ -286,4 +296,8 @@ function attachErrorSinks(...emitters: Array<Channel | ChannelModel>): void {
     emitter.on("error", () => undefined);
     emitter.on("handler-error", () => undefined);
   }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }

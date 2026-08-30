@@ -610,8 +610,13 @@ export class RuntimeService {
     this.store.saveAction(action);
     this.store.bindIdempotency(scope, request.idempotencyKey, action.id);
     this.store.appendEvent(session.id, session.generation, acceptedEvent);
+    await this.#recordInteractionWriteAttempt(session, action, {
+      byteLength: byteLength(request.data),
+      interactionType: action.type,
+    });
     try {
       this.#requireExecutor(session.id).writeInput(request.data);
+      this.#hooks.afterInputWrite?.(action);
       action.status = "DELIVERED";
       const deliveredEvent = this.#event(
         session,
@@ -693,8 +698,13 @@ export class RuntimeService {
     this.store.saveAction(action);
     this.store.bindIdempotency(scope, request.idempotencyKey, action.id);
     this.store.appendEvent(session.id, session.generation, acceptedEvent);
+    await this.#recordInteractionWriteAttempt(session, action, {
+      delivery: action.delivery,
+      interactionType: action.type,
+    });
     try {
       this.#requireExecutor(session.id).sendControl(request.delivery);
+      this.#hooks.afterControlWrite?.(action);
       const execution = this.#requireExecution(request.targetExecutionId);
       execution.interruptedRequested = isInterrupt(request.delivery);
       action.status = "DELIVERED";
@@ -730,6 +740,29 @@ export class RuntimeService {
 
   public getExecution(executionId: string): Execution {
     return this.#requireExecution(executionId);
+  }
+
+  async #recordInteractionWriteAttempt(
+    session: Session,
+    action: InputAction | ControlAction,
+    payload: Readonly<Record<string, unknown>>,
+  ): Promise<void> {
+    const event = this.#eventDraft(
+      session,
+      "interaction.write_attempted",
+      payload,
+      action,
+      this.#requireExecution(action.targetExecutionId),
+    );
+    try {
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.markInteractionWriteAttempted(action, event, this.#ownerId),
+      );
+    } catch (error) {
+      this.#tripDurability(session.id, error);
+      throw durabilityError(error);
+    }
+    this.store.appendEvent(session.id, session.generation, event);
   }
 
   public async waitExecution(executionId: string): Promise<Execution> {

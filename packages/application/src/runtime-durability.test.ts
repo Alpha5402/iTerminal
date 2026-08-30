@@ -154,6 +154,7 @@ class ControlledDurability implements RuntimeDurability {
   public failExecute = false;
   public failInteraction = false;
   public writeAttempts = 0;
+  public interactionWriteAttempts = 0;
 
   public createSession(): Promise<void> {
     return Promise.resolve();
@@ -203,6 +204,11 @@ class ControlledDurability implements RuntimeDurability {
   }
 
   public finishInteraction(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  public markInteractionWriteAttempted(): Promise<void> {
+    this.interactionWriteAttempts += 1;
     return Promise.resolve();
   }
 

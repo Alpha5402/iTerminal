@@ -71,3 +71,4 @@ jobs:
       - run: pnpm test:m4:durable
       - run: pnpm test:m8:messaging
       - run: pnpm test:m8:dispatch
+      - run: pnpm test:m8:interactions

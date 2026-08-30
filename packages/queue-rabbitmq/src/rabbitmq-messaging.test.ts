@@ -171,6 +171,43 @@ describeMessaging("M8.1 reliable RabbitMQ notification", () => {
     });
   });
 
+  it("nacks and rate-limits requeue when retry publication is unavailable", async () => {
+    const accepted = await createAcceptedExecution(runtimeRepository, "retry-outage");
+    const topology = newTopology("retry-outage");
+    const publisher = await createPublisher(topology);
+    let handlerCalls = 0;
+    const processor = new ExecutionReadyProcessor(
+      "owner-router",
+      messagingRepository,
+      messagingRepository,
+      () => {
+        handlerCalls += 1;
+        return Promise.reject(new Error("owner temporarily unavailable"));
+      },
+      { maxAttempts: 100 },
+    );
+    const consumer = await RabbitMqExecutionReadyConsumer.connect(rabbitMqUrl ?? "", processor, {
+      prefetch: 1,
+      retryPublishFailureBackoffMilliseconds: 200,
+      topology,
+    });
+    consumers.push(consumer);
+    await deleteRetryExchange(topology);
+    const relay = new OutboxRelay("publisher-retry-outage", messagingRepository, publisher);
+
+    expect(await relay.publishBatch()).toEqual({ claimed: 1, failed: 0, published: 1 });
+    await waitFor(() => Promise.resolve(handlerCalls >= 2));
+    await delay(450);
+    expect(handlerCalls).toBeGreaterThanOrEqual(2);
+    expect(handlerCalls).toBeLessThanOrEqual(4);
+
+    consumers.splice(consumers.indexOf(consumer), 1);
+    await consumer.close();
+    await waitFor(async () => (await queueCount(topology.queue)) === 1);
+    expect(await deadLetterCount(topology)).toBe(0);
+    expect((await inboxState(accepted.outboxId)).attempts).toBeLessThanOrEqual(4);
+  });
+
   it("acks delayed state, dead-letters poison data, and preserves Outbox on broker failure", async () => {
     const accepted = await createAcceptedExecution(runtimeRepository, "stale");
     await pool.query("UPDATE executions SET status = 'RUNNING' WHERE id = $1", [
@@ -390,10 +427,25 @@ async function publishRaw(
 }
 
 async function deadLetterCount(topology: RabbitMqTopology): Promise<number> {
+  return queueCount(topology.deadLetterQueue);
+}
+
+async function queueCount(queue: string): Promise<number> {
   const connection: ChannelModel = await amqp.connect(rabbitMqUrl ?? "");
   const channel = await connection.createChannel();
   try {
-    return (await channel.checkQueue(topology.deadLetterQueue)).messageCount;
+    return (await channel.checkQueue(queue)).messageCount;
+  } finally {
+    await channel.close();
+    await connection.close();
+  }
+}
+
+async function deleteRetryExchange(topology: RabbitMqTopology): Promise<void> {
+  const connection = await amqp.connect(rabbitMqUrl ?? "");
+  const channel = await connection.createChannel();
+  try {
+    await channel.deleteExchange(topology.retryExchange);
   } finally {
     await channel.close();
     await connection.close();

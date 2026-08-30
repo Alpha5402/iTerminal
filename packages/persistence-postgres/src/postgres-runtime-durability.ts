@@ -466,6 +466,34 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
     });
   }
 
+  public async markInteractionWriteAttempted(
+    action: InputAction | ControlAction,
+    event: DurableSessionEvent,
+    ownerId: string,
+  ): Promise<void> {
+    await this.#transaction(async (client) => {
+      const current = await client.query(
+        `SELECT 1
+           FROM actions a
+           JOIN sessions s ON s.id = a.session_id
+          WHERE a.id = $1 AND a.session_generation = $2 AND a.kind = $3
+            AND a.status = 'ACCEPTED'
+            AND s.current_generation = $2 AND s.owner_id = $4
+            AND s.status = 'RUNNING' AND s.active_execution_id = $5
+          FOR UPDATE OF a, s`,
+        [action.id, action.sessionGeneration, action.type, ownerId, action.targetExecutionId],
+      );
+      if (current.rowCount !== 1) {
+        throw new RuntimeError(
+          "DELIVERY_UNKNOWN",
+          "Interaction write attempt is no longer current",
+          { actionId: action.id, targetExecutionId: action.targetExecutionId },
+        );
+      }
+      await insertEvents(client, [event]);
+    });
+  }
+
   public async appendEvent(event: DurableSessionEvent): Promise<void> {
     if (event.type === "terminal.pty_output" && typeof event.payload.data === "string") {
       await this.#observation.appendOutput({

@@ -126,6 +126,11 @@ export interface RuntimeDurability {
     readonly reason: string;
   }): Promise<void>;
   acceptInteraction(action: InputAction | ControlAction, event: DurableSessionEvent): Promise<void>;
+  markInteractionWriteAttempted(
+    action: InputAction | ControlAction,
+    event: DurableSessionEvent,
+    ownerId: string,
+  ): Promise<void>;
   finishInteraction(action: InputAction | ControlAction, event: DurableSessionEvent): Promise<void>;
   appendEvent(event: DurableSessionEvent): Promise<void>;
   queryEvents(
@@ -147,7 +152,9 @@ export interface RuntimeServiceOptions {
   readonly durability?: RuntimeDurability;
   readonly executionDispatch?: "external" | "immediate";
   readonly hooks?: Readonly<{
+    readonly afterControlWrite?: (action: ControlAction) => void;
     readonly afterExecutionWrite?: (execution: Execution) => void;
+    readonly afterInputWrite?: (action: InputAction) => void;
     readonly beforeExecutionFinishPersist?: (execution: Execution) => void;
   }>;
   readonly ownerId?: string;
