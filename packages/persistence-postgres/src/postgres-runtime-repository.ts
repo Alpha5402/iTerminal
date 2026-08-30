@@ -23,6 +23,7 @@ export interface PostgresRuntimeRepositoryOptions extends ActionRateLimitOptions
   readonly beforeAcceptExecuteCommit?: () => void;
   readonly idleTransactionTimeoutMilliseconds?: number;
   readonly maxPendingOutbox?: number;
+  readonly poolMax?: number;
   readonly statementTimeoutMilliseconds?: number;
   readonly requireSessionFence?: boolean;
 }
@@ -118,10 +119,11 @@ export class PostgresRuntimeRepository {
       options.idleTransactionTimeoutMilliseconds ?? statementTimeoutMilliseconds,
       "idleTransactionTimeoutMilliseconds",
     );
+    const poolMax = positiveInteger(options.poolMax ?? 20, "poolMax");
     this.#pool = createPostgresEndpointPool(connectionString, {
       connectionTimeoutMillis: 5_000,
       idle_in_transaction_session_timeout: idleTransactionTimeoutMilliseconds,
-      max: 20,
+      max: poolMax,
       query_timeout: statementTimeoutMilliseconds,
       statement_timeout: statementTimeoutMilliseconds,
     }).pool;

@@ -35,6 +35,7 @@ const databaseReconnectInitialMilliseconds = optionalPositiveInteger(
 );
 const databaseReconnectMaxMilliseconds = optionalPositiveInteger("ITERM_DATABASE_RECONNECT_MAX_MS");
 const databaseHealthCheckMilliseconds = optionalPositiveInteger("ITERM_DATABASE_HEALTH_CHECK_MS");
+const databasePoolMax = optionalPositiveInteger("ITERM_DATABASE_POOL_MAX");
 const drainTimeoutMilliseconds = optionalPositiveInteger("ITERM_RUNTIME_DRAIN_TIMEOUT_MS");
 const processGuardianTerminationGraceMilliseconds = optionalPositiveInteger(
   "ITERM_RUNTIME_GUARDIAN_TERMINATION_GRACE_MS",
@@ -56,6 +57,7 @@ const daemon = await startRuntimeDaemon({
     : { databaseReconnectInitialMilliseconds }),
   ...(databaseReconnectMaxMilliseconds === undefined ? {} : { databaseReconnectMaxMilliseconds }),
   ...(databaseHealthCheckMilliseconds === undefined ? {} : { databaseHealthCheckMilliseconds }),
+  ...(databasePoolMax === undefined ? {} : { databasePoolMax }),
   ...(drainTimeoutMilliseconds === undefined ? {} : { drainTimeoutMilliseconds }),
   ...(ownerId === undefined ? {} : { ownerId }),
   ...(ownerInstanceId === undefined ? {} : { ownerInstanceId }),

@@ -45,6 +45,10 @@ const requiredReports = [
   { level: "L2", path: "docs/verification/M9/2026-08-30-capacity-weighted-placement.md" },
   { level: "L2", path: "docs/verification/M9/2026-08-30-postgres-quorum-failover.md" },
   { level: "L2", path: "docs/verification/M9/2026-08-30-host-local-process-reclamation.md" },
+  {
+    level: "L4",
+    path: "docs/verification/M9/2026-08-30-high-cardinality-rolling-soak.md",
+  },
 ];
 
 for (const report of requiredReports) {

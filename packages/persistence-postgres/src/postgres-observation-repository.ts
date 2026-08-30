@@ -89,6 +89,7 @@ interface EventRow {
 
 export interface PostgresObservationRepositoryOptions {
   readonly idleTransactionTimeoutMilliseconds?: number;
+  readonly poolMax?: number;
   readonly requireSessionFence?: boolean;
 }
 
@@ -105,10 +106,11 @@ export class PostgresObservationRepository {
       options.idleTransactionTimeoutMilliseconds ?? 30_000,
       "idleTransactionTimeoutMilliseconds",
     );
+    const poolMax = positiveInteger(options.poolMax ?? 10, "poolMax");
     this.#pool = createPostgresEndpointPool(connectionString, {
       connectionTimeoutMillis: 5_000,
       idle_in_transaction_session_timeout: idleTransactionTimeoutMilliseconds,
-      max: 10,
+      max: poolMax,
       query_timeout: 30_000,
       statement_timeout: 30_000,
     }).pool;

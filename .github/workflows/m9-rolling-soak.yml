@@ -1,0 +1,53 @@
+name: M9 rolling soak
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Rolling verification profile
+        required: true
+        default: soak
+        type: choice
+        options:
+          - soak
+          - high
+      duration_milliseconds:
+        description: Soak duration in milliseconds; ignored by the high profile
+        required: true
+        default: "1800000"
+        type: string
+
+jobs:
+  rolling-soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: iterminal_test
+          POSTGRES_PASSWORD: iterminal_test
+          POSTGRES_USER: iterminal_test
+        options: >-
+          --health-cmd "pg_isready -U iterminal_test -d iterminal_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+        ports:
+          - 5432:5432
+    env:
+      ITERM_DATABASE_URL: postgresql://iterminal_test:iterminal_test@127.0.0.1:5432/iterminal_test
+      ITERM_M9_ROLLING_PROFILE: ${{ inputs.profile }}
+      ITERM_M9_SOAK_DURATION_MS: ${{ inputs.duration_milliseconds }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: sudo apt-get update && sudo apt-get install --yes zsh
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec vitest run --maxWorkers=1 apps/runtime-router/src/high-cardinality-rolling.test.ts

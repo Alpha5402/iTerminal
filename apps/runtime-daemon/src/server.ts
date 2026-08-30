@@ -62,6 +62,7 @@ export interface RuntimeDaemonGuardianState {
 const DEFAULT_OWNER_LEASE_MILLISECONDS = 15_000;
 const DEFAULT_SESSION_LEASE_MILLISECONDS = 15_000;
 const DEFAULT_DATABASE_HEALTH_CHECK_MILLISECONDS = 1_000;
+const DEFAULT_DATABASE_POOL_MAX = 2;
 const DEFAULT_DRAIN_TIMEOUT_MILLISECONDS = 5_000;
 const DEFAULT_CAPACITY_WEIGHT = 1;
 const DEFAULT_GUARDIAN_TERMINATION_GRACE_MILLISECONDS = 100;
@@ -73,6 +74,7 @@ export async function startRuntimeDaemon(options: {
   readonly capacityWeight?: number;
   readonly checkpointEnvironmentKeys?: readonly string[];
   readonly databaseHealthCheckMilliseconds?: number;
+  readonly databasePoolMax?: number;
   readonly databaseUrl?: PostgresConnectionTarget;
   readonly executionDispatch?: "external" | "immediate";
   readonly hooks?: RuntimeServiceOptions["hooks"];
@@ -111,6 +113,7 @@ export async function startRuntimeDaemon(options: {
       options.actorActionRateLimit !== undefined ||
       options.beforeAcceptExecuteCommit !== undefined ||
       options.capacityWeight !== undefined ||
+      options.databasePoolMax !== undefined ||
       options.drainTimeoutMilliseconds !== undefined ||
       options.onDrainState !== undefined ||
       options.ownerInstanceId !== undefined ||
@@ -132,6 +135,7 @@ export async function startRuntimeDaemon(options: {
       options.beforeAcceptExecuteCommit !== undefined ||
       options.capacityWeight !== undefined ||
       options.databaseHealthCheckMilliseconds !== undefined ||
+      options.databasePoolMax !== undefined ||
       options.databaseStatementTimeoutMilliseconds !== undefined ||
       options.checkpointEnvironmentKeys !== undefined ||
       options.databaseReconnectInitialMilliseconds !== undefined ||
@@ -169,6 +173,10 @@ export async function startRuntimeDaemon(options: {
   const databaseHealthCheckMilliseconds = positiveInteger(
     options.databaseHealthCheckMilliseconds ?? DEFAULT_DATABASE_HEALTH_CHECK_MILLISECONDS,
     "databaseHealthCheckMilliseconds",
+  );
+  const databasePoolMax = positiveInteger(
+    options.databasePoolMax ?? DEFAULT_DATABASE_POOL_MAX,
+    "databasePoolMax",
   );
   const drainTimeoutMilliseconds = positiveInteger(
     options.drainTimeoutMilliseconds ?? DEFAULT_DRAIN_TIMEOUT_MILLISECONDS,
@@ -220,6 +228,7 @@ export async function startRuntimeDaemon(options: {
             ? {}
             : { beforeAcceptExecuteCommit: options.beforeAcceptExecuteCommit }),
           idleTransactionTimeoutMilliseconds,
+          poolMax: databasePoolMax,
           ...(options.databaseStatementTimeoutMilliseconds === undefined
             ? {}
             : { statementTimeoutMilliseconds: options.databaseStatementTimeoutMilliseconds }),
@@ -235,6 +244,7 @@ export async function startRuntimeDaemon(options: {
       ? undefined
       : new PostgresRuntimeOwnerRegistry(options.databaseUrl, {
           idleTransactionTimeoutMilliseconds,
+          poolMax: databasePoolMax,
           ...(options.databaseStatementTimeoutMilliseconds === undefined
             ? {}
             : { statementTimeoutMilliseconds: options.databaseStatementTimeoutMilliseconds }),

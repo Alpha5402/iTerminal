@@ -35,6 +35,8 @@ M9.16 accepts an ordered PostgreSQL URL list but does not implement database ele
 
 M9.17 starts one host-local Process Guardian for every durable Runtime. Shell registration completes before Session READY. Only a successful owner heartbeat plus Session-lease renewal rearms the Guardian; Runtime IPC loss or watchdog expiry freezes and terminates the registered PPID/PTY process set. PostgreSQL independently expires frozen idle transactions within the same lease budget. A replacement still creates a distinct PTY after `BROKEN/UNKNOWN` reconciliation. This is not a remotely callable signal API or whole-host fencing.
 
+M9.18 gives each durable Runtime database role a bounded connection pool. `ITERM_DATABASE_POOL_MAX` applies independently to durability, admission, observation, and owner-registry pools and to each configured endpoint; the default of 2 therefore budgets eight connections per Runtime on one endpoint. Pool saturation queues behind the local bound and remains subject to existing connect/query/statement deadlines. It does not relax database-time ownership, Session fencing, or unknown-delivery rules.
+
 | Environment variable                          | Default                         |
 | --------------------------------------------- | ------------------------------- |
 | `ITERM_RUNTIME_OWNER_ID`                      | derived from the Runtime socket |
@@ -47,13 +49,14 @@ M9.17 starts one host-local Process Guardian for every durable Runtime. Shell re
 | `ITERM_DATABASE_RECONNECT_INITIAL_MS`         | `250`                           |
 | `ITERM_DATABASE_RECONNECT_MAX_MS`             | `30000`                         |
 | `ITERM_DATABASE_STATEMENT_TIMEOUT_MS`         | `30000`                         |
+| `ITERM_DATABASE_POOL_MAX`                     | `2` per Runtime database role   |
 | `ITERM_DATABASE_URLS`                         | unset; ordered URL list         |
 | `ITERM_RUNTIME_GUARDIAN_TERMINATION_GRACE_MS` | `100`                           |
 | `ITERM_ACTOR_ACTION_RATE_LIMIT`               | `120`                           |
 | `ITERM_SESSION_ACTION_RATE_LIMIT`             | `240`                           |
 | `ITERM_ACTION_RATE_LIMIT_WINDOW_MS`           | `1000`                          |
 
-Capacity weight is an integer from 1 through 1000 and expresses only the owner's relative share of new root Sessions. The Session lease must exceed two database health-check intervals; the owner lease must additionally cover the Guardian termination grace. Session expiry is capped at the current owner lease expiry. The drain timeout is one shared budget for pending root-create settlement and accepted RPC response drain; expiry proceeds to Session closure without reassigning exact-owner work. The production Runtime Router uses the health/reconnect/statement-timeout values for degraded startup and recovery. These settings are valid only with exactly one of `ITERM_DATABASE_URL` or `ITERM_DATABASE_URLS`; the latter is comma-separated and ordered. Read-only standbys are rejected until an external control plane promotes one.
+Capacity weight is an integer from 1 through 1000 and expresses only the owner's relative share of new root Sessions. The Session lease must exceed two database health-check intervals; the owner lease must additionally cover the Guardian termination grace. Session expiry is capped at the current owner lease expiry. The drain timeout is one shared budget for pending root-create settlement and accepted RPC response drain; expiry proceeds to Session closure without reassigning exact-owner work. The production Runtime Router uses the health/reconnect/statement-timeout values for degraded startup and recovery. Database-wide connection planning must multiply the four Runtime roles by Runtime count, endpoint count, and `ITERM_DATABASE_POOL_MAX`, then reserve capacity for Router/relay/worker/Console/migration/monitoring clients. These settings are valid only with exactly one of `ITERM_DATABASE_URL` or `ITERM_DATABASE_URLS`; the latter is comma-separated and ordered. Read-only standbys are rejected until an external control plane promotes one.
 
 ## Actor configuration
 

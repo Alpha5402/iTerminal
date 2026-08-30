@@ -61,6 +61,7 @@ export interface PostgresRuntimeDurabilityOptions extends ActionRateLimitOptions
   readonly beforeAcceptExecuteCommit?: () => void;
   readonly idleTransactionTimeoutMilliseconds?: number;
   readonly maxPendingOutbox?: number;
+  readonly poolMax?: number;
   readonly statementTimeoutMilliseconds?: number;
 }
 
@@ -94,16 +95,18 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
       options.idleTransactionTimeoutMilliseconds ?? statementTimeoutMilliseconds,
       "idleTransactionTimeoutMilliseconds",
     );
+    const poolMax = positiveInteger(options.poolMax ?? 20, "poolMax");
     this.#endpoints = createPostgresEndpointPool(connectionString, {
       connectionTimeoutMillis: 5_000,
       idle_in_transaction_session_timeout: idleTransactionTimeoutMilliseconds,
-      max: 20,
+      max: poolMax,
       query_timeout: statementTimeoutMilliseconds,
       statement_timeout: statementTimeoutMilliseconds,
     });
     this.#pool = this.#endpoints.pool;
     this.#observation = new PostgresObservationRepository(connectionString, {
       idleTransactionTimeoutMilliseconds,
+      ...(options.poolMax === undefined ? {} : { poolMax: options.poolMax }),
       requireSessionFence: true,
     });
     this.#admission = new PostgresRuntimeRepository(connectionString, {
