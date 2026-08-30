@@ -15,6 +15,7 @@ const migrations = [
   { file: "008_runtime_router_indexes.sql", version: 8 },
   { file: "009_session_fencing.sql", version: 9 },
   { file: "010_fair_placement_rate_limits.sql", version: 10 },
+  { file: "011_session_creation_idempotency.sql", version: 11 },
 ] as const;
 
 export async function migrateDatabase(pool: Pool): Promise<void> {

@@ -68,6 +68,7 @@ describeDatabase("M6.5 durable Interaction Guard through Human RPC and Agent MCP
     mcp = await connectAgent(daemon.socketPath);
 
     const session = await callTool<SessionResult>(mcp, "session_create", {
+      idempotencyKey: "interaction-policy-session-create",
       shell: "zsh",
       workspaceRoot: workspace,
     });

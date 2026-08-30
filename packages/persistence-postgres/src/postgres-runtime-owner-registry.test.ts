@@ -201,6 +201,52 @@ describeDatabase("M9.1 PostgreSQL Runtime owner registry", () => {
     ]);
   });
 
+  it("claims one exact owner once for concurrent idempotent Session creation", async () => {
+    const registry = createRegistry();
+    const otherRouter = createRegistry();
+    await Promise.all(
+      ["a", "b"].map((suffix) =>
+        registry.registerOwner({
+          endpoint: `/tmp/iterminal-create-${suffix}.sock`,
+          instanceId: `create-${suffix}`,
+          leaseMilliseconds: 5_000,
+          ownerId: `owner-create-${suffix}`,
+        }),
+      ),
+    );
+    const request = {
+      idempotencyKey: "session-create-once",
+      requestHash: "a".repeat(64),
+    } as const;
+
+    const claims = await Promise.all([
+      registry.claimSessionCreation(request),
+      otherRouter.claimSessionCreation(request),
+    ]);
+    expect(claims.map((claim) => claim?.owner.ownerId)).toEqual([
+      "owner-create-a",
+      "owner-create-a",
+    ]);
+    expect(await registry.listAssignableOwners()).toEqual([
+      expect.objectContaining({ ownerId: "owner-create-b", placementCount: 0 }),
+      expect.objectContaining({ ownerId: "owner-create-a", placementCount: 1 }),
+    ]);
+    await expect(
+      otherRouter.claimSessionCreation({
+        ...request,
+        requestHash: "b".repeat(64),
+      }),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
+
+    const firstOwner = await registry.resolveLiveOwner("owner-create-a");
+    if (firstOwner === undefined) throw new Error("First creation owner is missing");
+    await registry.stopOwner(firstOwner);
+    await expect(otherRouter.claimSessionCreation(request)).rejects.toMatchObject({
+      code: "OWNER_ROUTE_UNAVAILABLE",
+      details: { ownerId: "owner-create-a" },
+    });
+  });
+
   function createRegistry(): PostgresRuntimeOwnerRegistry {
     const registry = new PostgresRuntimeOwnerRegistry(databaseUrl ?? "");
     registries.push(registry);

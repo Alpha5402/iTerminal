@@ -34,6 +34,7 @@ describe("M7.1 official MCP checkpoint fork", () => {
   it("rebuilds one READY child with bounded metadata and idempotent lineage", async () => {
     const activeClient = required(client, "MCP Client");
     const parent = await callTool<SessionResult>(activeClient, "session_create", {
+      idempotencyKey: "session-fork-safe-parent-create",
       shell: "zsh",
       workspaceRoot,
     });
@@ -102,6 +103,7 @@ describe("M7.1 official MCP checkpoint fork", () => {
   it("requires explicit stale acknowledgement while a parent stays RUNNING", async () => {
     const activeClient = required(client, "MCP Client");
     const parent = await callTool<SessionResult>(activeClient, "session_create", {
+      idempotencyKey: "session-fork-busy-parent-create",
       shell: "bash",
       workspaceRoot,
     });

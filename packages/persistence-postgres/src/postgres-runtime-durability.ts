@@ -104,10 +104,59 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
     events: readonly DurableSessionEvent[],
     owner: RuntimeOwnerIdentity,
     leaseMilliseconds: number,
-  ): Promise<SessionLease> {
+    creation: { readonly idempotencyKey: string; readonly requestHash: string },
+  ): Promise<
+    | { readonly kind: "created"; readonly lease: SessionLease }
+    | { readonly kind: "replay"; readonly sessionId: string }
+  > {
     return this.#transaction(async (client) => {
       assertSessionOwner(session, owner);
       await assertRuntimeOwner(client, owner);
+      const intent = await client.query<{
+        owner_id: string;
+        owner_instance_id: string;
+        owner_registry_epoch: string;
+        request_hash: string;
+        session_id: string | null;
+      }>(
+        `SELECT request_hash, owner_id, owner_instance_id,
+                owner_registry_epoch::text, session_id
+           FROM session_creation_requests
+          WHERE idempotency_key = $1
+          FOR UPDATE`,
+        [creation.idempotencyKey],
+      );
+      const existing = intent.rows[0];
+      if (existing === undefined) {
+        await client.query(
+          `INSERT INTO session_creation_requests
+            (idempotency_key, request_hash, owner_id, owner_instance_id, owner_registry_epoch)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [
+            creation.idempotencyKey,
+            creation.requestHash,
+            owner.ownerId,
+            owner.instanceId,
+            owner.epoch,
+          ],
+        );
+      } else {
+        if (
+          existing.request_hash !== creation.requestHash ||
+          existing.owner_id !== owner.ownerId ||
+          existing.owner_instance_id !== owner.instanceId ||
+          Number.parseInt(existing.owner_registry_epoch, 10) !== owner.epoch
+        ) {
+          throw new RuntimeError(
+            "IDEMPOTENCY_KEY_REUSED",
+            "Session creation idempotency key changed request or exact owner",
+            { idempotencyKey: creation.idempotencyKey },
+          );
+        }
+        if (existing.session_id !== null) {
+          return { kind: "replay", sessionId: existing.session_id };
+        }
+      }
       await client.query(
         `INSERT INTO sessions
           (id, current_generation, status, shell, workspace_root, owner_id,
@@ -144,7 +193,15 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
         sessionId: session.id,
       });
       await insertEvents(client, events);
-      return lease;
+      await expectOne(
+        client,
+        `UPDATE session_creation_requests
+            SET session_id = $2, updated_at = now()
+          WHERE idempotency_key = $1 AND session_id IS NULL`,
+        [creation.idempotencyKey, session.id],
+        "Session was committed without binding its creation idempotency key",
+      );
+      return { kind: "created", lease };
     });
   }
 

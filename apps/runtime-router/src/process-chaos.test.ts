@@ -477,6 +477,113 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
     expect(durableMutation.rows).toEqual([{ action_count: "1", execution_count: "1" }]);
   }, 120_000);
 
+  it("settles root Session creation exactly once after post-forward Router SIGKILL and concurrent replay", async () => {
+    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m98-create-")));
+    fixtures.push(root);
+    const workspace = join(root, "workspace");
+    await mkdir(workspace, { recursive: true });
+    const owners = await Promise.all([
+      startRuntimeChild(
+        root,
+        "owner-create-crash-a",
+        "instance-create-crash-a",
+        join(root, "a.sock"),
+      ),
+      startRuntimeChild(
+        root,
+        "owner-create-crash-b",
+        "instance-create-crash-b",
+        join(root, "b.sock"),
+      ),
+    ]);
+    children.push(...owners);
+    const routerSocket = join(root, "router.sock");
+    const crashingRouter = await startRouterChild(routerSocket, "after-session-create-forward");
+    children.push(crashingRouter);
+    let client = new UnixRuntimeClient(routerSocket);
+    const request = {
+      idempotencyKey: "m98-post-forward-session-create",
+      shell: "zsh" as const,
+      workspaceRoot: workspace,
+    };
+
+    await expect(client.createSession(request)).rejects.toMatchObject({
+      code: "DELIVERY_UNKNOWN",
+      retryable: false,
+    });
+    await waitForExit(crashingRouter);
+    expect(crashingRouter.process.signalCode).toBe("SIGKILL");
+    const committed = await pool.query<{
+      owner_id: string;
+      session_count: string;
+      session_id: string;
+    }>(
+      `SELECT creation.owner_id, creation.session_id,
+              count(session.id)::text AS session_count
+         FROM session_creation_requests creation
+         JOIN sessions session ON session.id = creation.session_id
+        WHERE creation.idempotency_key = $1
+        GROUP BY creation.owner_id, creation.session_id`,
+      [request.idempotencyKey],
+    );
+    expect(committed.rows).toHaveLength(1);
+    expect(committed.rows[0]?.session_count).toBe("1");
+    const committedSessionId = committed.rows[0]?.session_id;
+    if (committedSessionId === undefined) throw new Error("Committed Session ID is missing");
+
+    const steadyRouter = await startRouterChild(routerSocket);
+    children.push(steadyRouter);
+    client = new UnixRuntimeClient(routerSocket);
+    const replay = await client.createSession(request);
+    expect(replay.id).toBe(committedSessionId);
+    expect(replay.status).toBe("READY");
+    await expect(client.createSession({ ...request, shell: "bash" })).rejects.toMatchObject({
+      code: "IDEMPOTENCY_KEY_REUSED",
+    });
+
+    const secondRouterSocket = join(root, "router-second.sock");
+    children.push(await startRouterChild(secondRouterSocket));
+    const secondClient = new UnixRuntimeClient(secondRouterSocket);
+    const concurrentRequest = {
+      ...request,
+      idempotencyKey: "m98-concurrent-router-session-create",
+    };
+    const [left, right] = await Promise.all([
+      client.createSession(concurrentRequest),
+      secondClient.createSession(concurrentRequest),
+    ]);
+    expect(right.id).toBe(left.id);
+    const durableCreates = await pool.query<{
+      creation_count: string;
+      placement_count: string;
+      session_count: string;
+    }>(
+      `SELECT
+         (SELECT count(*)::text FROM session_creation_requests
+           WHERE idempotency_key IN ($1, $2)) AS creation_count,
+         (SELECT sum(placement_count)::text FROM runtime_workers
+           WHERE owner_id LIKE 'owner-create-crash-%') AS placement_count,
+         (SELECT count(*)::text FROM sessions
+           WHERE id IN (SELECT session_id FROM session_creation_requests
+                          WHERE idempotency_key IN ($1, $2))) AS session_count`,
+      [request.idempotencyKey, concurrentRequest.idempotencyKey],
+    );
+    expect(durableCreates.rows).toEqual([
+      { creation_count: "2", placement_count: "2", session_count: "2" },
+    ]);
+
+    const executed = await client.startExecute({
+      actor: actor("root-create-replay"),
+      command: "printf m98-root-create-replay",
+      idempotencyKey: "m98-root-create-replay-execute",
+      sessionGeneration: replay.generation,
+      sessionId: replay.id,
+    });
+    const completed = await client.waitExecution(executed.execution.id);
+    expect(completed.status).toBe("COMPLETED");
+    expect(completed.output).toContain("m98-root-create-replay");
+  }, 120_000);
+
   async function startRuntimeChild(
     root: string,
     ownerId: string,
@@ -504,7 +611,8 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
 
   async function startRouterChild(
     socketPath: string,
-    failpoint?: "after-execution-start-forward" | "after-placement-claim",
+    failpoint?:
+      "after-execution-start-forward" | "after-placement-claim" | "after-session-create-forward",
   ): Promise<ManagedChild> {
     const child = startChild(
       failpoint === undefined ? "router" : `router-${failpoint}`,

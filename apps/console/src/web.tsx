@@ -166,6 +166,9 @@ function App(): React.JSX.Element {
   const socket = useRef<WebSocket | undefined>(undefined);
   const reconnectTimer = useRef<number | undefined>(undefined);
   const reconnectAttempt = useRef(0);
+  const createIdempotency = useRef<
+    { readonly key: string; readonly signature: string } | undefined
+  >(undefined);
   const forkIdempotency = useRef(new Map<string, string>());
   const latestSession = useRef<Session | undefined>(undefined);
   const latestInteraction = useRef<InteractionState | undefined>(undefined);
@@ -609,11 +612,18 @@ function App(): React.JSX.Element {
 
   const createSession = async (event: React.FormEvent): Promise<void> => {
     event.preventDefault();
+    const signature = JSON.stringify({ shell, workspaceRoot });
+    let creation = createIdempotency.current;
+    if (creation?.signature !== signature) {
+      creation = { key: crypto.randomUUID(), signature };
+      createIdempotency.current = creation;
+    }
     try {
       const created = await api<Session>("/api/sessions", {
-        body: { shell, workspaceRoot },
+        body: { idempotencyKey: creation.key, shell, workspaceRoot },
         method: "POST",
       });
+      createIdempotency.current = undefined;
       await refreshSessions();
       setSelectedId(created.id);
       setWorkspaceRoot("");

@@ -77,6 +77,7 @@ function routeRegistry(liveOwner: RuntimeOwnerRecord): RuntimeOwnerRegistry {
   return {
     beginOwnerDrain: unsupported,
     claimAssignableOwner: unsupported,
+    claimSessionCreation: unsupported,
     heartbeatOwner: unsupported,
     listAssignableOwners: unsupported,
     listSessionOwnerRoutes: unsupported,

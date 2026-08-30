@@ -58,7 +58,7 @@ The Actor type is always `agent` in M4. Tool arguments cannot claim to be Human 
 
 | Tool                 | Result/behavior                                                                       |
 | -------------------- | ------------------------------------------------------------------------------------- |
-| `session_create`     | Starts one persistent bash/zsh PTY at an existing workspace                           |
+| `session_create`     | Idempotently starts one persistent bash/zsh PTY at an existing workspace              |
 | `session_get`        | Returns current live projection and active Execution                                  |
 | `session_list`       | Lists daemon-owned Sessions                                                           |
 | `session_close`      | Terminates the exact generation's PTY/process group                                   |
@@ -96,7 +96,9 @@ Every successful tool result contains a JSON text block and `structuredContent: 
 }
 ```
 
-`execute`, `input`, `control`, and `terminal_resize` require caller-generated idempotency keys. The namespace is one Session + Actor across all Action kinds, so reusing a key for another kind or payload returns `IDEMPOTENCY_KEY_REUSED`. A transport disconnect after a mutating RPC returns `DELIVERY_UNKNOWN`; inspect state using the same idempotency key or Events before any deliberate retry.
+`session_create` requires a caller-generated global creation idempotency key. After `DELIVERY_UNKNOWN`, repeat the exact key, shell, and workspace to retrieve the original durable Session; a changed request returns `IDEMPOTENCY_KEY_REUSED`. Concurrent Routers converge on one placement and Session for that key.
+
+`execute`, `input`, `control`, and `terminal_resize` also require caller-generated idempotency keys. Their namespace is one Session + Actor across all Action kinds, so reusing a key for another kind or payload returns `IDEMPOTENCY_KEY_REUSED`. A transport disconnect after a mutating RPC returns `DELIVERY_UNKNOWN`; inspect state using the same idempotency key or Events before any deliberate retry.
 
 `terminal_resize` takes `columns`, `rows`, and the exact `expectedGeometryVersion` observed from `screen_get`. Geometry starts at 120×40/version 1 and is bounded to 40–240 columns by 12–100 rows. A stale CAS returns retryable `GEOMETRY_CHANGED` before creating an Action. Human/Agent resize follows the same policy and Human Guard as Input/Control; Scheduler/System remain denied. A confirmed resize increments both geometry and screen versions. Once `terminal.resize_write_attempted` exists, any unconfirmed PTY/projection outcome becomes Action `UNKNOWN` plus generation `BROKEN` and is never automatically replayed.
 

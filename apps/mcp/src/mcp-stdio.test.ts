@@ -59,6 +59,7 @@ describe("M4 stdio MCP bridge", () => {
     ]);
 
     const session = await callTool<SessionResult>(first, "session_create", {
+      idempotencyKey: "mcp-stdio-session-create",
       shell: "zsh",
       workspaceRoot,
     });

@@ -56,6 +56,7 @@ async function dispatch(request: Record<string, unknown>): Promise<unknown> {
   const op = stringField(request, "op");
   if (op === "create") {
     return runtime.createSession({
+      idempotencyKey: stringField(request, "idempotencyKey"),
       shell: shellField(request, "shell"),
       workspaceRoot: stringField(request, "workspaceRoot"),
     });

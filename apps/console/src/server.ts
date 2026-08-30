@@ -32,6 +32,7 @@ const identitySchema = z.strictObject({
 });
 const sessionParamsSchema = z.strictObject({ sessionId: z.string().min(1).max(256) });
 const createSessionSchema = z.strictObject({
+  idempotencyKey: z.string().min(1).max(256),
   shell: z.enum(["bash", "zsh"]),
   workspaceRoot: z.string().min(1).max(4_096),
 });

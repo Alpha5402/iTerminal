@@ -43,11 +43,14 @@ describeDatabase("PostgreSQL controlled terminal geometry", () => {
 
   it("admits exactly one concurrent resize for one expected geometry version", async () => {
     const starting = sessionFixture();
-    const fence = await durability.createSession(
-      starting,
-      [eventFixture(starting, "session.created")],
-      owner,
-      60_000,
+    const fence = createdLease(
+      await durability.createSession(
+        starting,
+        [eventFixture(starting, "session.created")],
+        owner,
+        60_000,
+        { idempotencyKey: `create_${starting.id}`, requestHash: "a".repeat(64) },
+      ),
     );
     const ready: Session = { ...starting, status: "READY" };
     await durability.markSessionReady(
@@ -152,6 +155,11 @@ function resizeFixture(
     status: "ACCEPTED",
     type: "resize",
   };
+}
+
+function createdLease(result: Awaited<ReturnType<PostgresRuntimeDurability["createSession"]>>) {
+  if (result.kind !== "created") throw new Error("Expected a newly created Session lease");
+  return result.lease;
 }
 
 function eventFixture(session: Session, type: string, action?: ResizeAction) {

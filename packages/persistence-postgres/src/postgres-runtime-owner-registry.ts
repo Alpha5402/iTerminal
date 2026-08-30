@@ -5,6 +5,7 @@ import type {
   RuntimeOwnerRoute,
   RuntimeOwnerStatus,
   RuntimeRouteResolution,
+  SessionCreationClaim,
 } from "@iterminal/application";
 import { RuntimeError } from "@iterminal/domain";
 import { Pool, type PoolClient } from "pg";
@@ -25,6 +26,15 @@ interface OwnerRow {
   readonly status: RuntimeOwnerStatus;
   readonly stopped_at: Date | null;
   readonly version: string;
+}
+
+interface SessionCreationRow {
+  readonly idempotency_key: string;
+  readonly owner_id: string;
+  readonly owner_instance_id: string;
+  readonly owner_registry_epoch: string;
+  readonly request_hash: string;
+  readonly session_id: string | null;
 }
 
 type RouteRow = Readonly<{ target_owner_id: string }> & {
@@ -191,34 +201,85 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
   public async claimAssignableOwner(): Promise<RuntimeOwnerRecord | undefined> {
     return this.#transaction(async (client) => {
       await client.query("SELECT pg_advisory_xact_lock($1)", [PLACEMENT_CLAIM_LOCK]);
-      const candidate = await client.query<{ owner_id: string }>(
-        `SELECT owner_id
-           FROM runtime_workers
-          WHERE status = 'ACTIVE' AND lease_expires_at > now()
-          ORDER BY placement_count, owner_id
-          LIMIT 1
+      return this.#claimAssignableOwner(client);
+    });
+  }
+
+  public async claimSessionCreation(input: {
+    readonly idempotencyKey: string;
+    readonly requestHash: string;
+  }): Promise<SessionCreationClaim | undefined> {
+    validateIdentifier(input.idempotencyKey, "idempotencyKey");
+    validateRequestHash(input.requestHash);
+    return this.#transaction(async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock($1)", [PLACEMENT_CLAIM_LOCK]);
+      const existing = await client.query<SessionCreationRow>(
+        `SELECT idempotency_key, request_hash, owner_id, owner_instance_id,
+                owner_registry_epoch::text, session_id
+           FROM session_creation_requests
+          WHERE idempotency_key = $1
           FOR UPDATE`,
+        [input.idempotencyKey],
       );
-      const ownerId = candidate.rows[0]?.owner_id;
-      if (ownerId === undefined) return undefined;
-      const claimed = await client.query<OwnerRow>(
-        `UPDATE runtime_workers
-            SET placement_count = placement_count + 1,
-                version = version + 1
-          WHERE owner_id = $1 AND status = 'ACTIVE' AND lease_expires_at > now()
-        RETURNING ${OWNER_RETURNING}`,
-        [ownerId],
-      );
-      const row = claimed.rows[0];
-      if (row === undefined) {
-        throw new RuntimeError(
-          "RUNTIME_UNAVAILABLE",
-          "Assignable Runtime owner changed during its atomic placement claim",
-          { ownerId },
-          true,
-        );
+      const replay = existing.rows[0];
+      if (replay !== undefined) {
+        if (replay.request_hash !== input.requestHash) {
+          throw new RuntimeError(
+            "IDEMPOTENCY_KEY_REUSED",
+            "Session creation idempotency key was already used with a different request",
+            { idempotencyKey: input.idempotencyKey },
+          );
+        }
+        const owner =
+          replay.session_id === null
+            ? await client.query<OwnerRow>(
+                `SELECT ${OWNER_RETURNING}
+                   FROM runtime_workers
+                  WHERE owner_id = $1 AND instance_id = $2 AND registry_epoch = $3
+                    AND status IN ('ACTIVE', 'DRAINING') AND lease_expires_at > now()`,
+                [replay.owner_id, replay.owner_instance_id, replay.owner_registry_epoch],
+              )
+            : await client.query<OwnerRow>(
+                `SELECT ${OWNER_RETURNING}
+                   FROM sessions session
+                   JOIN runtime_workers ON runtime_workers.owner_id = session.owner_id
+                  WHERE session.id = $1
+                    AND runtime_workers.status IN ('ACTIVE', 'DRAINING')
+                    AND runtime_workers.lease_expires_at > now()`,
+                [replay.session_id],
+              );
+        const row = owner.rows[0];
+        if (row === undefined) {
+          throw new RuntimeError(
+            "OWNER_ROUTE_UNAVAILABLE",
+            replay.session_id === null
+              ? "Session creation intent has no live exact owner route"
+              : "Created Session has no live owner route",
+            {
+              idempotencyKey: input.idempotencyKey,
+              ownerEpoch: Number.parseInt(replay.owner_registry_epoch, 10),
+              ownerId: replay.owner_id,
+              ownerInstanceId: replay.owner_instance_id,
+              sessionId: replay.session_id ?? undefined,
+            },
+            true,
+          );
+        }
+        return {
+          owner: ownerRoute(row),
+          ...(replay.session_id === null ? {} : { sessionId: replay.session_id }),
+        };
       }
-      return ownerRecord(row);
+
+      const owner = await this.#claimAssignableOwner(client);
+      if (owner === undefined) return undefined;
+      await client.query(
+        `INSERT INTO session_creation_requests
+          (idempotency_key, request_hash, owner_id, owner_instance_id, owner_registry_epoch)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [input.idempotencyKey, input.requestHash, owner.ownerId, owner.instanceId, owner.epoch],
+      );
+      return { owner: ownerRouteFromRecord(owner) };
     });
   }
 
@@ -343,6 +404,37 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
       client.release();
     }
   }
+
+  async #claimAssignableOwner(client: PoolClient): Promise<RuntimeOwnerRecord | undefined> {
+    const candidate = await client.query<{ owner_id: string }>(
+      `SELECT owner_id
+         FROM runtime_workers
+        WHERE status = 'ACTIVE' AND lease_expires_at > now()
+        ORDER BY placement_count, owner_id
+        LIMIT 1
+        FOR UPDATE`,
+    );
+    const ownerId = candidate.rows[0]?.owner_id;
+    if (ownerId === undefined) return undefined;
+    const claimed = await client.query<OwnerRow>(
+      `UPDATE runtime_workers
+          SET placement_count = placement_count + 1,
+              version = version + 1
+        WHERE owner_id = $1 AND status = 'ACTIVE' AND lease_expires_at > now()
+      RETURNING ${OWNER_RETURNING}`,
+      [ownerId],
+    );
+    const row = claimed.rows[0];
+    if (row === undefined) {
+      throw new RuntimeError(
+        "RUNTIME_UNAVAILABLE",
+        "Assignable Runtime owner changed during its atomic placement claim",
+        { ownerId },
+        true,
+      );
+    }
+    return ownerRecord(row);
+  }
 }
 
 function ownerRecord(row: OwnerRow): RuntimeOwnerRecord {
@@ -451,5 +543,26 @@ function ownerRoute(row: OwnerRow): RuntimeOwnerRoute {
     version: Number.parseInt(row.version, 10),
     ...(row.stopped_at === null ? {} : { stoppedAt: row.stopped_at.toISOString() }),
   };
+}
+
+function ownerRouteFromRecord(owner: RuntimeOwnerRecord): RuntimeOwnerRoute {
+  return {
+    endpoint: owner.endpoint,
+    epoch: owner.epoch,
+    heartbeatAt: owner.heartbeatAt,
+    instanceId: owner.instanceId,
+    leaseExpiresAt: owner.leaseExpiresAt,
+    ownerId: owner.ownerId,
+    startedAt: owner.startedAt,
+    status: owner.status,
+    version: owner.version,
+    ...(owner.stoppedAt === undefined ? {} : { stoppedAt: owner.stoppedAt }),
+  };
+}
+
+function validateRequestHash(value: string): void {
+  if (!/^[a-f0-9]{64}$/u.test(value)) {
+    throw new RuntimeError("INVALID_REQUEST", "requestHash must be a lowercase SHA-256 digest");
+  }
 }
 import { isAbsolute } from "node:path";

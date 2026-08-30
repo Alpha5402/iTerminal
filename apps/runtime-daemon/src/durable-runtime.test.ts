@@ -61,6 +61,7 @@ describeDatabase("M4.1 durable Runtime daemon", () => {
     });
     const client = await connectClient(daemon.socketPath, "durable-happy", clients);
     const session = await callTool<SessionResult>(client, "session_create", {
+      idempotencyKey: "durable-happy-session-create",
       shell: "zsh",
       workspaceRoot: fixture.workspace,
     });
@@ -191,6 +192,7 @@ describeDatabase("M4.1 durable Runtime daemon", () => {
     daemonChild = await startDaemonChild(socketPath, ownerId, databaseUrl ?? "");
     const client = await connectClient(socketPath, "durable-crash", clients);
     const session = await callTool<SessionResult>(client, "session_create", {
+      idempotencyKey: "durable-crash-session-create",
       shell: "zsh",
       workspaceRoot: fixture.workspace,
     });

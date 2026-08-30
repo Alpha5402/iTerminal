@@ -83,10 +83,12 @@ describeDatabase("M9.2 official MCP Client through central Router", () => {
     expect(tools.tools.some((tool) => tool.name === "execute")).toBe(true);
 
     const left = await callTool<SessionResult>(client, "session_create", {
+      idempotencyKey: "router-mcp-left-session-create",
       shell: "zsh",
       workspaceRoot: leftWorkspace,
     });
     const right = await callTool<SessionResult>(client, "session_create", {
+      idempotencyKey: "router-mcp-right-session-create",
       shell: "zsh",
       workspaceRoot: rightWorkspace,
     });

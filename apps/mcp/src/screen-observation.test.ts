@@ -31,6 +31,7 @@ describe("M6 live screen observation and synchronization", () => {
   it("waits for version/text/stability/exit and searches visible cell columns without polling", async () => {
     const activeClient = required(client, "MCP Client");
     const session = await callTool<SessionResult>(activeClient, "session_create", {
+      idempotencyKey: "screen-observation-session-create",
       shell: "zsh",
       workspaceRoot,
     });
@@ -121,6 +122,7 @@ describe("M6 live screen observation and synchronization", () => {
   it("reads cell-safe regions and retained row diffs with explicit resync", async () => {
     const activeClient = required(client, "MCP Client");
     const session = await callTool<SessionResult>(activeClient, "session_create", {
+      idempotencyKey: "screen-diff-session-create",
       shell: "zsh",
       workspaceRoot,
     });
@@ -212,6 +214,7 @@ describe("M6 live screen observation and synchronization", () => {
   it("exposes stable sparse SGR cell metadata through the official MCP path", async () => {
     const activeClient = required(client, "MCP Client");
     const session = await callTool<SessionResult>(activeClient, "session_create", {
+      idempotencyKey: "screen-wait-session-create",
       shell: "zsh",
       workspaceRoot,
     });

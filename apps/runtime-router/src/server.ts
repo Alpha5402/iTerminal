@@ -1,25 +1,26 @@
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
-import type {
-  AcquireInteractionGuardRequest,
-  ControlRequest,
-  CreateSessionRequest,
-  ExecuteRequest,
-  ForkSessionRequest,
-  InputRequest,
-  ReleaseInteractionGuardRequest,
-  RenewInteractionGuardRequest,
-  ResizeRequest,
-  RuntimeOwnerRegistry,
-  RuntimeOwnerRoute,
-  RuntimeRouteResolution,
-  ScreenCellsRequest,
-  ScreenDiffRequest,
-  ScreenRegionRequest,
-  ScreenSearchRequest,
-  ScreenWaitRequest,
-  SetInputPolicyRequest,
+import {
+  sessionCreationRequestHash,
+  type AcquireInteractionGuardRequest,
+  type ControlRequest,
+  type CreateSessionRequest,
+  type ExecuteRequest,
+  type ForkSessionRequest,
+  type InputRequest,
+  type ReleaseInteractionGuardRequest,
+  type RenewInteractionGuardRequest,
+  type ResizeRequest,
+  type RuntimeOwnerRegistry,
+  type RuntimeOwnerRoute,
+  type RuntimeRouteResolution,
+  type ScreenCellsRequest,
+  type ScreenDiffRequest,
+  type ScreenRegionRequest,
+  type ScreenSearchRequest,
+  type ScreenWaitRequest,
+  type SetInputPolicyRequest,
 } from "@iterminal/application";
 import type {
   ControlAction,
@@ -74,8 +75,17 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
   ) {}
 
   public async createSession(request: CreateSessionRequest): Promise<Session> {
-    const owner = await this.routes.claimAssignableOwner();
-    if (owner === undefined) {
+    if (request.idempotencyKey === undefined) {
+      throw new RuntimeError(
+        "INVALID_REQUEST",
+        "Central Router Session creation requires an idempotency key",
+      );
+    }
+    const claim = await this.routes.claimSessionCreation({
+      idempotencyKey: request.idempotencyKey,
+      requestHash: sessionCreationRequestHash(request),
+    });
+    if (claim === undefined) {
       throw new RuntimeError(
         "OWNER_ROUTE_UNAVAILABLE",
         "No active Runtime owner can accept a new Session",
@@ -83,7 +93,15 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
         true,
       );
     }
+    const owner = claim.owner;
     await this.hooks.afterPlacementClaim?.(owner);
+    if (claim.sessionId !== undefined) {
+      const sessionId = claim.sessionId;
+      const replay = await this.#forward(owner, "session.create", (client) =>
+        client.getSession(sessionId),
+      );
+      return expectSessionOwner(replay, owner, "session.create");
+    }
     const session = await this.#forward(owner, "session.create", (client) =>
       client.createSession(request),
     );

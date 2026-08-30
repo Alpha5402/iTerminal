@@ -216,6 +216,7 @@ const operationSchemas = {
   "session.close": sessionIdentitySchema,
   "session.checkpoint.get": sessionIdentitySchema,
   "session.create": z.strictObject({
+    idempotencyKey: z.string().min(1).max(256),
     shell: z.enum(["bash", "zsh"]),
     workspaceRoot: z.string().min(1).max(4096),
   }),
@@ -471,7 +472,9 @@ export class UnixRuntimeClient implements RuntimeGateway {
   public constructor(private readonly socketPath: string) {}
 
   public createSession(request: CreateSessionRequest): Promise<Session> {
+    const idempotencyKey = request.idempotencyKey ?? `session_create_${randomUUID()}`;
     return this.#request("session.create", {
+      idempotencyKey,
       shell: request.shell,
       workspaceRoot: request.workspaceRoot,
     });
@@ -832,6 +835,7 @@ async function dispatch(
     case "session.create": {
       const request = operationSchemas[operation].parse(input);
       return gateway.createSession({
+        idempotencyKey: request.idempotencyKey,
         shell: request.shell,
         workspaceRoot: request.workspaceRoot,
       });

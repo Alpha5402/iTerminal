@@ -49,17 +49,23 @@ describeDatabase("M9.3 PostgreSQL Session fencing", () => {
   it("allocates monotonic tokens and rolls back a partial exact-set renewal", async () => {
     const left = sessionFixture(owner.ownerId);
     const right = sessionFixture(owner.ownerId);
-    const leftFence = await durability.createSession(
-      left,
-      [eventFixture(left, "session.created")],
-      owner,
-      30_000,
+    const leftFence = createdLease(
+      await durability.createSession(
+        left,
+        [eventFixture(left, "session.created")],
+        owner,
+        30_000,
+        creationFixture(left),
+      ),
     );
-    const rightFence = await durability.createSession(
-      right,
-      [eventFixture(right, "session.created")],
-      owner,
-      30_000,
+    const rightFence = createdLease(
+      await durability.createSession(
+        right,
+        [eventFixture(right, "session.created")],
+        owner,
+        30_000,
+        creationFixture(right),
+      ),
     );
     expect(BigInt(rightFence.fencingToken)).toBeGreaterThan(BigInt(leftFence.fencingToken));
 
@@ -86,11 +92,14 @@ describeDatabase("M9.3 PostgreSQL Session fencing", () => {
 
   it("requires the expected Execution version under the same Session fence", async () => {
     const starting = sessionFixture(owner.ownerId);
-    const fence = await durability.createSession(
-      starting,
-      [eventFixture(starting, "session.created")],
-      owner,
-      30_000,
+    const fence = createdLease(
+      await durability.createSession(
+        starting,
+        [eventFixture(starting, "session.created")],
+        owner,
+        30_000,
+        creationFixture(starting),
+      ),
     );
     const ready: Session = { ...starting, status: "READY" };
     await durability.markSessionReady(
@@ -224,6 +233,18 @@ function checkpointFixture(session: Session) {
     version: 1,
     workspaceRoot: session.workspaceRoot,
   };
+}
+
+function creationFixture(session: Session) {
+  return {
+    idempotencyKey: `create_${session.id}`,
+    requestHash: "a".repeat(64),
+  };
+}
+
+function createdLease(result: Awaited<ReturnType<PostgresRuntimeDurability["createSession"]>>) {
+  if (result.kind !== "created") throw new Error("Expected a newly created Session lease");
+  return result.lease;
 }
 
 function executeAdmission(session: Session): DurableExecuteAdmission {

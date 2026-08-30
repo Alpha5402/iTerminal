@@ -44,6 +44,27 @@ describe.each(["bash", "zsh"] as const)("M1 %s Runtime", (shell: ShellKind) => {
 });
 
 describe("M1 Action Runtime", () => {
+  it("deduplicates concurrent root Session creation and rejects request drift", async () => {
+    const runtime = createTestRuntime();
+    const workspace = createWorkspace();
+    const request = {
+      idempotencyKey: "session-create-once",
+      shell: "zsh" as const,
+      workspaceRoot: workspace,
+    };
+
+    const [first, replay] = await Promise.all([
+      runtime.createSession(request),
+      runtime.createSession(request),
+    ]);
+    expect(replay.id).toBe(first.id);
+    expect(runtime.listSessions()).toHaveLength(1);
+    await expect(runtime.createSession({ ...request, shell: "bash" })).rejects.toMatchObject({
+      code: "IDEMPOTENCY_KEY_REUSED",
+    });
+    await runtime.closeSession(first.id, first.generation);
+  });
+
   it("fails fast when Busy and lets Human/Agent input target one Python execution", async () => {
     const runtime = createTestRuntime();
     const workspace = createWorkspace();

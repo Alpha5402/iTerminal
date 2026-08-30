@@ -297,8 +297,11 @@ class ControlledDurability implements RuntimeDurability {
     session: { readonly generation: number; readonly id: string },
     _events: readonly unknown[],
     owner: RuntimeOwnerIdentity,
-  ): Promise<SessionLease> {
-    return Promise.resolve(this.#lease(session.id, session.generation, owner));
+  ): Promise<{ readonly kind: "created"; readonly lease: SessionLease }> {
+    return Promise.resolve({
+      kind: "created",
+      lease: this.#lease(session.id, session.generation, owner),
+    });
   }
 
   public createForkSession(

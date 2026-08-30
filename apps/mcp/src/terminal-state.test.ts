@@ -47,6 +47,7 @@ describeFixtures("M6.7 bounded terminal-state evidence", () => {
     const activeClient = required(client, "MCP Client");
     for (const shell of ["bash", "zsh"] as const) {
       const session = await callTool<SessionResult>(activeClient, "session_create", {
+        idempotencyKey: `terminal-state-${shell}-session-create`,
         shell,
         workspaceRoot,
       });
@@ -93,6 +94,7 @@ describeFixtures("M6.7 bounded terminal-state evidence", () => {
   it("classifies real REPL/editor/pager/monitor/confirm/password-like fixtures with bounded evidence", async () => {
     const activeClient = required(client, "MCP Client");
     const session = await callTool<SessionResult>(activeClient, "session_create", {
+      idempotencyKey: "terminal-state-python-session-create",
       shell: "zsh",
       workspaceRoot,
     });

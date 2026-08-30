@@ -39,6 +39,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0033](./0033-independent-process-owner-failure-recovery.md)      | Preserve fencing across Router/Runtime process loss      | Accepted for M9.5        |
 | [0034](./0034-asymmetric-owner-database-partition.md)             | Isolate one owner's silent database partition            | Accepted for M9.6        |
 | [0035](./0035-router-in-flight-crash-boundaries.md)               | Preserve durable truth across Router in-flight crashes   | Accepted for M9.7        |
+| [0036](./0036-durable-root-session-idempotency.md)                | Bind root creation to a durable idempotency intent       | Accepted for M9.8        |
 
 Statuses:
 

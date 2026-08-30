@@ -62,10 +62,11 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
   server.registerTool(
     "session_create",
     {
-      annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
       description:
-        "Create one live persistent bash/zsh PTY Session rooted at an existing workspace. All actors using this Session share cwd, exported environment, and foreground process.",
+        "Idempotently create one live persistent bash/zsh PTY Session rooted at an existing workspace. Reuse the same key after DELIVERY_UNKNOWN. All actors using this Session share cwd, exported environment, and foreground process.",
       inputSchema: z.strictObject({
+        idempotencyKey: z.string().min(1).max(256),
         shell: z.enum(["bash", "zsh"]),
         workspaceRoot: z.string().min(1).max(4096),
       }),

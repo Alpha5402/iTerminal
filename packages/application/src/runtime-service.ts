@@ -89,6 +89,7 @@ const FORK_LIMITATIONS: readonly SessionForkLimitation[] = [
 ];
 
 export interface CreateSessionRequest {
+  readonly idempotencyKey?: string;
   readonly shell: ShellKind;
   readonly workspaceRoot: string;
 }
@@ -259,6 +260,15 @@ interface ForkReplay {
   readonly result: SessionForkResult;
 }
 
+interface SessionCreationReplay {
+  readonly promise: Promise<Session>;
+  readonly requestHash: string;
+}
+
+type IdempotentCreateSessionRequest = Omit<CreateSessionRequest, "idempotencyKey"> & {
+  readonly idempotencyKey: string;
+};
+
 export class RuntimeService {
   readonly #executors = new Map<string, ShellExecutor>();
   readonly #screens = new Map<string, TerminalScreenProjection>();
@@ -268,6 +278,7 @@ export class RuntimeService {
   readonly #mutationTails = new Map<string, Promise<void>>();
   readonly #interactionStates = new Map<string, InteractionState>();
   readonly #sessionLeases = new Map<string, SessionLease>();
+  readonly #sessionCreations = new Map<string, SessionCreationReplay>();
   readonly #checkpoints = new Map<string, ShellCheckpoint>();
   readonly #checkpointInvalid = new Set<string>();
   readonly #forkReplays = new Map<string, ForkReplay>();
@@ -353,7 +364,40 @@ export class RuntimeService {
     }
   }
 
-  public async createSession(request: CreateSessionRequest): Promise<Session> {
+  public createSession(request: CreateSessionRequest): Promise<Session> {
+    const normalized: IdempotentCreateSessionRequest = {
+      ...request,
+      idempotencyKey: request.idempotencyKey ?? `session_create_${randomUUID()}`,
+    };
+    validateIdempotencyKey(normalized.idempotencyKey);
+    const requestHash = sessionCreationRequestHash(normalized);
+    const replay = this.#sessionCreations.get(normalized.idempotencyKey);
+    if (replay !== undefined) {
+      if (replay.requestHash !== requestHash) {
+        return Promise.reject(
+          new RuntimeError(
+            "IDEMPOTENCY_KEY_REUSED",
+            "Session creation idempotency key was already used with a different request",
+            { idempotencyKey: normalized.idempotencyKey },
+          ),
+        );
+      }
+      return replay.promise;
+    }
+    const promise = this.#createSession(normalized, requestHash);
+    this.#sessionCreations.set(normalized.idempotencyKey, { promise, requestHash });
+    void promise.catch(() => {
+      if (this.#sessionCreations.get(normalized.idempotencyKey)?.promise === promise) {
+        this.#sessionCreations.delete(normalized.idempotencyKey);
+      }
+    });
+    return promise;
+  }
+
+  async #createSession(
+    request: IdempotentCreateSessionRequest,
+    requestHash: string,
+  ): Promise<Session> {
     this.#requireOwnerDurability();
     const workspaceRoot = await canonicalWorkspace(request.workspaceRoot);
     const sessionId = `ses_${randomUUID()}`;
@@ -389,17 +433,32 @@ export class RuntimeService {
     const startingEvent = this.#event(session, "session.shell_starting", {}, { persist: false });
 
     try {
-      const lease = await this.#enqueueDurable(session.id, 0, () =>
+      const creation = await this.#enqueueDurable(session.id, 0, () =>
         this.#durability?.createSession(
           session,
           [createdEvent, startingEvent],
           this.#ownerIdentity,
           this.#sessionLeaseMilliseconds,
+          { idempotencyKey: request.idempotencyKey, requestHash },
         ),
       );
       if (this.#durability !== undefined) {
-        if (lease === undefined) throw missingSessionLease(session);
-        this.#sessionLeases.set(session.id, lease);
+        if (creation === undefined) throw missingSessionLease(session);
+        if (creation.kind === "replay") {
+          const replay = this.store.getSession(creation.sessionId);
+          if (replay === undefined) {
+            throw new RuntimeError(
+              "RUNTIME_UNAVAILABLE",
+              "Durable Session creation replay is not present in the live owner",
+              { replaySessionId: creation.sessionId },
+              true,
+            );
+          }
+          this.#interactionStates.delete(sessionId);
+          this.store.deleteSession(sessionId, generation);
+          return replay;
+        }
+        this.#sessionLeases.set(session.id, creation.lease);
       }
     } catch (error) {
       this.#interactionStates.delete(sessionId);
@@ -2800,6 +2859,12 @@ export class RuntimeService {
   #timestamp(): string {
     return this.#now().toISOString();
   }
+}
+
+export function sessionCreationRequestHash(
+  request: Pick<CreateSessionRequest, "shell" | "workspaceRoot">,
+): string {
+  return hashRequest({ shell: request.shell, workspaceRoot: request.workspaceRoot });
 }
 
 function validateGuardTtl(value: number | undefined): number {

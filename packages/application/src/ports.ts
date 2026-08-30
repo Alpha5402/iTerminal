@@ -212,6 +212,20 @@ export interface RuntimeRouteResolution {
   readonly ownerId: string;
 }
 
+export interface SessionCreationClaim {
+  readonly owner: RuntimeOwnerRoute;
+  readonly sessionId?: string;
+}
+
+export interface DurableSessionCreation {
+  readonly idempotencyKey: string;
+  readonly requestHash: string;
+}
+
+export type DurableSessionCreationResult =
+  | { readonly kind: "created"; readonly lease: SessionLease }
+  | { readonly kind: "replay"; readonly sessionId: string };
+
 export interface RuntimeOwnerRegistry {
   registerOwner(input: {
     readonly endpoint: string;
@@ -229,6 +243,7 @@ export interface RuntimeOwnerRegistry {
   ): Promise<RuntimeOwnerRecord>;
   stopOwner(identity: RuntimeOwnerIdentity): Promise<RuntimeOwnerRecord>;
   claimAssignableOwner(): Promise<RuntimeOwnerRecord | undefined>;
+  claimSessionCreation(input: DurableSessionCreation): Promise<SessionCreationClaim | undefined>;
   listAssignableOwners(): Promise<readonly RuntimeOwnerRecord[]>;
   listSessionOwnerRoutes(): Promise<readonly RuntimeRouteResolution[]>;
   resolveLiveOwner(ownerId: string): Promise<RuntimeOwnerRecord | undefined>;
@@ -242,7 +257,8 @@ export interface RuntimeDurability {
     events: readonly DurableSessionEvent[],
     owner: RuntimeOwnerIdentity,
     leaseMilliseconds: number,
-  ): Promise<SessionLease>;
+    creation: DurableSessionCreation,
+  ): Promise<DurableSessionCreationResult>;
   renewSessionLeases(
     owner: RuntimeOwnerIdentity,
     leases: readonly SessionFence[],

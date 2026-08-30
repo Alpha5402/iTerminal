@@ -79,7 +79,11 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
     expect(rejectedHeader.status).toBe(403);
 
     const session = await requestResult<SessionResult>(consoleServer, cookie, "/api/sessions", {
-      body: { shell: "zsh", workspaceRoot: fixture.workspace },
+      body: {
+        idempotencyKey: "console-runtime-session-create",
+        shell: "zsh",
+        workspaceRoot: fixture.workspace,
+      },
       method: "POST",
     });
     const readyInput = await request(consoleServer, cookie, `/api/sessions/${session.id}/input`, {
@@ -193,7 +197,11 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
     const bootstrap = await bodyResult<{ readonly actor: Actor }>(bootstrapResponse);
 
     const parent = await requestResult<SessionResult>(consoleServer, cookie, "/api/sessions", {
-      body: { shell: "zsh", workspaceRoot: fixture.workspace },
+      body: {
+        idempotencyKey: "console-fork-parent-session-create",
+        shell: "zsh",
+        workspaceRoot: fixture.workspace,
+      },
       method: "POST",
     });
     const checkpoint = await requestResult<CheckpointResult>(

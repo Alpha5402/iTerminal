@@ -49,11 +49,14 @@ describeDatabase("PostgreSQL Interaction Guard state", () => {
 
   it("commits state and Event atomically with one expected-version winner", async () => {
     const session = sessionFixture();
-    const fence = await durability.createSession(
-      session,
-      [eventFixture(session, "session.created")],
-      owner,
-      60_000,
+    const fence = createdLease(
+      await durability.createSession(
+        session,
+        [eventFixture(session, "session.created")],
+        owner,
+        60_000,
+        creationFixture(session),
+      ),
     );
     const humanOnly: InteractionState = {
       policy: "human_only",
@@ -105,11 +108,14 @@ describeDatabase("PostgreSQL Interaction Guard state", () => {
 
   it("persists the full bounded Guard and rolls back an invalid renewal", async () => {
     const session = sessionFixture();
-    const fence = await durability.createSession(
-      session,
-      [eventFixture(session, "session.created")],
-      owner,
-      60_000,
+    const fence = createdLease(
+      await durability.createSession(
+        session,
+        [eventFixture(session, "session.created")],
+        owner,
+        60_000,
+        creationFixture(session),
+      ),
     );
     const guarded: InteractionState = {
       guard: {
@@ -192,6 +198,15 @@ function sessionFixture(): Session {
     status: "STARTING",
     workspaceRoot: "/tmp",
   };
+}
+
+function creationFixture(session: Session) {
+  return { idempotencyKey: `create_${session.id}`, requestHash: "a".repeat(64) };
+}
+
+function createdLease(result: Awaited<ReturnType<PostgresRuntimeDurability["createSession"]>>) {
+  if (result.kind !== "created") throw new Error("Expected a newly created Session lease");
+  return result.lease;
 }
 
 function eventFixture(session: Session, type: string, actor?: Actor) {

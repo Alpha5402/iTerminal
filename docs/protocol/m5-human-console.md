@@ -48,7 +48,7 @@ The HTTP status is only transport guidance. Clients branch on the stable Runtime
 | -------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | `GET`    | `/api/bootstrap`                                                  | Human Actor, canonical geometry, live Session list                        |
 | `GET`    | `/api/sessions`                                                   | `session.list`                                                            |
-| `POST`   | `/api/sessions`                                                   | `session.create`; body has `shell`, absolute `workspaceRoot`              |
+| `POST`   | `/api/sessions`                                                   | idempotent `session.create`; key + `shell` + absolute `workspaceRoot`     |
 | `GET`    | `/api/sessions/:id`                                               | `session.get`                                                             |
 | `DELETE` | `/api/sessions/:id`                                               | exact-generation `session.close`                                          |
 | `GET`    | `/api/sessions/:id/checkpoint?generation=`                        | bounded checkpoint metadata; no environment values                        |
@@ -67,6 +67,8 @@ The HTTP status is only transport guidance. Clients branch on the stable Runtime
 | `GET`    | `/api/sessions/:id/stream?generation=&after=&afterScreenVersion=` | WebSocket observation upgrade                                             |
 
 READY Input/Control is rejected before Runtime write admission. RUNNING Execute continues to use the Runtime's `PTY_BUSY` result. The Console cannot turn an HTTP success into an Execution-completed claim: Execute returns accepted Action plus the initial Execution projection.
+
+`POST /api/sessions` requires `idempotencyKey`. The browser retains one generated key after an uncertain or failed create and reuses it only while shell and workspace are unchanged; success clears it. A same-key request with changed creation fields returns `IDEMPOTENCY_KEY_REUSED`.
 
 For a historical `BROKEN` Session the Console does not open the live screen WebSocket. It reads durable Events, shows checkpoint version/status/age/cwd and environment key names, and requires an explicit stale acknowledgement before rebuild. The fork request uses the cookie-bound Human Actor, exact checkpoint version, and an idempotency key. Success selects a new Session/PTY; the historical parent remains `BROKEN`. The UI explicitly states that process, REPL/editor/vim, job, alias/function/trap, socket, and descriptor state is not copied and that workspace files remain shared.
 

@@ -1,7 +1,11 @@
 import { startRuntimeRouter } from "../server.js";
 
 const failpoint = requiredEnvironment("ITERM_TEST_FAILPOINT");
-if (failpoint !== "after-placement-claim" && failpoint !== "after-execution-start-forward") {
+if (
+  failpoint !== "after-placement-claim" &&
+  failpoint !== "after-execution-start-forward" &&
+  failpoint !== "after-session-create-forward"
+) {
   throw new Error(`Unsupported Router failpoint: ${failpoint}`);
 }
 
@@ -16,6 +20,13 @@ const router = await startRuntimeRouter({
       ? {
           afterForward: ({ operation }: { readonly operation: string }) => {
             if (operation === "execution.start") crash();
+          },
+        }
+      : {}),
+    ...(failpoint === "after-session-create-forward"
+      ? {
+          afterForward: ({ operation }: { readonly operation: string }) => {
+            if (operation === "session.create") crash();
           },
         }
       : {}),
