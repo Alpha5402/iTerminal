@@ -7,6 +7,7 @@ const worker = await startExecutionWorker({
   databaseUrl: requiredEnvironment("ITERM_DATABASE_URL"),
   rabbitMqUrl: rabbitMqEndpoints(),
   runtimeSocketPath: requiredEnvironment("ITERM_RUNTIME_SOCKET"),
+  runtimeRoutingMode: runtimeRoutingMode(),
   ...(process.env.ITERM_CONSUMER_ID === undefined
     ? {}
     : { consumerId: process.env.ITERM_CONSUMER_ID }),
@@ -114,6 +115,12 @@ function rabbitMqEndpoints(): readonly string[] {
     throw new Error("ITERM_RABBITMQ_URLS must be a comma-separated list of non-empty URLs");
   }
   return endpoints;
+}
+
+function runtimeRoutingMode(): "owner" | "router" {
+  const configured = process.env.ITERM_RUNTIME_ROUTING_MODE ?? "owner";
+  if (configured === "owner" || configured === "router") return configured;
+  throw new Error("ITERM_RUNTIME_ROUTING_MODE must be 'owner' or 'router'");
 }
 
 function reportRabbitMqState(state: RabbitMqConnectionState): void {

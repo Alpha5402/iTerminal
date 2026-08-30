@@ -7,6 +7,7 @@ import { OutboxRelay } from "@iterminal/messaging";
 import { PostgresMessagingRepository } from "@iterminal/persistence-postgres";
 import { RabbitMqPublisher, runtimeQueueTopology } from "@iterminal/queue-rabbitmq";
 import { startRuntimeDaemon, type RuntimeDaemonHandle } from "@iterminal/runtime-daemon";
+import { startRuntimeRouter, type RuntimeRouterHandle } from "@iterminal/runtime-router";
 import { UnixRuntimeClient } from "@iterminal/runtime-rpc";
 import amqp from "amqplib";
 import { Pool } from "pg";
@@ -26,6 +27,7 @@ describeDispatch("M8.2 owner-local Execution dispatch", () => {
   const daemons: RuntimeDaemonHandle[] = [];
   const workers: ExecutionWorkerHandle[] = [];
   const publishers: RabbitMqPublisher[] = [];
+  const routers: RuntimeRouterHandle[] = [];
   const children: ChildProcessWithoutNullStreams[] = [];
   const fixtures: string[] = [];
   const queuePrefixes: string[] = [];
@@ -44,6 +46,7 @@ describeDispatch("M8.2 owner-local Execution dispatch", () => {
 
   afterEach(async () => {
     for (const worker of workers.splice(0)) await worker.close().catch(() => undefined);
+    for (const router of routers.splice(0)) await router.close().catch(() => undefined);
     for (const daemon of daemons.splice(0)) await daemon.close().catch(() => undefined);
     for (const publisher of publishers.splice(0)) await publisher.close().catch(() => undefined);
     for (const child of children.splice(0)) {
@@ -181,6 +184,77 @@ describeDispatch("M8.2 owner-local Execution dispatch", () => {
     },
     30_000,
   );
+
+  it("dispatches two owners through one explicit router-mode Worker", async () => {
+    const fixture = await createFixture("router");
+    const queuePrefix = createQueuePrefix("router");
+    const leftWorkspace = join(fixture.root, "left-workspace");
+    const rightWorkspace = join(fixture.root, "right-workspace");
+    await Promise.all([
+      mkdir(leftWorkspace, { recursive: true }),
+      mkdir(rightWorkspace, { recursive: true }),
+    ]);
+    await createDaemon(join(fixture.root, "left.sock"), "owner-m9-router-worker-a");
+    await createDaemon(join(fixture.root, "right.sock"), "owner-m9-router-worker-b");
+    const router = await startRuntimeRouter({
+      databaseUrl: databaseUrl ?? "",
+      socketPath: join(fixture.root, "router.sock"),
+    });
+    routers.push(router);
+    const consumerId = "worker-m9-central-router";
+    const worker = await startExecutionWorker({
+      consumerId,
+      databaseUrl: databaseUrl ?? "",
+      queuePrefix,
+      rabbitMqUrl: rabbitMqUrl ?? "",
+      runtimeRoutingMode: "router",
+      runtimeSocketPath: router.socketPath,
+    });
+    await worker.waitUntilConnected();
+    workers.push(worker);
+    const publisher = await createPublisher(queuePrefix);
+    const client = new UnixRuntimeClient(router.socketPath);
+    const left = await client.createSession({ shell: "zsh", workspaceRoot: leftWorkspace });
+    const right = await client.createSession({ shell: "zsh", workspaceRoot: rightWorkspace });
+    expect([left.ownerId, right.ownerId]).toEqual([
+      "owner-m9-router-worker-a",
+      "owner-m9-router-worker-b",
+    ]);
+
+    const leftResult = join(fixture.root, "router-left.txt");
+    const rightResult = join(fixture.root, "router-right.txt");
+    const leftExecution = await client.startExecute({
+      actor: testActor,
+      command: `printf left >> ${shellQuote(leftResult)}`,
+      idempotencyKey: "router-worker-left",
+      sessionGeneration: left.generation,
+      sessionId: left.id,
+    });
+    const rightExecution = await client.startExecute({
+      actor: testActor,
+      command: `printf right >> ${shellQuote(rightResult)}`,
+      idempotencyKey: "router-worker-right",
+      sessionGeneration: right.generation,
+      sessionId: right.id,
+    });
+    expect(await executionStatus(leftExecution.execution.id)).toBe("DISPATCHING");
+    expect(await executionStatus(rightExecution.execution.id)).toBe("DISPATCHING");
+    const relay = new OutboxRelay("publisher-m9-router-worker", messaging, publisher, {
+      batchSize: 2,
+    });
+    expect(await relay.publishBatch()).toEqual({ claimed: 2, failed: 0, published: 2 });
+    expect((await client.waitExecution(leftExecution.execution.id)).status).toBe("COMPLETED");
+    expect((await client.waitExecution(rightExecution.execution.id)).status).toBe("COMPLETED");
+    expect(await readFile(leftResult, "utf8")).toBe("left");
+    expect(await readFile(rightResult, "utf8")).toBe("right");
+    const inbox = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM consumer_inbox WHERE consumer_id = $1 AND status = 'COMPLETED'",
+      [consumerId],
+    );
+    expect(inbox.rows[0]?.count).toBe("2");
+    await client.closeSession(left.id, left.generation);
+    await client.closeSession(right.id, right.generation);
+  }, 30_000);
 
   async function createFixture(suffix: string): Promise<Fixture> {
     let root = await mkdtemp(join("/private/tmp", `itm8-${suffix.slice(0, 8)}-`));

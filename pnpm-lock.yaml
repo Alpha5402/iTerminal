@@ -160,6 +160,9 @@ importers:
       '@iterminal/runtime-daemon':
         specifier: workspace:*
         version: link:../runtime-daemon
+      '@iterminal/runtime-router':
+        specifier: workspace:*
+        version: link:../runtime-router
       amqplib:
         specifier: 2.0.1
         version: 2.0.1
@@ -182,12 +185,24 @@ importers:
         specifier: 4.5.4
         version: 4.5.4
     devDependencies:
+      '@iterminal/persistence-postgres':
+        specifier: workspace:*
+        version: link:../../packages/persistence-postgres
       '@iterminal/runtime-daemon':
         specifier: workspace:*
         version: link:../runtime-daemon
+      '@iterminal/runtime-router':
+        specifier: workspace:*
+        version: link:../runtime-router
       '@modelcontextprotocol/client':
         specifier: 2.0.0
         version: 2.0.0
+      '@types/pg':
+        specifier: ^8.15.5
+        version: 8.23.1
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
 
   apps/outbox-relay:
     dependencies:
@@ -237,6 +252,31 @@ importers:
       amqplib:
         specifier: 2.0.1
         version: 2.0.1
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
+
+  apps/runtime-router:
+    dependencies:
+      '@iterminal/application':
+        specifier: workspace:*
+        version: link:../../packages/application
+      '@iterminal/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
+      '@iterminal/persistence-postgres':
+        specifier: workspace:*
+        version: link:../../packages/persistence-postgres
+      '@iterminal/runtime-rpc':
+        specifier: workspace:*
+        version: link:../../packages/runtime-rpc
+    devDependencies:
+      '@iterminal/runtime-daemon':
+        specifier: workspace:*
+        version: link:../runtime-daemon
+      '@types/pg':
+        specifier: ^8.15.5
+        version: 8.23.1
       pg:
         specifier: ^8.16.3
         version: 8.23.0

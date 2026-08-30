@@ -179,8 +179,7 @@ export interface RuntimeOwnerIdentity {
   readonly ownerId: string;
 }
 
-export interface RuntimeOwnerRecord extends RuntimeOwnerIdentity {
-  readonly activeSessionCount: number;
+export interface RuntimeOwnerRoute extends RuntimeOwnerIdentity {
   readonly endpoint: string;
   readonly heartbeatAt: string;
   readonly leaseExpiresAt: string;
@@ -188,6 +187,15 @@ export interface RuntimeOwnerRecord extends RuntimeOwnerIdentity {
   readonly status: RuntimeOwnerStatus;
   readonly stoppedAt?: string;
   readonly version: number;
+}
+
+export interface RuntimeOwnerRecord extends RuntimeOwnerRoute {
+  readonly activeSessionCount: number;
+}
+
+export interface RuntimeRouteResolution {
+  readonly liveOwner?: RuntimeOwnerRoute;
+  readonly ownerId: string;
 }
 
 export interface RuntimeOwnerRegistry {
@@ -207,7 +215,10 @@ export interface RuntimeOwnerRegistry {
   ): Promise<RuntimeOwnerRecord>;
   stopOwner(identity: RuntimeOwnerIdentity): Promise<RuntimeOwnerRecord>;
   listAssignableOwners(): Promise<readonly RuntimeOwnerRecord[]>;
+  listSessionOwnerRoutes(): Promise<readonly RuntimeRouteResolution[]>;
   resolveLiveOwner(ownerId: string): Promise<RuntimeOwnerRecord | undefined>;
+  resolveSessionRoute(sessionId: string): Promise<RuntimeRouteResolution | undefined>;
+  resolveExecutionRoute(executionId: string): Promise<RuntimeRouteResolution | undefined>;
 }
 
 export interface RuntimeDurability {

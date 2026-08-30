@@ -2,7 +2,9 @@ import type {
   RuntimeOwnerIdentity,
   RuntimeOwnerRecord,
   RuntimeOwnerRegistry,
+  RuntimeOwnerRoute,
   RuntimeOwnerStatus,
+  RuntimeRouteResolution,
 } from "@iterminal/application";
 import { RuntimeError } from "@iterminal/domain";
 import { Pool } from "pg";
@@ -24,11 +26,24 @@ interface OwnerRow {
   readonly version: string;
 }
 
-const OWNER_RETURNING = `owner_id, instance_id, registry_epoch::text, endpoint, status,
-  heartbeat_at, lease_expires_at, started_at, stopped_at, version::text,
-  (SELECT count(*)::text FROM sessions s
-    WHERE s.owner_id = runtime_workers.owner_id
-      AND s.status IN ('STARTING', 'READY', 'RESERVED', 'RUNNING')) AS active_session_count`;
+type RouteRow = Readonly<{ target_owner_id: string }> & {
+  readonly [Key in keyof OwnerRow]: OwnerRow[Key] | null;
+};
+
+function ownerColumns(alias: string, includeActiveSessionCount = true): string {
+  return `${alias}.owner_id, ${alias}.instance_id, ${alias}.registry_epoch::text,
+  ${alias}.endpoint, ${alias}.status, ${alias}.heartbeat_at, ${alias}.lease_expires_at,
+  ${alias}.started_at, ${alias}.stopped_at, ${alias}.version::text,
+  ${
+    includeActiveSessionCount
+      ? `(SELECT count(*)::text FROM sessions s
+    WHERE s.owner_id = ${alias}.owner_id
+      AND s.status IN ('STARTING', 'READY', 'RESERVED', 'RUNNING'))`
+      : "0::text"
+  } AS active_session_count`;
+}
+
+const OWNER_RETURNING = ownerColumns("runtime_workers");
 
 export interface PostgresRuntimeOwnerRegistryOptions {
   readonly statementTimeoutMilliseconds?: number;
@@ -171,6 +186,23 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
     return owners.rows.map(ownerRecord);
   }
 
+  public async listSessionOwnerRoutes(): Promise<readonly RuntimeRouteResolution[]> {
+    const routes = await this.#pool.query<RouteRow>(
+      `SELECT target.owner_id AS target_owner_id, ${ownerColumns("worker", false)}
+         FROM (
+           SELECT DISTINCT owner_id
+             FROM sessions
+            WHERE status IN ('STARTING', 'READY', 'RESERVED', 'RUNNING', 'BROKEN')
+         ) target
+         LEFT JOIN runtime_workers worker
+           ON worker.owner_id = target.owner_id
+          AND worker.status IN ('ACTIVE', 'DRAINING')
+          AND worker.lease_expires_at > now()
+        ORDER BY target.owner_id`,
+    );
+    return routes.rows.map(routeResolution);
+  }
+
   public async resolveLiveOwner(ownerId: string): Promise<RuntimeOwnerRecord | undefined> {
     validateIdentifier(ownerId, "ownerId");
     const owner = await this.#pool.query<OwnerRow>(
@@ -182,6 +214,16 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
     );
     const row = owner.rows[0];
     return row === undefined ? undefined : ownerRecord(row);
+  }
+
+  public resolveSessionRoute(sessionId: string): Promise<RuntimeRouteResolution | undefined> {
+    validateIdentifier(sessionId, "sessionId");
+    return this.#resolveTargetRoute("sessions", sessionId);
+  }
+
+  public resolveExecutionRoute(executionId: string): Promise<RuntimeRouteResolution | undefined> {
+    validateIdentifier(executionId, "executionId");
+    return this.#resolveTargetRoute("executions", executionId);
   }
 
   async #updateLease(
@@ -232,6 +274,24 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
     const row = owner.rows[0];
     return row === undefined ? undefined : ownerRecord(row);
   }
+
+  async #resolveTargetRoute(
+    target: "executions" | "sessions",
+    targetId: string,
+  ): Promise<RuntimeRouteResolution | undefined> {
+    const route = await this.#pool.query<RouteRow>(
+      `SELECT target.owner_id AS target_owner_id, ${ownerColumns("worker", false)}
+         FROM ${target} target
+         LEFT JOIN runtime_workers worker
+           ON worker.owner_id = target.owner_id
+          AND worker.status IN ('ACTIVE', 'DRAINING')
+          AND worker.lease_expires_at > now()
+        WHERE target.id = $1`,
+      [targetId],
+    );
+    const row = route.rows[0];
+    return row === undefined ? undefined : routeResolution(row);
+  }
 }
 
 function ownerRecord(row: OwnerRow): RuntimeOwnerRecord {
@@ -281,5 +341,61 @@ function positiveInteger(value: number, name: string): number {
 
 function unreachableOwnerRow(): never {
   throw new Error("Runtime owner update returned no row after lease validation");
+}
+
+function requiredOwnerRow(row: RouteRow): OwnerRow {
+  if (
+    row.active_session_count === null ||
+    row.endpoint === null ||
+    row.heartbeat_at === null ||
+    row.instance_id === null ||
+    row.lease_expires_at === null ||
+    row.owner_id === null ||
+    row.registry_epoch === null ||
+    row.started_at === null ||
+    row.status === null ||
+    row.version === null
+  ) {
+    throw new RuntimeError(
+      "RUNTIME_UNAVAILABLE",
+      "Runtime owner route returned incomplete registry data",
+    );
+  }
+  return {
+    active_session_count: row.active_session_count,
+    endpoint: row.endpoint,
+    heartbeat_at: row.heartbeat_at,
+    instance_id: row.instance_id,
+    lease_expires_at: row.lease_expires_at,
+    owner_id: row.owner_id,
+    registry_epoch: row.registry_epoch,
+    started_at: row.started_at,
+    status: row.status,
+    stopped_at: row.stopped_at,
+    version: row.version,
+  };
+}
+
+function routeResolution(row: RouteRow): RuntimeRouteResolution {
+  if (row.owner_id === null) return { ownerId: row.target_owner_id };
+  return {
+    liveOwner: ownerRoute(requiredOwnerRow(row)),
+    ownerId: row.target_owner_id,
+  };
+}
+
+function ownerRoute(row: OwnerRow): RuntimeOwnerRoute {
+  return {
+    endpoint: row.endpoint,
+    epoch: Number.parseInt(row.registry_epoch, 10),
+    heartbeatAt: row.heartbeat_at.toISOString(),
+    instanceId: row.instance_id,
+    leaseExpiresAt: row.lease_expires_at.toISOString(),
+    ownerId: row.owner_id,
+    startedAt: row.started_at.toISOString(),
+    status: row.status,
+    version: Number.parseInt(row.version, 10),
+    ...(row.stopped_at === null ? {} : { stoppedAt: row.stopped_at.toISOString() }),
+  };
 }
 import { isAbsolute } from "node:path";

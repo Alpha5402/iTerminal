@@ -67,6 +67,9 @@ const runtimeErrorCodes = new Set<RuntimeError["code"]>([
   "IDEMPOTENCY_KEY_REUSED",
   "DELIVERY_UNKNOWN",
   "BACKPRESSURE",
+  "OWNER_CONFLICT",
+  "OWNER_LEASE_LOST",
+  "OWNER_ROUTE_UNAVAILABLE",
   "RUNTIME_UNAVAILABLE",
   "RESYNC_REQUIRED",
   "INVALID_REQUEST",
@@ -424,11 +427,12 @@ export async function startRuntimeRpcServer(options: {
 }): Promise<RuntimeRpcServerHandle> {
   await prepareSocketPath(options.socketPath);
   const activeSockets = new Set<Socket>();
+  const activeResponses = new Set<Promise<void>>();
   const server = createServer((socket) => {
     activeSockets.add(socket);
     socket.once("close", () => activeSockets.delete(socket));
     socket.on("error", () => socket.destroy());
-    handleSocket(socket, options.gateway, options.isReady);
+    handleSocket(socket, options.gateway, options.isReady, activeResponses);
   });
   const previousUmask = process.umask(0o177);
   try {
@@ -439,7 +443,7 @@ export async function startRuntimeRpcServer(options: {
   try {
     await chmod(options.socketPath, 0o600);
   } catch (error) {
-    await closeServer(server, activeSockets).catch(() => undefined);
+    await closeServer(server, activeSockets, activeResponses).catch(() => undefined);
     await unlink(options.socketPath).catch(() => undefined);
     throw error;
   }
@@ -451,7 +455,7 @@ export async function startRuntimeRpcServer(options: {
         return;
       }
       closed = true;
-      await closeServer(server, activeSockets);
+      await closeServer(server, activeSockets, activeResponses);
       await unlink(options.socketPath).catch((error: unknown) => {
         if (!isNodeError(error, "ENOENT")) {
           throw error;
@@ -737,6 +741,7 @@ function handleSocket(
   socket: Socket,
   gateway: RuntimeGateway,
   isReady: (() => boolean) | undefined,
+  activeResponses: Set<Promise<void>>,
 ): void {
   socket.setEncoding("utf8");
   let buffer = "";
@@ -751,7 +756,12 @@ function handleSocket(
     const line = buffer.slice(0, newline);
     buffer = "";
     socket.pause();
-    void respond(socket, line, gateway, isReady);
+    const response = respond(socket, line, gateway, isReady);
+    activeResponses.add(response);
+    void response.then(
+      () => activeResponses.delete(response),
+      () => activeResponses.delete(response),
+    );
   });
 }
 
@@ -1059,11 +1069,16 @@ function listen(server: Server, socketPath: string): Promise<void> {
   });
 }
 
-function closeServer(server: Server, activeSockets: ReadonlySet<Socket>): Promise<void> {
-  return new Promise((resolve, reject) => {
+async function closeServer(
+  server: Server,
+  activeSockets: ReadonlySet<Socket>,
+  activeResponses: ReadonlySet<Promise<void>>,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
     server.close((error) => (error === undefined ? resolve() : reject(error)));
     for (const socket of activeSockets) socket.destroy();
   });
+  await Promise.allSettled([...activeResponses]);
 }
 
 function normalizeError(error: unknown): RuntimeError {

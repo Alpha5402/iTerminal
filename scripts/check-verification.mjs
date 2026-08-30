@@ -29,6 +29,7 @@ const requiredReports = [
   { level: "L2", path: "docs/verification/M8/2026-08-30-network-blackhole-recovery.md" },
   { level: "L2", path: "docs/verification/M8/2026-08-30-rabbitmq-quorum-failover.md" },
   { level: "L2", path: "docs/verification/M9/2026-08-30-runtime-owner-registry.md" },
+  { level: "L2", path: "docs/verification/M9/2026-08-30-central-runtime-router.md" },
 ];
 
 for (const report of requiredReports) {

@@ -2,7 +2,7 @@
 
 M6.1–M7.2 extend this protocol with bounded screen observation, synchronization, stable styled-cell metadata, generation-scoped interaction policy, controlled terminal geometry, advisory terminal-state evidence, versioned checkpoint fork, and same-owner durable rebuild while preserving the M4 Action and Event contracts.
 
-iTerminal uses the official Model Context Protocol TypeScript SDK v2 and `serveStdio`. The bridge logs only to stderr because stdout is the MCP framing channel. A separate Runtime daemon owns all live state; set `ITERM_RUNTIME_SOCKET` to its absolute Unix socket path before starting the bridge.
+iTerminal uses the official Model Context Protocol TypeScript SDK v2 and `serveStdio`. The bridge logs only to stderr because stdout is the MCP framing channel. Separate Runtime daemons own all live state; set `ITERM_RUNTIME_SOCKET` to one daemon's absolute Unix socket or, for M9 multi-owner routing, the stable Router socket before starting the bridge.
 
 The daemon has two explicit storage modes:
 
@@ -15,7 +15,9 @@ In both modes the PTY remains process-local live truth. Restart recovery marks t
 
 A PostgreSQL-backed daemon registers its stable logical `ownerId`, boot-unique `instanceId`, monotonic registry epoch, and absolute Unix socket before durable owner recovery. It then heartbeats with PostgreSQL time. A second live incarnation of the same logical owner remains unavailable and cannot reconcile or break the first daemon's Sessions. Graceful shutdown moves the row through `DRAINING` to `STOPPED`; losing the exact registry identity is an owner-wide durability failure that closes local PTYs and rejects RPC admission.
 
-The registry is M9.1 discovery and lifecycle state, not a Session lease. Registry epoch protects only registry-row updates. The central Router, cross-owner forwarding, generation-scoped Session fencing, and stale durable-write rejection remain later M9 work. Clients still connect directly to one configured Runtime socket in this slice.
+The registry is discovery and lifecycle state, not a Session lease. Registry epoch protects only registry-row updates. M9.2's stateless Router uses PostgreSQL to select an ACTIVE owner for `session.create`, route exact Session/Execution operations to an ACTIVE or DRAINING owner, and fail closed when a route is missing, stopped, expired, or unreachable. It reuses the Runtime RPC protocol and never owns a PTY.
+
+`OWNER_ROUTE_UNAVAILABLE` means routing failed before a usable owner result was obtained. An exact target that exists without a live route is not recreated. If a mutating forward may have reached the registered endpoint, the result remains `DELIVERY_UNKNOWN`; the Router does not retry it. Registry routing still is not generation-scoped Session fencing, so stale durable-write rejection remains M9.3 work.
 
 | Environment variable              | Default                         |
 | --------------------------------- | ------------------------------- |
@@ -104,12 +106,26 @@ Guard expiry is bounded and versioned, not ownership: default TTL is 500 ms, acc
 
 ## Run locally
 
-Use two terminals:
+Direct single-owner development uses two terminals:
 
 ```bash
 ITERM_DATABASE_URL=postgresql://iterminal@127.0.0.1:5432/iterminal \
   ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm daemon
 ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm mcp
 ```
+
+The multi-owner path adds the Router and points adapters at its stable socket:
+
+```bash
+ITERM_DATABASE_URL=postgresql://iterminal@127.0.0.1:5432/iterminal \
+  ITERM_RUNTIME_OWNER_ID=owner-a ITERM_RUNTIME_SOCKET=/tmp/iterminal-a.sock pnpm daemon
+ITERM_DATABASE_URL=postgresql://iterminal@127.0.0.1:5432/iterminal \
+  ITERM_RUNTIME_OWNER_ID=owner-b ITERM_RUNTIME_SOCKET=/tmp/iterminal-b.sock pnpm daemon
+ITERM_DATABASE_URL=postgresql://iterminal@127.0.0.1:5432/iterminal \
+  ITERM_ROUTER_SOCKET=/tmp/iterminal-router.sock pnpm router
+ITERM_RUNTIME_SOCKET=/tmp/iterminal-router.sock pnpm mcp
+```
+
+An Execution Worker that uses this socket must also set `ITERM_RUNTIME_ROUTING_MODE=router`. Owner mode remains the default and retains its exact owner-ID check.
 
 The second command is normally launched by an MCP Client, not by a Human directly. The official SDK v2 serving guide documents `serveStdio` and the requirement that logs stay off stdout: <https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/serving/stdio.md>.

@@ -40,6 +40,7 @@ export interface ExecutionWorkerOptions {
   readonly rabbitMqReconnectInitialMilliseconds?: number;
   readonly rabbitMqReconnectJitterRatio?: number;
   readonly rabbitMqReconnectMaxMilliseconds?: number;
+  readonly runtimeRoutingMode?: "owner" | "router";
   readonly onPostgresConnectionState?: (state: PostgresConnectionState) => void;
   readonly onRabbitMqConnectionState?: (state: RabbitMqConnectionState) => void;
   readonly runtimeSocketPath: string;
@@ -48,8 +49,15 @@ export interface ExecutionWorkerOptions {
 export async function startExecutionWorker(
   options: ExecutionWorkerOptions,
 ): Promise<ExecutionWorkerHandle> {
-  const ownerId = options.ownerId ?? runtimeOwnerIdForSocket(options.runtimeSocketPath);
-  const consumerId = options.consumerId ?? `execution-worker:${ownerId}`;
+  const runtimeRoutingMode = options.runtimeRoutingMode ?? "owner";
+  if (runtimeRoutingMode === "router" && options.ownerId !== undefined) {
+    throw new Error("Router-mode Execution Worker cannot be bound to one Runtime owner ID");
+  }
+  const ownerId =
+    runtimeRoutingMode === "owner"
+      ? (options.ownerId ?? runtimeOwnerIdForSocket(options.runtimeSocketPath))
+      : undefined;
+  const consumerId = options.consumerId ?? `execution-worker:${ownerId ?? "router"}`;
   let databaseState: PostgresConnectionState = { attempt: 0, state: "CONNECTING" };
   const repository = await SupervisedPostgresMessagingRepository.start(options.databaseUrl, {
     ...(options.databaseConnectionTimeoutMilliseconds === undefined
@@ -81,7 +89,7 @@ export async function startExecutionWorker(
     repository,
     repository,
     async (message, inspection) => {
-      if (inspection.ownerId !== ownerId) {
+      if (runtimeRoutingMode === "owner" && inspection.ownerId !== ownerId) {
         throw new Error(
           `Execution belongs to ${inspection.ownerId}, but this Worker serves ${ownerId}`,
         );

@@ -33,6 +33,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0027](./0027-versioned-shell-checkpoint-fork.md)           | Rebuild a child from a versioned filtered checkpoint     | Accepted for M7.1        |
 | [0028](./0028-durable-broken-session-rebuild-projection.md) | Hydrate bounded BROKEN evidence for explicit rebuild     | Accepted for M7.2        |
 | [0029](./0029-runtime-owner-registry-and-central-router.md) | Register Runtime instances and route centrally by owner  | Accepted for M9.1        |
+| [0030](./0030-central-runtime-router-forwarding.md)         | Forward exact Session and Execution calls through Router | Accepted for M9.2        |
 
 Statuses:
 

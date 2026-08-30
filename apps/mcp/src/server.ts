@@ -49,6 +49,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
         "execute starts one top-level Shell command and returns immediately; use execution_wait or events_query to observe it. " +
         "PTY_BUSY means another Execute is active: wait for it, send targeted input/control if appropriate, or use another Session. " +
         "BACKPRESSURE means no Action was admitted; wait for durable delivery capacity and retry the identical idempotency key. " +
+        "OWNER_ROUTE_UNAVAILABLE means the durable target has no usable owner route or a read could not reach its registered endpoint; never infer that the Session itself is missing. " +
         "Before interactive input, inspect interaction_get; INPUT_GUARDED is retryable only after the Guard expires or changes, while POLICY_DENIED requires a Human policy decision. " +
         "Resize is an explicit shared Action: read geometryVersion from screen_get and handle GEOMETRY_CHANGED by re-observing instead of overwriting another Actor's decision. " +
         "terminal_state is bounded advisory evidence only; never use its heuristic label as readiness, completion, authorization, approval, or permission to send input. " +
@@ -129,7 +130,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
     "session_list",
     {
       annotations: { readOnlyHint: true, openWorldHint: false },
-      description: "List live Sessions known to the local Runtime daemon.",
+      description: "List live Sessions known through the configured Runtime daemon or Router.",
       inputSchema: z.strictObject({}),
       title: "List terminal Sessions",
     },

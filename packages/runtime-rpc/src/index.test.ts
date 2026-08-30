@@ -164,6 +164,50 @@ describe("UnixRuntimeClient delivery classification", () => {
       await rm(fixture, { force: true, recursive: true });
     }
   });
+
+  it("aborts and awaits active requests before server close resolves", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-close-active-"));
+    let announceStarted!: () => void;
+    let aborted = false;
+    const started = new Promise<void>((resolve) => {
+      announceStarted = resolve;
+    });
+    const server = await startRuntimeRpcServer({
+      gateway: {
+        ...stubGateway(),
+        waitForScreen: (_request, signal) =>
+          new Promise((_resolve, reject) => {
+            announceStarted();
+            signal?.addEventListener(
+              "abort",
+              () => {
+                aborted = true;
+                reject(new Error("server closing"));
+              },
+              { once: true },
+            );
+          }),
+      },
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    const client = new UnixRuntimeClient(server.socketPath);
+    const waiting = client.waitForScreen({
+      condition: { afterVersion: 0, type: "version" },
+      generation: 1,
+      sessionId: "session-test",
+      timeoutMilliseconds: 5_000,
+    });
+    try {
+      await started;
+      const rejected = expect(waiting).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+      await server.close();
+      expect(aborted).toBe(true);
+      await rejected;
+    } finally {
+      await server.close().catch(() => undefined);
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
 });
 
 function missingSocket(suffix: string): string {
