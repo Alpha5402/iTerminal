@@ -1056,6 +1056,166 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
     ).toMatchObject({ rowCount: 0 });
   }, 120_000);
 
+  it("keeps root creation progressing across repeated rolling owner drains", async () => {
+    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m913-rolling-")));
+    fixtures.push(root);
+    const workspace = join(root, "workspace");
+    await mkdir(workspace, { recursive: true });
+    const ownerIds = ["owner-rolling-a", "owner-rolling-b", "owner-rolling-c"] as const;
+    const ownerSockets = new Map(
+      ownerIds.map((ownerId, index) => [ownerId, join(root, `owner-${index.toString()}.sock`)]),
+    );
+    const incarnations = new Map(ownerIds.map((ownerId) => [ownerId, 1]));
+    const activeOwners = new Map<string, ManagedChild>();
+    const initialOwners = await Promise.all(
+      ownerIds.map(async (ownerId) => {
+        const socketPath = ownerSockets.get(ownerId);
+        if (socketPath === undefined) throw new Error(`Socket is missing for ${ownerId}`);
+        return startRuntimeChild(root, ownerId, `instance-${ownerId}-1`, socketPath);
+      }),
+    );
+    for (const [index, owner] of initialOwners.entries()) {
+      const ownerId = ownerIds[index];
+      if (ownerId === undefined)
+        throw new Error(`Owner ID is missing at index ${index.toString()}`);
+      activeOwners.set(ownerId, owner);
+    }
+    children.push(...initialOwners);
+    const routerSocket = join(root, "router.sock");
+    const router = await startRouterChild(routerSocket);
+    children.push(router);
+    const client = new UnixRuntimeClient(routerSocket);
+    const submittedKeys: string[] = [];
+    const settledSessionIds = new Set<string>();
+    const drainOrder = [...ownerIds, ...ownerIds];
+
+    for (const [round, targetOwnerId] of drainOrder.entries()) {
+      const keys = Array.from(
+        { length: 8 },
+        (_, index) => `m913-round-${round.toString()}-create-${index.toString()}`,
+      );
+      submittedKeys.push(...keys);
+      const creating = Promise.all(
+        keys.map((idempotencyKey) =>
+          client.createSession({ idempotencyKey, shell: "zsh", workspaceRoot: workspace }),
+        ),
+      );
+      await delay(5);
+      const drainingOwner = activeOwners.get(targetOwnerId);
+      if (drainingOwner === undefined) throw new Error(`Active owner is missing: ${targetOwnerId}`);
+      drainingOwner.process.kill("SIGTERM");
+
+      const sessions = await creating;
+      for (const session of sessions) {
+        expect(settledSessionIds.has(session.id)).toBe(false);
+        settledSessionIds.add(session.id);
+      }
+      await waitForText(drainingOwner, "Runtime drain settled pending_session_creations=0", 10_000);
+      await waitForExit(drainingOwner, 15_000);
+      expect(drainingOwner.process.exitCode).toBe(0);
+      await waitForOwnerStatus(targetOwnerId, "STOPPED");
+      expect(
+        await pool.query(
+          `SELECT 1 FROM session_creation_requests
+            WHERE owner_id = $1 AND session_id IS NULL`,
+          [targetOwnerId],
+        ),
+      ).toMatchObject({ rowCount: 0 });
+
+      const healthy = sessions.find((session) => session.ownerId !== targetOwnerId);
+      if (healthy === undefined)
+        throw new Error(`Round ${round.toString()} has no healthy Session`);
+      const marker = `m913-round-${round.toString()}-healthy`;
+      const execution = await client.startExecute({
+        actor: actor(`rolling-${round.toString()}`),
+        command: `printf ${marker}`,
+        idempotencyKey: `${marker}-execute`,
+        sessionGeneration: healthy.generation,
+        sessionId: healthy.id,
+      });
+      expect((await client.waitExecution(execution.execution.id)).output).toContain(marker);
+      await Promise.all(
+        sessions
+          .filter((session) => session.ownerId !== targetOwnerId)
+          .map((session) => client.closeSession(session.id, session.generation)),
+      );
+
+      const previousIncarnation = incarnations.get(targetOwnerId);
+      const socketPath = ownerSockets.get(targetOwnerId);
+      if (previousIncarnation === undefined || socketPath === undefined) {
+        throw new Error(`Replacement metadata is missing: ${targetOwnerId}`);
+      }
+      const nextIncarnation = previousIncarnation + 1;
+      const replacement = await startRuntimeChild(
+        root,
+        targetOwnerId,
+        `instance-${targetOwnerId}-${nextIncarnation.toString()}`,
+        socketPath,
+      );
+      children.push(replacement);
+      activeOwners.set(targetOwnerId, replacement);
+      incarnations.set(targetOwnerId, nextIncarnation);
+      const registered = await pool.query<{
+        instance_id: string;
+        registry_epoch: string;
+        status: string;
+      }>(
+        `SELECT instance_id, registry_epoch::text, status
+           FROM runtime_workers
+          WHERE owner_id = $1`,
+        [targetOwnerId],
+      );
+      expect(registered.rows).toEqual([
+        {
+          instance_id: `instance-${targetOwnerId}-${nextIncarnation.toString()}`,
+          registry_epoch: nextIncarnation.toString(),
+          status: "ACTIVE",
+        },
+      ]);
+    }
+
+    expect(settledSessionIds.size).toBe(submittedKeys.length);
+    const durable = await pool.query<{
+      bound_session_count: string;
+      live_session_count: string;
+      request_count: string;
+      unfinished_count: string;
+    }>(
+      `SELECT
+         count(*)::text AS request_count,
+         count(DISTINCT request.session_id)::text AS bound_session_count,
+         count(*) FILTER (WHERE request.session_id IS NULL)::text AS unfinished_count,
+         (SELECT count(*)::text FROM sessions WHERE status <> 'CLOSED') AS live_session_count
+       FROM session_creation_requests AS request`,
+    );
+    expect(durable.rows).toEqual([
+      {
+        bound_session_count: submittedKeys.length.toString(),
+        live_session_count: "0",
+        request_count: submittedKeys.length.toString(),
+        unfinished_count: "0",
+      },
+    ]);
+    const finalOwners = await pool.query<{
+      instance_id: string;
+      owner_id: string;
+      registry_epoch: string;
+      status: string;
+    }>(
+      `SELECT owner_id, instance_id, registry_epoch::text, status
+         FROM runtime_workers
+        ORDER BY owner_id`,
+    );
+    expect(finalOwners.rows).toEqual(
+      ownerIds.map((ownerId) => ({
+        instance_id: `instance-${ownerId}-3`,
+        owner_id: ownerId,
+        registry_epoch: "3",
+        status: "ACTIVE",
+      })),
+    );
+  }, 180_000);
+
   async function startRuntimeChild(
     root: string,
     ownerId: string,

@@ -40,6 +40,7 @@ const requiredReports = [
   { level: "L2", path: "docs/verification/M9/2026-08-30-router-cold-start-recovery.md" },
   { level: "L2", path: "docs/verification/M9/2026-08-30-session-creation-retention.md" },
   { level: "L2", path: "docs/verification/M9/2026-08-30-runtime-drain-settlement.md" },
+  { level: "L2", path: "docs/verification/M9/2026-08-30-repeated-rolling-drain.md" },
 ];
 
 for (const report of requiredReports) {
