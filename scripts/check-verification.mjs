@@ -31,6 +31,7 @@ const requiredReports = [
   { level: "L2", path: "docs/verification/M9/2026-08-30-runtime-owner-registry.md" },
   { level: "L2", path: "docs/verification/M9/2026-08-30-central-runtime-router.md" },
   { level: "L2", path: "docs/verification/M9/2026-08-30-session-fencing.md" },
+  { level: "L2", path: "docs/verification/M9/2026-08-30-fair-placement-rate-limits.md" },
 ];
 
 for (const report of requiredReports) {

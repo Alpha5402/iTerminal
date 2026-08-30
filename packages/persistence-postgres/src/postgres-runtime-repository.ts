@@ -8,12 +8,18 @@ import { Pool, type PoolClient } from "pg";
 import { migrateDatabase } from "./migrate.js";
 import { guardPostgresPool } from "./postgres-pool.js";
 import { assertSessionFence, throwSessionLeaseLost } from "./session-fencing.js";
+import {
+  actionRateLimitPolicy,
+  type ActionRateLimitOptions,
+  type ActionRateLimitPolicy,
+  consumeActionRateLimit,
+} from "./action-rate-limit.js";
 
 const DEFAULT_MAX_PENDING_OUTBOX = 10_000;
 const DEFAULT_STATEMENT_TIMEOUT_MS = 30_000;
 const OUTBOX_ADMISSION_LOCK = 1_746_883_921;
 
-export interface PostgresRuntimeRepositoryOptions {
+export interface PostgresRuntimeRepositoryOptions extends ActionRateLimitOptions {
   readonly beforeAcceptExecuteCommit?: () => void;
   readonly maxPendingOutbox?: number;
   readonly statementTimeoutMilliseconds?: number;
@@ -87,11 +93,13 @@ export interface CheckpointUpdate {
 
 export class PostgresRuntimeRepository {
   readonly #pool: Pool;
+  readonly #actionRateLimits: ActionRateLimitPolicy;
   readonly #beforeAcceptExecuteCommit: (() => void) | undefined;
   readonly #maxPendingOutbox: number;
   readonly #requireSessionFence: boolean;
 
   public constructor(connectionString: string, options: PostgresRuntimeRepositoryOptions = {}) {
+    this.#actionRateLimits = actionRateLimitPolicy(options);
     this.#beforeAcceptExecuteCommit = options.beforeAcceptExecuteCommit;
     this.#requireSessionFence = options.requireSessionFence ?? false;
     this.#maxPendingOutbox = positiveInteger(
@@ -211,6 +219,13 @@ export class PostgresRuntimeRepository {
         reserved.rows[0] ??
         (await this.#throwReservationError(client, input.sessionId, input.generation));
 
+      const sequence = Number.parseInt(reservation.next_action_sequence, 10);
+      if (input.expectedActionSequence !== undefined && sequence !== input.expectedActionSequence) {
+        throw new RuntimeError("DELIVERY_UNKNOWN", "Live and durable Action sequence diverged", {
+          durableActionSequence: sequence,
+          liveActionSequence: input.expectedActionSequence,
+        });
+      }
       await client.query(
         `INSERT INTO actors (id, actor_type, principal, client)
          VALUES ($1, $2, $3, $4)
@@ -220,13 +235,7 @@ export class PostgresRuntimeRepository {
                client = EXCLUDED.client`,
         [input.actor.id, input.actor.type, input.actor.principal, input.actor.client],
       );
-      const sequence = Number.parseInt(reservation.next_action_sequence, 10);
-      if (input.expectedActionSequence !== undefined && sequence !== input.expectedActionSequence) {
-        throw new RuntimeError("DELIVERY_UNKNOWN", "Live and durable Action sequence diverged", {
-          durableActionSequence: sequence,
-          liveActionSequence: input.expectedActionSequence,
-        });
-      }
+      await consumeActionRateLimit(client, this.#actionRateLimits, input.actor.id, input.sessionId);
       await client.query(
         `INSERT INTO actions
           (id, session_id, session_generation, actor_id, kind, action_sequence,

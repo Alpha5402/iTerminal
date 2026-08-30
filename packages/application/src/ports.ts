@@ -191,6 +191,7 @@ export interface RuntimeOwnerRoute extends RuntimeOwnerIdentity {
 
 export interface RuntimeOwnerRecord extends RuntimeOwnerRoute {
   readonly activeSessionCount: number;
+  readonly placementCount: number;
 }
 
 export interface SessionFence extends RuntimeOwnerIdentity {
@@ -227,6 +228,7 @@ export interface RuntimeOwnerRegistry {
     leaseMilliseconds: number,
   ): Promise<RuntimeOwnerRecord>;
   stopOwner(identity: RuntimeOwnerIdentity): Promise<RuntimeOwnerRecord>;
+  claimAssignableOwner(): Promise<RuntimeOwnerRecord | undefined>;
   listAssignableOwners(): Promise<readonly RuntimeOwnerRecord[]>;
   listSessionOwnerRoutes(): Promise<readonly RuntimeRouteResolution[]>;
   resolveLiveOwner(ownerId: string): Promise<RuntimeOwnerRecord | undefined>;

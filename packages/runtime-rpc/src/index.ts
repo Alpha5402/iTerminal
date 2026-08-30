@@ -67,6 +67,7 @@ const runtimeErrorCodes = new Set<RuntimeError["code"]>([
   "IDEMPOTENCY_KEY_REUSED",
   "DELIVERY_UNKNOWN",
   "BACKPRESSURE",
+  "RATE_LIMITED",
   "OWNER_CONFLICT",
   "OWNER_LEASE_LOST",
   "OWNER_ROUTE_UNAVAILABLE",

@@ -915,6 +915,7 @@ function runtimeStatus(code: RuntimeError["code"]): number {
     case "INPUT_GUARDED":
       return 423;
     case "BACKPRESSURE":
+    case "RATE_LIMITED":
       return 429;
     case "RUNTIME_UNAVAILABLE":
       return 503;
@@ -949,6 +950,8 @@ function allowedNextActions(code: string): readonly string[] {
       return ["refresh_session", "target_current_execution"];
     case "BACKPRESSURE":
       return ["wait_and_retry_same_idempotency_key"];
+    case "RATE_LIMITED":
+      return ["wait_for_retry_after", "retry_same_idempotency_key"];
     case "DELIVERY_UNKNOWN":
       return ["inspect_events", "reconcile_idempotency_key"];
     case "RUNTIME_UNAVAILABLE":

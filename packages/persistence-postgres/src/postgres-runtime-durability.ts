@@ -34,6 +34,12 @@ import { PostgresObservationRepository } from "./postgres-observation-repository
 import { guardPostgresPool } from "./postgres-pool.js";
 import { PostgresRuntimeRepository } from "./postgres-runtime-repository.js";
 import {
+  actionRateLimitPolicy,
+  type ActionRateLimitOptions,
+  type ActionRateLimitPolicy,
+  consumeActionRateLimit,
+} from "./action-rate-limit.js";
+import {
   assertRuntimeOwner,
   assertSessionFence,
   createSessionLease,
@@ -43,7 +49,7 @@ import {
   throwSessionLeaseLost,
 } from "./session-fencing.js";
 
-export interface PostgresRuntimeDurabilityOptions {
+export interface PostgresRuntimeDurabilityOptions extends ActionRateLimitOptions {
   readonly beforeAcceptExecuteCommit?: () => void;
   readonly maxPendingOutbox?: number;
   readonly statementTimeoutMilliseconds?: number;
@@ -53,10 +59,12 @@ const MAX_REBUILDABLE_SESSIONS = 100;
 
 export class PostgresRuntimeDurability implements RuntimeDurability {
   readonly #pool: Pool;
+  readonly #actionRateLimits: ActionRateLimitPolicy;
   readonly #observation: PostgresObservationRepository;
   readonly #admission: PostgresRuntimeRepository;
 
   public constructor(connectionString: string, options: PostgresRuntimeDurabilityOptions = {}) {
+    this.#actionRateLimits = actionRateLimitPolicy(options);
     const statementTimeoutMilliseconds = positiveInteger(
       options.statementTimeoutMilliseconds ?? 30_000,
       "statementTimeoutMilliseconds",
@@ -291,7 +299,6 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
         await assertSessionFence(client, parentFence);
         assertFenceSession(parentFence, input.parent);
       }
-      await upsertActor(client, input.actor);
       const parent = await client.query<{ status: SessionStatus }>(
         `SELECT status
            FROM sessions
@@ -371,6 +378,8 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
           true,
         );
       }
+      await upsertActor(client, input.actor);
+      await consumeActionRateLimit(client, this.#actionRateLimits, input.actor.id, input.parent.id);
       await upsertCheckpoint(client, input.checkpoint);
       await client.query(
         `INSERT INTO sessions
@@ -751,7 +760,43 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
     await this.#transaction(async (client) => {
       await assertSessionFence(client, fence);
       assertFenceScope(fence, state.sessionId, state.sessionGeneration);
-      if (state.guard !== undefined) await upsertActor(client, state.guard.actor);
+      const current = await client.query(
+        `SELECT 1
+           FROM interaction_guards AS interaction
+           JOIN sessions AS session
+             ON session.id = interaction.session_id
+            AND session.current_generation = interaction.session_generation
+          WHERE interaction.session_id = $1
+            AND interaction.session_generation = $2
+            AND interaction.state_version = $3
+            AND session.status NOT IN ('BROKEN', 'CLOSED')
+          FOR UPDATE OF session, interaction`,
+        [state.sessionId, state.sessionGeneration, expectedVersion],
+      );
+      if (current.rowCount !== 1) {
+        throw new RuntimeError(
+          "INTERACTION_GUARD_CHANGED",
+          "Durable Interaction state is no longer current",
+          {
+            expectedVersion,
+            generation: state.sessionGeneration,
+            sessionId: state.sessionId,
+          },
+          true,
+        );
+      }
+      if (event.actor !== undefined) {
+        await upsertActor(client, event.actor);
+        await consumeActionRateLimit(
+          client,
+          this.#actionRateLimits,
+          event.actor.id,
+          state.sessionId,
+        );
+      }
+      if (state.guard !== undefined && state.guard.actor.id !== event.actor?.id) {
+        await upsertActor(client, state.guard.actor);
+      }
       const updated = await client.query(
         `UPDATE interaction_guards AS interaction
             SET input_policy = $4,
@@ -890,6 +935,12 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
         [action.sessionId, action.actionSequence],
       );
       await upsertActor(client, action.actor);
+      await consumeActionRateLimit(
+        client,
+        this.#actionRateLimits,
+        action.actor.id,
+        action.sessionId,
+      );
       await client.query(
         `INSERT INTO actions
           (id, session_id, session_generation, actor_id, kind, action_sequence,
@@ -1038,6 +1089,12 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
         "Durable terminal geometry version changed",
       );
       await upsertActor(client, action.actor);
+      await consumeActionRateLimit(
+        client,
+        this.#actionRateLimits,
+        action.actor.id,
+        action.sessionId,
+      );
       await client.query(
         `INSERT INTO actions
           (id, session_id, session_generation, actor_id, kind, action_sequence,

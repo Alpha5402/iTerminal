@@ -65,8 +65,7 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
   ) {}
 
   public async createSession(request: CreateSessionRequest): Promise<Session> {
-    const owners = await this.routes.listAssignableOwners();
-    const owner = owners[0];
+    const owner = await this.routes.claimAssignableOwner();
     if (owner === undefined) {
       throw new RuntimeError(
         "OWNER_ROUTE_UNAVAILABLE",

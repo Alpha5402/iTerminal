@@ -7,7 +7,7 @@ import type {
   RuntimeRouteResolution,
 } from "@iterminal/application";
 import { RuntimeError } from "@iterminal/domain";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 
 import { migrateDatabase } from "./migrate.js";
 import { guardPostgresPool } from "./postgres-pool.js";
@@ -19,6 +19,7 @@ interface OwnerRow {
   readonly instance_id: string;
   readonly lease_expires_at: Date;
   readonly owner_id: string;
+  readonly placement_count: string;
   readonly registry_epoch: string;
   readonly started_at: Date;
   readonly status: RuntimeOwnerStatus;
@@ -40,10 +41,11 @@ function ownerColumns(alias: string, includeActiveSessionCount = true): string {
     WHERE s.owner_id = ${alias}.owner_id
       AND s.status IN ('STARTING', 'READY', 'RESERVED', 'RUNNING'))`
       : "0::text"
-  } AS active_session_count`;
+  } AS active_session_count, ${alias}.placement_count::text`;
 }
 
 const OWNER_RETURNING = ownerColumns("runtime_workers");
+const PLACEMENT_CLAIM_LOCK = 1_769_238_389;
 
 export interface PostgresRuntimeOwnerRegistryOptions {
   readonly statementTimeoutMilliseconds?: number;
@@ -181,9 +183,43 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
       `SELECT ${OWNER_RETURNING}
         FROM runtime_workers
        WHERE status = 'ACTIVE' AND lease_expires_at > now()
-        ORDER BY 11, owner_id`,
+        ORDER BY placement_count, owner_id`,
     );
     return owners.rows.map(ownerRecord);
+  }
+
+  public async claimAssignableOwner(): Promise<RuntimeOwnerRecord | undefined> {
+    return this.#transaction(async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock($1)", [PLACEMENT_CLAIM_LOCK]);
+      const candidate = await client.query<{ owner_id: string }>(
+        `SELECT owner_id
+           FROM runtime_workers
+          WHERE status = 'ACTIVE' AND lease_expires_at > now()
+          ORDER BY placement_count, owner_id
+          LIMIT 1
+          FOR UPDATE`,
+      );
+      const ownerId = candidate.rows[0]?.owner_id;
+      if (ownerId === undefined) return undefined;
+      const claimed = await client.query<OwnerRow>(
+        `UPDATE runtime_workers
+            SET placement_count = placement_count + 1,
+                version = version + 1
+          WHERE owner_id = $1 AND status = 'ACTIVE' AND lease_expires_at > now()
+        RETURNING ${OWNER_RETURNING}`,
+        [ownerId],
+      );
+      const row = claimed.rows[0];
+      if (row === undefined) {
+        throw new RuntimeError(
+          "RUNTIME_UNAVAILABLE",
+          "Assignable Runtime owner changed during its atomic placement claim",
+          { ownerId },
+          true,
+        );
+      }
+      return ownerRecord(row);
+    });
   }
 
   public async listSessionOwnerRoutes(): Promise<readonly RuntimeRouteResolution[]> {
@@ -292,6 +328,21 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
     const row = route.rows[0];
     return row === undefined ? undefined : routeResolution(row);
   }
+
+  async #transaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
+    const client = await this.#pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await work(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
 }
 
 function ownerRecord(row: OwnerRow): RuntimeOwnerRecord {
@@ -303,6 +354,7 @@ function ownerRecord(row: OwnerRow): RuntimeOwnerRecord {
     instanceId: row.instance_id,
     leaseExpiresAt: row.lease_expires_at.toISOString(),
     ownerId: row.owner_id,
+    placementCount: Number.parseInt(row.placement_count, 10),
     startedAt: row.started_at.toISOString(),
     status: row.status,
     version: Number.parseInt(row.version, 10),
@@ -351,6 +403,7 @@ function requiredOwnerRow(row: RouteRow): OwnerRow {
     row.instance_id === null ||
     row.lease_expires_at === null ||
     row.owner_id === null ||
+    row.placement_count === null ||
     row.registry_epoch === null ||
     row.started_at === null ||
     row.status === null ||
@@ -368,6 +421,7 @@ function requiredOwnerRow(row: RouteRow): OwnerRow {
     instance_id: row.instance_id,
     lease_expires_at: row.lease_expires_at,
     owner_id: row.owner_id,
+    placement_count: row.placement_count,
     registry_epoch: row.registry_epoch,
     started_at: row.started_at,
     status: row.status,

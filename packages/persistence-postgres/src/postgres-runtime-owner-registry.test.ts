@@ -42,6 +42,7 @@ describeDatabase("M9.1 PostgreSQL Runtime owner registry", () => {
       epoch: 1,
       instanceId: "instance-a",
       ownerId: "owner-a",
+      placementCount: 0,
       status: "ACTIVE",
       version: 1,
     });
@@ -152,6 +153,54 @@ describeDatabase("M9.1 PostgreSQL Runtime owner registry", () => {
     });
   });
 
+  it("atomically distributes concurrent placement claims and excludes draining owners", async () => {
+    const registry = createRegistry();
+    const claimers = [registry, createRegistry(), createRegistry(), createRegistry()];
+    const registrations = await Promise.all(
+      ["a", "b", "c"].map((suffix) =>
+        registry.registerOwner({
+          endpoint: `/tmp/iterminal-placement-${suffix}.sock`,
+          instanceId: `placement-${suffix}`,
+          leaseMilliseconds: 5_000,
+          ownerId: `owner-placement-${suffix}`,
+        }),
+      ),
+    );
+
+    const firstWave = await Promise.all(
+      Array.from({ length: 12 }, (_, index) => {
+        const claimer = claimers[index % claimers.length];
+        if (claimer === undefined) throw new Error("Placement claimer is missing");
+        return claimer.claimAssignableOwner();
+      }),
+    );
+    expect(firstWave.every((owner) => owner !== undefined)).toBe(true);
+    expect(ownerCounts(firstWave)).toEqual({
+      "owner-placement-a": 4,
+      "owner-placement-b": 4,
+      "owner-placement-c": 4,
+    });
+
+    const middle = registrations[1];
+    if (middle === undefined) throw new Error("Middle placement owner is missing");
+    await registry.beginOwnerDrain(middle, 5_000);
+    const secondWave = await Promise.all(
+      Array.from({ length: 6 }, (_, index) => {
+        const claimer = claimers[index % claimers.length];
+        if (claimer === undefined) throw new Error("Placement claimer is missing");
+        return claimer.claimAssignableOwner();
+      }),
+    );
+    expect(ownerCounts(secondWave)).toEqual({
+      "owner-placement-a": 3,
+      "owner-placement-c": 3,
+    });
+    expect(await registry.listAssignableOwners()).toEqual([
+      expect.objectContaining({ ownerId: "owner-placement-a", placementCount: 7 }),
+      expect.objectContaining({ ownerId: "owner-placement-c", placementCount: 7 }),
+    ]);
+  });
+
   function createRegistry(): PostgresRuntimeOwnerRegistry {
     const registry = new PostgresRuntimeOwnerRegistry(databaseUrl ?? "");
     registries.push(registry);
@@ -161,4 +210,15 @@ describeDatabase("M9.1 PostgreSQL Runtime owner registry", () => {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
+function ownerCounts(
+  owners: readonly ({ readonly ownerId: string } | undefined)[],
+): Readonly<Record<string, number>> {
+  const counts: Record<string, number> = {};
+  for (const owner of owners) {
+    if (owner === undefined) continue;
+    counts[owner.ownerId] = (counts[owner.ownerId] ?? 0) + 1;
+  }
+  return counts;
 }

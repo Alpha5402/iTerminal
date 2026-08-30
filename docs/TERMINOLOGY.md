@@ -30,6 +30,8 @@ These terms are protocol contracts. Avoid synonyms in code and public APIs unles
 | Fencing token      | Globally monotonic Session-lease token checked inside every live durable mutation transaction.   |
 | Execution version  | Optimistic version for one Execution transition; independent of owner identity and fencing.      |
 | Runtime Router     | Stateless local RPC adapter that resolves durable owner routes and forwards to the exact daemon. |
+| Placement claim    | Atomic monotonic assignment attempt for one new root Session; not active load or capacity.       |
+| Action rate limit  | Durable database-time admission bound scoped independently to one Actor and one Session.         |
 | `UNKNOWN`          | The Runtime cannot prove whether a write or external side effect occurred/completed.             |
 | `BROKEN`           | The generation's PTY/Shell/owner/control protocol is lost or no longer trustworthy.              |
 
@@ -46,6 +48,8 @@ These terms are protocol contracts. Avoid synonyms in code and public APIs unles
 - Fencing stale database writes != undoing external side effects.
 - Owner route freshness != generation-scoped Session fencing or PTY failover.
 - Registry epoch != Session fencing token != Execution expected version.
+- Placement-attempt fairness != equal active load, capacity weighting, or overload shedding.
+- `RATE_LIMITED` != `BACKPRESSURE`, `PTY_BUSY`, or an interaction-policy denial.
 
 ## TerminalState evidence boundary
 

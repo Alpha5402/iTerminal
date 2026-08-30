@@ -5,6 +5,7 @@ import {
   PostgresRuntimeDurability,
   PostgresRuntimeOwnerRegistry,
 } from "@iterminal/persistence-postgres";
+import { RuntimeError } from "@iterminal/domain";
 import { startRuntimeDaemon, type RuntimeDaemonHandle } from "@iterminal/runtime-daemon";
 import { UnixRuntimeClient } from "@iterminal/runtime-rpc";
 import { Pool } from "pg";
@@ -285,6 +286,192 @@ describeDatabase("M9.2 central Runtime Router", () => {
     });
   }, 45_000);
 
+  it("atomically balances concurrent Session placement across three owners and excludes drain", async () => {
+    const root = await fixture("fair-placement");
+    const workspace = join(root, "workspace");
+    await mkdir(workspace, { recursive: true });
+    const owners = await Promise.all([
+      daemon(root, "owner-fair-a", "instance-fair-a", "fair-a.sock"),
+      daemon(root, "owner-fair-b", "instance-fair-b", "fair-b.sock"),
+      daemon(root, "owner-fair-c", "instance-fair-c", "fair-c.sock"),
+    ]);
+    const router = await runtimeRouter(root);
+    const client = new UnixRuntimeClient(router.socketPath);
+
+    const firstWave = await Promise.all(
+      Array.from({ length: 12 }, () =>
+        client.createSession({ shell: "zsh", workspaceRoot: workspace }),
+      ),
+    );
+    expect(sessionOwnerCounts(firstWave)).toEqual({
+      "owner-fair-a": 4,
+      "owner-fair-b": 4,
+      "owner-fair-c": 4,
+    });
+    const duplicateLeases = await pool.query(
+      `SELECT session.id
+         FROM sessions AS session
+         LEFT JOIN session_leases AS lease
+           ON lease.session_id = session.id
+          AND lease.session_generation = session.current_generation
+          AND lease.released_at IS NULL
+        WHERE session.id = ANY($1::text[])
+        GROUP BY session.id
+       HAVING count(lease.session_id) <> 1`,
+      [firstWave.map((session) => session.id)],
+    );
+    expect(duplicateLeases.rowCount).toBe(0);
+
+    const middle = owners[1]?.ownerRegistration();
+    if (middle === undefined) throw new Error("Middle fair-placement owner is missing");
+    await observer().beginOwnerDrain(middle, 5_000);
+    const secondWave = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        client.createSession({ shell: "zsh", workspaceRoot: workspace }),
+      ),
+    );
+    expect(sessionOwnerCounts(secondWave)).toEqual({
+      "owner-fair-a": 3,
+      "owner-fair-c": 3,
+    });
+    const placement = await pool.query<{ owner_id: string; placement_count: string }>(
+      `SELECT owner_id, placement_count::text
+         FROM runtime_workers
+        WHERE owner_id LIKE 'owner-fair-%'
+        ORDER BY owner_id`,
+    );
+    expect(placement.rows).toEqual([
+      { owner_id: "owner-fair-a", placement_count: "7" },
+      { owner_id: "owner-fair-b", placement_count: "4" },
+      { owner_id: "owner-fair-c", placement_count: "7" },
+    ]);
+
+    await Promise.all(
+      [...firstWave, ...secondWave].map((session) =>
+        client.closeSession(session.id, session.generation),
+      ),
+    );
+  }, 60_000);
+
+  it("rate-limits one Actor across owners and all Actors within one Session", async () => {
+    const root = await fixture("rate-limit");
+    const workspace = join(root, "workspace");
+    await mkdir(workspace, { recursive: true });
+    const limits = {
+      actionRateLimitWindowMilliseconds: 5_000,
+      actorActionRateLimit: 2,
+      sessionActionRateLimit: 2,
+    } as const;
+    await Promise.all([
+      daemon(root, "owner-rate-a", "instance-rate-a", "rate-a.sock", limits),
+      daemon(root, "owner-rate-b", "instance-rate-b", "rate-b.sock", limits),
+    ]);
+    const router = await runtimeRouter(root);
+    const client = new UnixRuntimeClient(router.socketPath);
+    const sessions = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        client.createSession({ shell: "zsh", workspaceRoot: workspace }),
+      ),
+    );
+    expect(sessionOwnerCounts(sessions)).toEqual({ "owner-rate-a": 2, "owner-rate-b": 2 });
+    const firstOwnerSessions = sessions.filter((session) => session.ownerId === "owner-rate-a");
+    const secondOwnerSessions = sessions.filter((session) => session.ownerId === "owner-rate-b");
+    const firstSession = requiredSession(firstOwnerSessions, 0);
+    const secondSession = requiredSession(secondOwnerSessions, 0);
+    const thirdSession = requiredSession(firstOwnerSessions, 1);
+    const limitedSession = requiredSession(secondOwnerSessions, 1);
+
+    const sharedActor = actorFixture("shared-rate-actor");
+    const firstRequest = {
+      actor: sharedActor,
+      command: "true",
+      idempotencyKey: "rate-shared-first",
+      sessionGeneration: firstSession.generation,
+      sessionId: firstSession.id,
+    } as const;
+    const first = await client.startExecute(firstRequest);
+    await client.waitExecution(first.execution.id);
+    const replay = await client.startExecute(firstRequest);
+    expect(replay.action.id).toBe(first.action.id);
+    const second = await client.startExecute({
+      actor: sharedActor,
+      command: "true",
+      idempotencyKey: "rate-shared-second",
+      sessionGeneration: secondSession.generation,
+      sessionId: secondSession.id,
+    });
+    await client.waitExecution(second.execution.id);
+    const actorRejection = await captureRateLimited(
+      client.startExecute({
+        actor: sharedActor,
+        command: "true",
+        idempotencyKey: "rate-shared-rejected",
+        sessionGeneration: thirdSession.generation,
+        sessionId: thirdSession.id,
+      }),
+    );
+    expect(actorRejection).toMatchObject({
+      code: "RATE_LIMITED",
+      details: {
+        limit: 2,
+        subjectId: sharedActor.id,
+        subjectKind: "actor",
+        windowMilliseconds: 5_000,
+      },
+      retryable: true,
+    });
+
+    for (const suffix of ["a", "b"] as const) {
+      const started = await client.startExecute({
+        actor: actorFixture(`session-rate-${suffix}`),
+        command: "true",
+        idempotencyKey: `session-rate-${suffix}`,
+        sessionGeneration: limitedSession.generation,
+        sessionId: limitedSession.id,
+      });
+      await client.waitExecution(started.execution.id);
+    }
+    const sessionRejection = await captureRateLimited(
+      client.startExecute({
+        actor: actorFixture("session-rate-c"),
+        command: "true",
+        idempotencyKey: "session-rate-c",
+        sessionGeneration: limitedSession.generation,
+        sessionId: limitedSession.id,
+      }),
+    );
+    expect(sessionRejection).toMatchObject({
+      code: "RATE_LIMITED",
+      details: {
+        limit: 2,
+        subjectId: limitedSession.id,
+        subjectKind: "session",
+        windowMilliseconds: 5_000,
+      },
+      retryable: true,
+    });
+
+    const durable = await pool.query<{
+      action_count: string;
+      actor_id: string;
+    }>(
+      `SELECT actor_id, action_count::text
+         FROM actor_action_rate_limit_buckets
+        WHERE actor_id = $1`,
+      [sharedActor.id],
+    );
+    expect(durable.rows).toEqual([{ action_count: "2", actor_id: sharedActor.id }]);
+    const rejected = await pool.query<{ actions: string; status: string }>(
+      `SELECT session.status, count(action.id)::text AS actions
+         FROM sessions session
+         LEFT JOIN actions action ON action.session_id = session.id
+        WHERE session.id = $1
+        GROUP BY session.status`,
+      [thirdSession.id],
+    );
+    expect(rejected.rows[0]).toEqual({ actions: "0", status: "READY" });
+  }, 45_000);
+
   it("fails closed for a live registry route whose Unix endpoint is absent", async () => {
     const root = await fixture("missing-endpoint");
     const registry = observer();
@@ -341,14 +528,23 @@ describeDatabase("M9.2 central Runtime Router", () => {
     ownerId: string,
     ownerInstanceId: string,
     socketName: string,
+    limits:
+      | Readonly<{
+          actionRateLimitWindowMilliseconds: number;
+          actorActionRateLimit: number;
+          sessionActionRateLimit: number;
+        }>
+      | undefined = undefined,
   ): Promise<RuntimeDaemonHandle> {
     const handle = await startRuntimeDaemon({
       databaseHealthCheckMilliseconds: 50,
       databaseUrl: databaseUrl ?? "",
       ownerId,
       ownerInstanceId,
-      ownerLeaseMilliseconds: 500,
+      ownerLeaseMilliseconds: 5_000,
+      sessionLeaseMilliseconds: 5_000,
       socketPath: join(root, socketName),
+      ...(limits ?? {}),
     });
     daemons.push(handle);
     return handle;
@@ -379,6 +575,50 @@ const actor = {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+function sessionOwnerCounts(
+  sessions: readonly { readonly ownerId: string }[],
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const session of sessions) {
+    counts[session.ownerId] = (counts[session.ownerId] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function requiredSession<T>(sessions: readonly T[], index: number): T {
+  const session = sessions[index];
+  if (session === undefined) throw new Error(`Session ${index.toString()} is missing`);
+  return session;
+}
+
+function actorFixture(id: string) {
+  return {
+    client: "m9-rate-limit-test",
+    id,
+    principal: id,
+    type: "agent" as const,
+  };
+}
+
+async function captureRateLimited(promise: Promise<unknown>): Promise<RuntimeError> {
+  let rejection: unknown;
+  try {
+    await promise;
+  } catch (error) {
+    rejection = error;
+  }
+  if (!(rejection instanceof RuntimeError) || rejection.code !== "RATE_LIMITED") {
+    if (rejection instanceof Error) throw rejection;
+    throw new Error(`Expected RATE_LIMITED rejection, received ${String(rejection)}`);
+  }
+  const retryAfterMilliseconds = rejection.details.retryAfterMilliseconds;
+  if (typeof retryAfterMilliseconds !== "number") {
+    throw new Error("RATE_LIMITED must include numeric retryAfterMilliseconds");
+  }
+  expect(retryAfterMilliseconds).toBeGreaterThan(0);
+  return rejection;
 }
 
 async function waitForExecutionStatus(

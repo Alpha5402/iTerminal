@@ -45,6 +45,8 @@ const DEFAULT_SESSION_LEASE_MILLISECONDS = 15_000;
 const DEFAULT_DATABASE_HEALTH_CHECK_MILLISECONDS = 1_000;
 
 export async function startRuntimeDaemon(options: {
+  readonly actionRateLimitWindowMilliseconds?: number;
+  readonly actorActionRateLimit?: number;
   readonly beforeAcceptExecuteCommit?: () => void;
   readonly checkpointEnvironmentKeys?: readonly string[];
   readonly databaseHealthCheckMilliseconds?: number;
@@ -61,6 +63,7 @@ export async function startRuntimeDaemon(options: {
   readonly ownerInstanceId?: string;
   readonly ownerLeaseMilliseconds?: number;
   readonly sessionLeaseMilliseconds?: number;
+  readonly sessionActionRateLimit?: number;
   readonly socketPath: string;
   readonly runtime?: RuntimeService;
 }): Promise<RuntimeDaemonHandle> {
@@ -77,9 +80,12 @@ export async function startRuntimeDaemon(options: {
   }
   if (
     options.databaseUrl === undefined &&
-    (options.beforeAcceptExecuteCommit !== undefined ||
+    (options.actionRateLimitWindowMilliseconds !== undefined ||
+      options.actorActionRateLimit !== undefined ||
+      options.beforeAcceptExecuteCommit !== undefined ||
       options.ownerInstanceId !== undefined ||
       options.ownerLeaseMilliseconds !== undefined ||
+      options.sessionActionRateLimit !== undefined ||
       options.sessionLeaseMilliseconds !== undefined)
   ) {
     throw new RuntimeError(
@@ -89,7 +95,9 @@ export async function startRuntimeDaemon(options: {
   }
   if (
     options.runtime !== undefined &&
-    (options.databaseUrl !== undefined ||
+    (options.actionRateLimitWindowMilliseconds !== undefined ||
+      options.actorActionRateLimit !== undefined ||
+      options.databaseUrl !== undefined ||
       options.beforeAcceptExecuteCommit !== undefined ||
       options.databaseHealthCheckMilliseconds !== undefined ||
       options.databaseStatementTimeoutMilliseconds !== undefined ||
@@ -103,6 +111,7 @@ export async function startRuntimeDaemon(options: {
       options.outboxMaxPending !== undefined ||
       options.ownerInstanceId !== undefined ||
       options.ownerLeaseMilliseconds !== undefined ||
+      options.sessionActionRateLimit !== undefined ||
       options.sessionLeaseMilliseconds !== undefined)
   ) {
     throw new RuntimeError(
@@ -114,6 +123,12 @@ export async function startRuntimeDaemon(options: {
     options.databaseUrl === undefined
       ? undefined
       : new PostgresRuntimeDurability(options.databaseUrl, {
+          ...(options.actionRateLimitWindowMilliseconds === undefined
+            ? {}
+            : { actionRateLimitWindowMilliseconds: options.actionRateLimitWindowMilliseconds }),
+          ...(options.actorActionRateLimit === undefined
+            ? {}
+            : { actorActionRateLimit: options.actorActionRateLimit }),
           ...(options.beforeAcceptExecuteCommit === undefined
             ? {}
             : { beforeAcceptExecuteCommit: options.beforeAcceptExecuteCommit }),
@@ -123,6 +138,9 @@ export async function startRuntimeDaemon(options: {
           ...(options.outboxMaxPending === undefined
             ? {}
             : { maxPendingOutbox: options.outboxMaxPending }),
+          ...(options.sessionActionRateLimit === undefined
+            ? {}
+            : { sessionActionRateLimit: options.sessionActionRateLimit }),
         });
   const ownerRegistry =
     options.databaseUrl === undefined

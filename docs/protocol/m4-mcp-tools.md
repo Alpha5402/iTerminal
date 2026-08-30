@@ -21,13 +21,18 @@ The registry is discovery and lifecycle state, not a Session lease. Registry epo
 
 M9.3 adds a separate generation-scoped Session lease. Root/fork creation acquires it for the exact owner instance; the daemon renews only its in-memory exact fence set, and lease expiry never exceeds owner expiry. Every live durable mutation validates owner ID, boot instance, registry epoch, Session ID, generation, and fencing token in its PostgreSQL transaction. Execution transitions additionally compare their own expected version. `SESSION_LEASE_LOST` is non-retryable because PTY bytes may already have been written; it trips the owner-wide circuit and closes local PTYs best-effort. Recovery marks the old generation `BROKEN`, ambiguous Execution state `UNKNOWN`, and rebuilds only as a new Session—never as live PTY takeover.
 
-| Environment variable              | Default                         |
-| --------------------------------- | ------------------------------- |
-| `ITERM_RUNTIME_OWNER_ID`          | derived from the Runtime socket |
-| `ITERM_RUNTIME_OWNER_INSTANCE_ID` | random boot-unique UUID         |
-| `ITERM_RUNTIME_OWNER_LEASE_MS`    | `15000`                         |
-| `ITERM_SESSION_LEASE_MS`          | `15000`                         |
-| `ITERM_DATABASE_HEALTH_CHECK_MS`  | `1000`                          |
+M9.4 replaces Router-side list-and-pick with an atomic PostgreSQL placement claim. New root Sessions are assigned by monotonic attempt count across unexpired ACTIVE owners; DRAINING owners serve only exact existing routes. This is deterministic round-robin fairness, not capacity or active-load scheduling.
+
+| Environment variable                | Default                         |
+| ----------------------------------- | ------------------------------- |
+| `ITERM_RUNTIME_OWNER_ID`            | derived from the Runtime socket |
+| `ITERM_RUNTIME_OWNER_INSTANCE_ID`   | random boot-unique UUID         |
+| `ITERM_RUNTIME_OWNER_LEASE_MS`      | `15000`                         |
+| `ITERM_SESSION_LEASE_MS`            | `15000`                         |
+| `ITERM_DATABASE_HEALTH_CHECK_MS`    | `1000`                          |
+| `ITERM_ACTOR_ACTION_RATE_LIMIT`     | `120`                           |
+| `ITERM_SESSION_ACTION_RATE_LIMIT`   | `240`                           |
+| `ITERM_ACTION_RATE_LIMIT_WINDOW_MS` | `1000`                          |
 
 The owner and Session leases must each exceed two database health-check intervals. Session expiry is capped at the current owner lease expiry. These settings are valid only with `ITERM_DATABASE_URL`.
 
@@ -94,6 +99,8 @@ Every generation starts with `human_guarded`, interaction state version `1`, and
 Guard expiry is bounded and versioned, not ownership: default TTL is 500 ms, accepted range is 50 ms–5 s, and one Guard may renew at most three times. Clients re-read `interaction_get` after `INPUT_GUARDED` or an uncertain mutation. They never replay Input/Control merely because a Guard expired.
 
 `BACKPRESSURE` means the durable delivery backlog is at its configured bound. No new Action or Session reservation was created, the READY Session remains usable, and the caller may retry the same request/idempotency key after Outbox capacity drains. `RUNTIME_UNAVAILABLE` instead means the durable journal or Runtime boundary is unhealthy; callers must inspect/reconnect rather than assuming the old PTY survived.
+
+`RATE_LIMITED` means the durable Actor or Session fixed-window admission bound was exceeded. The error identifies `subjectKind`, `subjectId`, `limit`, `windowMilliseconds`, and `retryAfterMilliseconds`; no Action/state mutation or quota increment commits. Wait for the supplied delay, then retry the identical idempotency key. This is distinct from delivery `BACKPRESSURE`, active-Execution `PTY_BUSY`, and interaction policy/Guard errors. In-memory development mode does not claim distributed rate limiting.
 
 `screen_search` and `screen_wait` observe only the live current viewport; neither scans scrollback nor durable Events. A wait timeout is bounded to 1–300,000 ms and returns `matched: false`, `reason: "timeout"`, and the latest snapshot instead of raising a transport error. A stable condition means only that no `screenVersion` was applied during its interval—it does not prove prompt readiness or command completion. If an RPC client disconnects, the daemon aborts that client's server-side wait.
 

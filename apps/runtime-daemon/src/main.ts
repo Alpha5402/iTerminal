@@ -10,6 +10,11 @@ const ownerId = process.env.ITERM_RUNTIME_OWNER_ID;
 const ownerInstanceId = process.env.ITERM_RUNTIME_OWNER_INSTANCE_ID;
 const ownerLeaseMilliseconds = optionalPositiveInteger("ITERM_RUNTIME_OWNER_LEASE_MS");
 const sessionLeaseMilliseconds = optionalPositiveInteger("ITERM_SESSION_LEASE_MS");
+const actorActionRateLimit = optionalPositiveInteger("ITERM_ACTOR_ACTION_RATE_LIMIT");
+const sessionActionRateLimit = optionalPositiveInteger("ITERM_SESSION_ACTION_RATE_LIMIT");
+const actionRateLimitWindowMilliseconds = optionalPositiveInteger(
+  "ITERM_ACTION_RATE_LIMIT_WINDOW_MS",
+);
 const executionDispatch = parseExecutionDispatch(process.env.ITERM_EXECUTION_DISPATCH);
 const checkpointEnvironmentKeys = optionalEnvironmentKeys("ITERM_CHECKPOINT_ENV_KEYS");
 const databaseStatementTimeoutMilliseconds = optionalPositiveInteger(
@@ -23,6 +28,8 @@ const databaseReconnectMaxMilliseconds = optionalPositiveInteger("ITERM_DATABASE
 const databaseHealthCheckMilliseconds = optionalPositiveInteger("ITERM_DATABASE_HEALTH_CHECK_MS");
 const daemon = await startRuntimeDaemon({
   socketPath,
+  ...(actionRateLimitWindowMilliseconds === undefined ? {} : { actionRateLimitWindowMilliseconds }),
+  ...(actorActionRateLimit === undefined ? {} : { actorActionRateLimit }),
   ...(checkpointEnvironmentKeys === undefined ? {} : { checkpointEnvironmentKeys }),
   ...(databaseUrl === undefined ? {} : { databaseUrl }),
   ...(executionDispatch === undefined ? {} : { executionDispatch }),
@@ -39,6 +46,7 @@ const daemon = await startRuntimeDaemon({
   ...(ownerInstanceId === undefined ? {} : { ownerInstanceId }),
   ...(ownerLeaseMilliseconds === undefined ? {} : { ownerLeaseMilliseconds }),
   ...(sessionLeaseMilliseconds === undefined ? {} : { sessionLeaseMilliseconds }),
+  ...(sessionActionRateLimit === undefined ? {} : { sessionActionRateLimit }),
   onDurabilityState: reportDurabilityState,
 });
 process.stderr.write(

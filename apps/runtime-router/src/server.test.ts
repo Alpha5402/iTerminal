@@ -76,6 +76,7 @@ function routeRegistry(liveOwner: RuntimeOwnerRecord): RuntimeOwnerRegistry {
   };
   return {
     beginOwnerDrain: unsupported,
+    claimAssignableOwner: unsupported,
     heartbeatOwner: unsupported,
     listAssignableOwners: unsupported,
     listSessionOwnerRoutes: unsupported,
@@ -95,6 +96,7 @@ const owner: RuntimeOwnerRecord = {
   instanceId: "instance-route",
   leaseExpiresAt: new Date(60_000).toISOString(),
   ownerId: "owner-route",
+  placementCount: 0,
   startedAt: new Date(0).toISOString(),
   status: "ACTIVE",
   version: 2,

@@ -49,6 +49,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
         "execute starts one top-level Shell command and returns immediately; use execution_wait or events_query to observe it. " +
         "PTY_BUSY means another Execute is active: wait for it, send targeted input/control if appropriate, or use another Session. " +
         "BACKPRESSURE means no Action was admitted; wait for durable delivery capacity and retry the identical idempotency key. " +
+        "RATE_LIMITED means no Action was admitted; wait for retryAfterMilliseconds and retry the identical idempotency key. " +
         "OWNER_ROUTE_UNAVAILABLE means the durable target has no usable owner route or a read could not reach its registered endpoint; never infer that the Session itself is missing. " +
         "Before interactive input, inspect interaction_get; INPUT_GUARDED is retryable only after the Guard expires or changes, while POLICY_DENIED requires a Human policy decision. " +
         "Resize is an explicit shared Action: read geometryVersion from screen_get and handle GEOMETRY_CHANGED by re-observing instead of overwriting another Actor's decision. " +
@@ -157,7 +158,8 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
       description:
         "Start one top-level command in the Session's persistent Shell and return its Action/Execution immediately. " +
         "Only one Execute may be active. On PTY_BUSY, inspect activeExecutionId and choose execution_wait, input, or control. " +
-        "On BACKPRESSURE, no Action/reservation exists: wait for Outbox capacity and retry this identical request key. Session forking arrives in a later milestone.",
+        "On BACKPRESSURE, no Action/reservation exists: wait for Outbox capacity and retry this identical request key. " +
+        "On RATE_LIMITED, no Action/reservation exists: wait for retryAfterMilliseconds and retry this identical request key.",
       inputSchema: z.strictObject({
         command: z.string().max(256 * 1024),
         idempotencyKey,
