@@ -4,6 +4,7 @@ import type {
   OutboxRepository,
 } from "@iterminal/messaging";
 import { RuntimeError } from "@iterminal/domain";
+import { operationalErrorMessage } from "@iterminal/observability";
 
 import {
   PostgresMessagingRepository,
@@ -152,7 +153,10 @@ export class SupervisedPostgresMessagingRepository
     try {
       return await operation();
     } catch (error) {
-      if (isPostgresAvailabilityError(error)) this.#disconnect(error);
+      if (isPostgresAvailabilityError(error)) {
+        this.#disconnect(error);
+        throw this.#unavailableError();
+      }
       throw error;
     }
   }
@@ -208,7 +212,9 @@ export class SupervisedPostgresMessagingRepository
         this.#settleFirstAttempt();
       } catch (error) {
         if (!isPostgresAvailabilityError(error)) {
-          const failure = asError(error);
+          const failure = new Error(
+            operationalErrorMessage(error, "PostgreSQL repository initialization failed"),
+          );
           this.#fatalError = failure;
           this.#updateState({
             attempt,
@@ -225,7 +231,7 @@ export class SupervisedPostgresMessagingRepository
         this.#updateState({
           attempt,
           endpointIndex: this.#repository.databaseEndpointIndex(),
-          error: errorMessage(error),
+          error: operationalErrorMessage(error, "PostgreSQL connection unavailable"),
           retryInMilliseconds,
           state: "DISCONNECTED",
         });
@@ -245,7 +251,7 @@ export class SupervisedPostgresMessagingRepository
     this.#updateState({
       attempt: 1,
       endpointIndex: this.#repository.databaseEndpointIndex(),
-      error: errorMessage(error),
+      error: operationalErrorMessage(error, "PostgreSQL connection unavailable"),
       retryInMilliseconds: this.#options.initialDelayMilliseconds,
       state: "DISCONNECTED",
     });
@@ -426,12 +432,4 @@ function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void
     const timer = setTimeout(finish, milliseconds);
     signal.addEventListener("abort", finish, { once: true });
   });
-}
-
-function asError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
-}
-
-function errorMessage(error: unknown): string {
-  return asError(error).message;
 }

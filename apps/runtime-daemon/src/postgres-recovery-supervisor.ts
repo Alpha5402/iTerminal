@@ -4,6 +4,7 @@ import type {
   RuntimeService,
 } from "@iterminal/application";
 import { RuntimeError } from "@iterminal/domain";
+import { operationalErrorMessage } from "@iterminal/observability";
 import type { PostgresRuntimeDurability } from "@iterminal/persistence-postgres";
 
 export interface RuntimeDaemonDurabilityState {
@@ -94,11 +95,14 @@ export function startPostgresRecoverySupervisor(options: {
             );
           }
         } catch (error) {
-          options.runtime.reportDurabilityUnavailable(error);
+          const diagnostic = operationalErrorMessage(error, "PostgreSQL durability unavailable");
+          options.runtime.reportDurabilityUnavailable(
+            new RuntimeError("RUNTIME_UNAVAILABLE", diagnostic, {}, true),
+          );
           options.updateState({
             attempt: 0,
             endpointIndex: options.durability.databaseEndpointIndex(),
-            error: errorMessage(error),
+            error: diagnostic,
             phase: "UNAVAILABLE",
           });
         }
@@ -157,7 +161,7 @@ export function startPostgresRecoverySupervisor(options: {
         options.updateState({
           attempt,
           endpointIndex: options.durability.databaseEndpointIndex(),
-          error: errorMessage(error),
+          error: operationalErrorMessage(error, "PostgreSQL durability unavailable"),
           phase: "UNAVAILABLE",
           retryInMilliseconds,
         });
@@ -230,8 +234,4 @@ function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void
     const timer = setTimeout(finish, milliseconds);
     signal.addEventListener("abort", finish, { once: true });
   });
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

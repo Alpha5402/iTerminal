@@ -7,6 +7,7 @@ import {
   type RuntimeServiceOptions,
 } from "@iterminal/application";
 import { RuntimeError } from "@iterminal/domain";
+import { operationalErrorMessage } from "@iterminal/observability";
 import {
   PtyProcessGuardian,
   PtyShellExecutorFactory,
@@ -281,15 +282,16 @@ export async function startRuntimeDaemon(options: {
             }
           },
           onFailure: (error) => {
+            const diagnostic = operationalErrorMessage(error, "Host-local Process Guardian failed");
             reportProcessGuardianState(options.onProcessGuardianState, {
-              error: error.message,
+              error: diagnostic,
               state: "UNAVAILABLE",
             });
             runtimeForGuardian.current?.reportDurabilityUnavailable(
               new RuntimeError(
                 "RUNTIME_UNAVAILABLE",
                 "Host-local Process Guardian is unavailable",
-                { reason: error.message },
+                { reason: diagnostic },
                 true,
               ),
             );

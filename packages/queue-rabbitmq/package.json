@@ -6,6 +6,7 @@
   "exports": "./src/index.ts",
   "dependencies": {
     "@iterminal/messaging": "workspace:*",
+    "@iterminal/observability": "workspace:*",
     "amqplib": "2.0.1"
   },
   "devDependencies": {

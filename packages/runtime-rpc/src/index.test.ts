@@ -3,8 +3,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createConnection } from "node:net";
 
-import type { RuntimeError, SecretInputAction } from "@iterminal/domain";
-import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
+import type { SecretInputAction } from "@iterminal/domain";
+import { ACTOR_CAPABILITY_PROFILES, RuntimeError } from "@iterminal/domain";
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
@@ -306,6 +306,61 @@ describe("UnixRuntimeClient delivery classification", () => {
 });
 
 describe("Runtime RPC signed grants", () => {
+  it("keeps configured and verified bearer material out of ordinary serialization", () => {
+    const secret = randomBytes(32);
+    const token = signRuntimeRpcGrant(secret, exactAgentGrant(["session.list"]));
+    const grant = verifyRuntimeRpcGrant(
+      token,
+      { audience: "runtime-rpc-test", secret },
+      new Set(["session.list"]),
+    );
+    const client = new UnixRuntimeClient("/private/tmp/runtime.sock", { authorization: token });
+
+    expect(JSON.stringify(grant)).not.toContain(token);
+    expect(JSON.stringify(client)).not.toContain(token);
+    expect(Object.keys(grant)).toEqual(["claims"]);
+    expect(Object.keys(client)).toEqual([]);
+  });
+
+  it("removes the active bearer from known and unknown RPC failures", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-error-boundary-"));
+    const secret = randomBytes(32);
+    const token = signRuntimeRpcGrant(secret, exactAgentGrant(["session.list"]));
+    let knownFailure = true;
+    const server = await startRuntimeRpcServer({
+      authentication: { audience: "runtime-rpc-test", secret },
+      gateway: {
+        ...stubGateway(),
+        listSessions: () => {
+          if (knownFailure) {
+            knownFailure = false;
+            return Promise.reject(
+              new RuntimeError("RUNTIME_UNAVAILABLE", `credential=${token}`, { token }, true),
+            );
+          }
+          return Promise.reject(new Error(`unexpected credential=${token}`));
+        },
+      },
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    const client = new UnixRuntimeClient(server.socketPath, { authorization: token });
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const error = await client.listSessions().catch((reason: unknown) => reason);
+        expect(error).toMatchObject({
+          code: "RUNTIME_UNAVAILABLE",
+          details: {},
+          message: "Runtime RPC request failed",
+          retryable: true,
+        });
+        expect(JSON.stringify(error)).not.toContain(token);
+      }
+    } finally {
+      await server.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
   it("authenticates the Human-only secret operation before gateway dispatch", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "it-rpc-secret-auth-"));
     const secret = randomBytes(32);
@@ -550,9 +605,20 @@ describe("Runtime RPC signed grants", () => {
 
   it("requires production credentials and permits only an explicit test bypass", () => {
     const encodedSecret = randomBytes(32).toString("base64url");
+    const malformedSecret = "ITERM_RPC_SECRET_SENTINEL_not-base64url!";
     expect(() => runtimeRpcAuthenticationFromEnvironment({})).toThrowError(
       expect.objectContaining({ code: "INVALID_REQUEST" }),
     );
+    const malformedError = (() => {
+      try {
+        runtimeRpcAuthenticationFromEnvironment({ ITERM_RPC_AUTH_SECRET: malformedSecret });
+      } catch (error) {
+        return error;
+      }
+      return undefined;
+    })();
+    expect(malformedError).toBeInstanceOf(RuntimeError);
+    expect(JSON.stringify(malformedError)).not.toContain(malformedSecret);
     expect(
       runtimeRpcAuthenticationFromEnvironment({ ITERM_RPC_AUTH_SECRET: encodedSecret }),
     ).toMatchObject({ audience: "iterminal-runtime-rpc" });

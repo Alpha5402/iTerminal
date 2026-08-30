@@ -233,6 +233,9 @@ importers:
       '@iterminal/executor-pty':
         specifier: workspace:*
         version: link:../../packages/executor-pty
+      '@iterminal/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
       '@iterminal/persistence-postgres':
         specifier: workspace:*
         version: link:../../packages/persistence-postgres
@@ -292,6 +295,9 @@ importers:
 
   apps/storage-maintenance:
     dependencies:
+      '@iterminal/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
       '@iterminal/persistence-postgres':
         specifier: workspace:*
         version: link:../../packages/persistence-postgres
@@ -318,6 +324,8 @@ importers:
 
   packages/messaging: {}
 
+  packages/observability: {}
+
   packages/persistence-postgres:
     dependencies:
       '@iterminal/application':
@@ -329,6 +337,9 @@ importers:
       '@iterminal/messaging':
         specifier: workspace:*
         version: link:../messaging
+      '@iterminal/observability':
+        specifier: workspace:*
+        version: link:../observability
       pg:
         specifier: ^8.16.3
         version: 8.23.0
@@ -344,6 +355,9 @@ importers:
       '@iterminal/messaging':
         specifier: workspace:*
         version: link:../messaging
+      '@iterminal/observability':
+        specifier: workspace:*
+        version: link:../observability
       amqplib:
         specifier: 2.0.1
         version: 2.0.1
@@ -375,6 +389,9 @@ importers:
       '@iterminal/domain':
         specifier: workspace:*
         version: link:../domain
+      '@iterminal/observability':
+        specifier: workspace:*
+        version: link:../observability
       zod:
         specifier: 4.5.4
         version: 4.5.4

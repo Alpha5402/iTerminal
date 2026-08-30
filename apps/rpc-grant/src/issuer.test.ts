@@ -42,6 +42,8 @@ describe("Runtime RPC grant issuer", () => {
       },
       operations: ["execution.start", "session.list"],
     });
+    expect(JSON.stringify(issued)).not.toContain(issued.token);
+    expect(Object.keys(issued)).toEqual(["claims"]);
   });
 
   it("rejects unknown operations and mixed Actor scope fields", () => {

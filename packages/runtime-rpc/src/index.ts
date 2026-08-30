@@ -59,17 +59,33 @@ import {
   RuntimeError,
   isCanonicalActorCapabilities,
 } from "@iterminal/domain";
+import { operationalErrorMessage } from "@iterminal/observability";
 import * as z from "zod/v4";
 
 import {
   authorizeRuntimeRpcGrant,
   currentRuntimeRpcGrantToken,
+  runtimeRpcGrantToken,
   runWithVerifiedRuntimeRpcGrant,
   verifyRuntimeRpcGrant,
   type RuntimeRpcAuthentication,
+  type VerifiedRuntimeRpcGrant,
 } from "./auth.js";
 
-export * from "./auth.js";
+export {
+  DEFAULT_RUNTIME_RPC_AUDIENCE,
+  authorizeRuntimeRpcGrant,
+  parseRuntimeRpcSecret,
+  runtimeRpcAuthenticationFromEnvironment,
+  runtimeRpcAuthorizationFromEnvironment,
+  signRuntimeRpcGrant,
+  verifyRuntimeRpcGrant,
+  type RuntimeRpcActorGrant,
+  type RuntimeRpcAuthentication,
+  type RuntimeRpcEnvironment,
+  type RuntimeRpcGrantClaims,
+  type VerifiedRuntimeRpcGrant,
+} from "./auth.js";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
@@ -631,13 +647,18 @@ export async function startRuntimeRpcServer(options: {
 }
 
 export class UnixRuntimeClient implements RuntimeGateway {
+  readonly #authorization: string | undefined;
+  readonly #socketPath: string;
+
   public constructor(
-    private readonly socketPath: string,
-    private readonly options: Readonly<{ readonly authorization?: string }> = {},
+    socketPath: string,
+    options: Readonly<{ readonly authorization?: string }> = {},
   ) {
     if (options.authorization !== undefined && options.authorization.length === 0) {
       throw new RuntimeError("INVALID_REQUEST", "Runtime RPC authorization cannot be empty");
     }
+    this.#authorization = options.authorization;
+    this.#socketPath = socketPath;
   }
 
   public requestExecuteApproval(request: RequestExecuteApprovalRequest): Promise<Approval> {
@@ -921,8 +942,9 @@ export class UnixRuntimeClient implements RuntimeGateway {
     signal?: AbortSignal,
   ): Promise<T> {
     const id = `rpc_${randomUUID()}`;
+    const authorization = this.#authorization ?? currentRuntimeRpcGrantToken();
     return new Promise<T>((resolve, reject) => {
-      const socket = createConnection(this.socketPath);
+      const socket = createConnection(this.#socketPath);
       let buffer = "";
       let settled = false;
       const timeout = setTimeout(() => {
@@ -950,7 +972,6 @@ export class UnixRuntimeClient implements RuntimeGateway {
       }
       signal?.addEventListener("abort", onAbort, { once: true });
       socket.once("connect", () => {
-        const authorization = this.options.authorization ?? currentRuntimeRpcGrantToken();
         socket.write(
           `${JSON.stringify({
             ...(authorization === undefined ? {} : { authorization }),
@@ -978,14 +999,7 @@ export class UnixRuntimeClient implements RuntimeGateway {
           if (response.ok) {
             resolve(response.result as T);
           } else {
-            reject(
-              new RuntimeError(
-                runtimeErrorCode(response.error.code),
-                response.error.message,
-                response.error.details,
-                response.error.retryable,
-              ),
-            );
+            reject(runtimeErrorFromResponse(response.error, authorization));
           }
         } catch (error) {
           fail(error);
@@ -1037,6 +1051,7 @@ async function respond(
   authentication: RuntimeRpcAuthentication | undefined,
 ): Promise<void> {
   let id = "unassigned";
+  let grant: VerifiedRuntimeRpcGrant | undefined;
   const abortController = new AbortController();
   const onSocketClose = (): void => abortController.abort();
   socket.once("close", onSocketClose);
@@ -1057,7 +1072,7 @@ async function respond(
       throw new RuntimeError("INVALID_REQUEST", "Unsupported Runtime RPC operation");
     }
     const operation = parsed.operation;
-    const grant =
+    grant =
       authentication === undefined
         ? undefined
         : verifyRuntimeRpcGrant(
@@ -1083,7 +1098,7 @@ async function respond(
       grant === undefined ? await invoke() : await runWithVerifiedRuntimeRpcGrant(grant, invoke);
     writeResponse(socket, { id, ok: true, result });
   } catch (error) {
-    const runtimeError = normalizeError(error);
+    const runtimeError = credentialSafeRuntimeError(normalizeError(error), grant);
     writeResponse(socket, {
       error: {
         code: runtimeError.code,
@@ -1476,9 +1491,9 @@ async function drainServer(
 function normalizeError(error: unknown): RuntimeError {
   if (error instanceof RuntimeError) return error;
   if (error instanceof z.ZodError) {
-    return new RuntimeError("INVALID_REQUEST", z.prettifyError(error));
+    return new RuntimeError("INVALID_REQUEST", "Runtime RPC request input is invalid");
   }
-  return new RuntimeError("RUNTIME_UNAVAILABLE", errorMessage(error), {}, true);
+  return internalRuntimeRpcError();
 }
 
 function connectionError(
@@ -1486,7 +1501,11 @@ function connectionError(
   requestId: string,
   error: unknown,
 ): RuntimeError {
-  const details = { operation, requestId, reason: errorMessage(error) };
+  const details = {
+    operation,
+    requestId,
+    reason: operationalErrorMessage(error, "Runtime RPC transport failed"),
+  };
   if (isMutating(operation)) {
     return new RuntimeError(
       "DELIVERY_UNKNOWN",
@@ -1495,6 +1514,40 @@ function connectionError(
     );
   }
   return new RuntimeError("RUNTIME_UNAVAILABLE", "Runtime daemon is unavailable", details, true);
+}
+
+function runtimeErrorFromResponse(
+  error: Extract<RpcResponse, { readonly ok: false }>["error"],
+  authorization: string | undefined,
+): RuntimeError {
+  const runtimeError = new RuntimeError(
+    runtimeErrorCode(error.code),
+    error.message,
+    error.details,
+    error.retryable,
+  );
+  return containsCredential(runtimeError, authorization) ? internalRuntimeRpcError() : runtimeError;
+}
+
+function credentialSafeRuntimeError(
+  error: RuntimeError,
+  grant: VerifiedRuntimeRpcGrant | undefined,
+): RuntimeError {
+  if (grant === undefined) return error;
+  return containsCredential(error, runtimeRpcGrantToken(grant)) ? internalRuntimeRpcError() : error;
+}
+
+function containsCredential(error: RuntimeError, credential: string | undefined): boolean {
+  if (credential === undefined) return false;
+  try {
+    return JSON.stringify({ details: error.details, message: error.message }).includes(credential);
+  } catch {
+    return true;
+  }
+}
+
+function internalRuntimeRpcError(): RuntimeError {
+  return new RuntimeError("RUNTIME_UNAVAILABLE", "Runtime RPC request failed", {}, true);
 }
 
 function isMutating(operation: RuntimeOperation): boolean {
@@ -1526,8 +1579,4 @@ function runtimeErrorCode(code: string): RuntimeError["code"] {
 
 function isNodeError(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

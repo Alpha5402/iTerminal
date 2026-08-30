@@ -1,3 +1,4 @@
+import { operationalErrorMessage } from "@iterminal/observability";
 import { configuredPostgresConnectionTarget } from "@iterminal/persistence-postgres";
 
 import { runEventRetentionMaintenance } from "./event-retention.js";
@@ -28,8 +29,6 @@ try {
   const result = await runEventRetentionMaintenance(databaseTarget);
   process.stdout.write(`${JSON.stringify(result)}\n`);
 } catch (error) {
-  process.stderr.write(
-    `${error instanceof Error ? error.message : "Event retention maintenance failed"}\n`,
-  );
+  process.stderr.write(`${operationalErrorMessage(error, "Event retention maintenance failed")}\n`);
   process.exitCode = 1;
 }

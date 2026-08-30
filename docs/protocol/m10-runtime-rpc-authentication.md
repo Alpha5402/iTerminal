@@ -19,6 +19,8 @@ Generate and protect a local secret without placing it in command arguments:
 
 ```bash
 mkdir -p .iterminal/credentials
+chmod 700 .iterminal/credentials
+umask 077
 node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("base64url"))' \
   > .iterminal/credentials/runtime-rpc.secret
 chmod 600 .iterminal/credentials/runtime-rpc.secret
@@ -29,7 +31,13 @@ export ITERM_RPC_AUTH_SECRET="$(< .iterminal/credentials/runtime-rpc.secret)"
 
 ## Issue least-privilege grants
 
-The issuer reads the secret only from `ITERM_RPC_AUTH_SECRET` and writes one token to stdout. It rejects unknown or duplicate operations, mixed Actor scopes, malformed secrets, and TTLs longer than 30 days. Default TTL is one hour.
+The issuer reads the secret only from `ITERM_RPC_AUTH_SECRET` and writes one token to stdout. That
+stdout stream is an explicit credential channel, not ordinary process telemetry: pipe it directly
+into a repository-ignored credential file, keep shell tracing disabled, apply mode `0600`, and never
+run the issuer as a service whose stdout is collected as logs. The issued and verified result objects
+do not enumerate the token during ordinary JSON serialization. The issuer rejects unknown or
+duplicate operations, mixed Actor scopes, malformed secrets, and TTLs longer than 30 days. Default
+TTL is one hour.
 
 An MCP Agent uses an exact Actor scope. The bridge environment must exactly match the issued id, principal, and client:
 
@@ -98,6 +106,22 @@ For an authenticated server request:
 6. only then call the Runtime gateway and existing Application capability, Input Policy, Guard, freshness, idempotency, and fencing checks.
 
 Authentication failures use one generic `POLICY_DENIED: Runtime RPC authorization failed` response. This avoids turning detailed validation errors into a token oracle. Invalid public request structure remains `INVALID_REQUEST` where it can be classified before credential verification.
+
+## Operational diagnostic boundary
+
+The configured `UnixRuntimeClient` authorization and a server's verified bearer live in
+non-enumerable/private storage. Only the verified request-local Router forwarding path can recover a
+bearer for the next Unix-socket hop. Unknown server exceptions and schema failures use fixed RPC
+messages. Transport errors retain operation, request ID, delivery certainty, and at most a bounded
+safe error code; they do not copy dependency `Error.message`, `cause`, socket request bytes, or the
+authorization value.
+
+PostgreSQL and RabbitMQ supervisors apply the same ordinary-telemetry rule before publishing
+connection state. RabbitMQ publisher failures are normalized before the Outbox relay can persist a
+retry reason. Operators still receive component, endpoint index, attempt, retry delay, and a
+closed-allowlist network/domain code or PostgreSQL SQLSTATE where one exists. Raw driver diagnostics require a future explicit
+secure debug sink; stderr, public state callbacks, Runtime RPC errors, durable retry facts, and
+verification reports are not that sink.
 
 ## Rotation and limits
 

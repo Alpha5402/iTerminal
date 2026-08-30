@@ -89,12 +89,12 @@ export interface RuntimeRpcAuthentication {
 
 export interface VerifiedRuntimeRpcGrant {
   readonly claims: RuntimeRpcGrantClaims;
-  readonly token: string;
 }
 
 export type RuntimeRpcEnvironment = Readonly<Record<string, string | undefined>>;
 
 const verifiedGrantContext = new AsyncLocalStorage<VerifiedRuntimeRpcGrant>();
+const verifiedGrantTokens = new WeakMap<VerifiedRuntimeRpcGrant, string>();
 
 export function parseRuntimeRpcSecret(value: string): Uint8Array {
   if (!BASE64URL.test(value)) {
@@ -180,7 +180,9 @@ export function verifyRuntimeRpcGrant(
     if (claims.issuedAt > now + CLOCK_SKEW_SECONDS || claims.expiresAt <= now) {
       throw new Error("time");
     }
-    return { claims, token };
+    const grant: VerifiedRuntimeRpcGrant = { claims };
+    verifiedGrantTokens.set(grant, token);
+    return grant;
   } catch {
     throw authorizationFailed();
   }
@@ -227,7 +229,17 @@ export function runWithVerifiedRuntimeRpcGrant<T>(
 }
 
 export function currentRuntimeRpcGrantToken(): string | undefined {
-  return verifiedGrantContext.getStore()?.token;
+  const grant = verifiedGrantContext.getStore();
+  return grant === undefined ? undefined : runtimeRpcGrantToken(grant);
+}
+
+/** Explicitly reserved for forwarding the active verified grant to another Runtime RPC hop. */
+export function runtimeRpcGrantToken(grant: VerifiedRuntimeRpcGrant): string {
+  const token = verifiedGrantTokens.get(grant);
+  if (token === undefined) {
+    throw new RuntimeError("POLICY_DENIED", "Runtime RPC authorization context is invalid");
+  }
+  return token;
 }
 
 function parseClaims(value: unknown): RuntimeRpcGrantClaims {

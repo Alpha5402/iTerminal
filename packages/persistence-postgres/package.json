@@ -8,6 +8,7 @@
     "@iterminal/application": "workspace:*",
     "@iterminal/domain": "workspace:*",
     "@iterminal/messaging": "workspace:*",
+    "@iterminal/observability": "workspace:*",
     "pg": "^8.16.3"
   },
   "devDependencies": {

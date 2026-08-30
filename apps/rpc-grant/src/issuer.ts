@@ -52,10 +52,14 @@ export function issueRuntimeRpcGrant(
   if (secretValue === undefined || secretValue.length === 0) {
     throw invalid("ITERM_RPC_AUTH_SECRET is required");
   }
-  return {
-    claims,
-    token: signRuntimeRpcGrant(parseRuntimeRpcSecret(secretValue), claims),
-  };
+  const issued = { claims } as IssuedRuntimeRpcGrant;
+  Object.defineProperty(issued, "token", {
+    configurable: false,
+    enumerable: false,
+    value: signRuntimeRpcGrant(parseRuntimeRpcSecret(secretValue), claims),
+    writable: false,
+  });
+  return issued;
 }
 
 function actorScope(
@@ -100,7 +104,7 @@ function operationsOption(options: ReadonlyMap<string, string>): readonly Runtim
     throw invalid("--operations cannot contain duplicates");
   }
   for (const value of values) {
-    if (!operationSet.has(value)) throw invalid(`Unsupported Runtime RPC operation: ${value}`);
+    if (!operationSet.has(value)) throw invalid("Unsupported Runtime RPC operation");
   }
   return values.sort() as RuntimeOperation[];
 }
@@ -114,7 +118,7 @@ function parseOptions(arguments_: readonly string[]): ReadonlyMap<string, string
       throw invalid("Grant options must be provided as --name value pairs");
     }
     const name = flag.slice(2);
-    if (!KNOWN_OPTIONS.has(name)) throw invalid(`Unknown grant option: --${name}`);
+    if (!KNOWN_OPTIONS.has(name)) throw invalid("Unknown Runtime RPC grant option");
     if (options.has(name)) throw invalid(`Duplicate grant option: --${name}`);
     if (value.length === 0) throw invalid(`--${name} cannot be empty`);
     options.set(name, value);

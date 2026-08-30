@@ -1,3 +1,4 @@
+import { operationalErrorMessage } from "@iterminal/observability";
 import { configuredPostgresConnectionTarget } from "@iterminal/persistence-postgres";
 
 import { runArtifactStorageMaintenance } from "./maintenance.js";
@@ -29,7 +30,7 @@ try {
   process.stdout.write(`${JSON.stringify(result)}\n`);
 } catch (error) {
   process.stderr.write(
-    `${error instanceof Error ? error.message : "Artifact storage maintenance failed"}\n`,
+    `${operationalErrorMessage(error, "Artifact storage maintenance failed")}\n`,
   );
   process.exitCode = 1;
 }

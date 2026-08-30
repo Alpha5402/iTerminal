@@ -10,6 +10,7 @@ import {
   type ExecutionReadyMessage,
   type ExecutionReadyProcessor,
 } from "@iterminal/messaging";
+import { operationalErrorMessage } from "@iterminal/observability";
 import amqp, {
   type Channel,
   type ChannelModel,
@@ -355,8 +356,7 @@ export class SupervisedRabbitMqPublisher implements DurableMessagePublisher {
       this.#lastError = undefined;
       this.#nextConnectAt = 0;
     } catch (error) {
-      await this.#invalidate(publisher, error);
-      throw error;
+      throw await this.#invalidate(publisher, error);
     }
   }
 
@@ -391,19 +391,24 @@ export class SupervisedRabbitMqPublisher implements DurableMessagePublisher {
       notifyConnectionState(this.#reconnect, { attempt, endpointIndex, state: "CONNECTED" });
       return publisher;
     } catch (error) {
-      this.#recordFailure(error, attempt, endpointIndex);
-      throw error;
+      throw this.#recordFailure(error, attempt, endpointIndex, "RabbitMQ connection failed");
     }
   }
 
-  async #invalidate(publisher: RabbitMqPublisher, error: unknown): Promise<void> {
+  async #invalidate(publisher: RabbitMqPublisher, error: unknown): Promise<Error> {
     if (this.#publisher === publisher) this.#publisher = undefined;
-    this.#recordFailure(error, this.#attempt + 1, this.#endpointIndex);
+    const failure = this.#recordFailure(
+      error,
+      this.#attempt + 1,
+      this.#endpointIndex,
+      "RabbitMQ publish failed",
+    );
     await publisher.close().catch(() => undefined);
+    return failure;
   }
 
-  #recordFailure(error: unknown, attempt: number, endpointIndex: number): void {
-    const failure = asError(error);
+  #recordFailure(error: unknown, attempt: number, endpointIndex: number, fallback: string): Error {
+    const failure = new Error(operationalErrorMessage(error, fallback));
     this.#attempt = attempt;
     this.#lastError = failure;
     const retryInMilliseconds = reconnectDelay(attempt, this.#reconnect);
@@ -416,6 +421,7 @@ export class SupervisedRabbitMqPublisher implements DurableMessagePublisher {
       retryInMilliseconds,
       state: "DISCONNECTED",
     });
+    return failure;
   }
 }
 
@@ -498,7 +504,10 @@ export class SupervisedRabbitMqExecutionReadyConsumer {
         notifyConnectionState(this.#reconnect, {
           attempt: 1,
           endpointIndex,
-          error: closeError?.message ?? "RabbitMQ consumer connection closed",
+          error:
+            closeError === undefined
+              ? "RabbitMQ consumer connection closed"
+              : operationalErrorMessage(closeError, "RabbitMQ consumer connection failed"),
           retryInMilliseconds,
           state: "DISCONNECTED",
         });
@@ -510,7 +519,7 @@ export class SupervisedRabbitMqExecutionReadyConsumer {
         notifyConnectionState(this.#reconnect, {
           attempt,
           endpointIndex,
-          error: asError(error).message,
+          error: operationalErrorMessage(error, "RabbitMQ consumer connection failed"),
           retryInMilliseconds,
           state: "DISCONNECTED",
         });

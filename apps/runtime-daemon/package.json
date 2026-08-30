@@ -7,6 +7,7 @@
   "dependencies": {
     "@iterminal/application": "workspace:*",
     "@iterminal/executor-pty": "workspace:*",
+    "@iterminal/observability": "workspace:*",
     "@iterminal/persistence-postgres": "workspace:*",
     "@iterminal/runtime-memory": "workspace:*",
     "@iterminal/runtime-rpc": "workspace:*",

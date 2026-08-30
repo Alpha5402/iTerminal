@@ -58,6 +58,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0052](./0052-bounded-pty-output-event-coalescing.md)                    | Coalesce PTY callbacks without crossing truth boundaries   | Accepted for M10.6       |
 | [0053](./0053-bounded-cursor-safe-event-retention.md)                    | Delete bounded Event prefixes with explicit cursor resync  | Accepted for M10.7       |
 | [0054](./0054-loopback-console-ingress-boundary.md)                      | Bind Console requests and streams to one exact authority   | Accepted for M10.8       |
+| [0055](./0055-credential-safe-operational-diagnostics.md)                | Keep grants and connection credentials out of diagnostics  | Accepted for M10.9       |
 
 Statuses:
 
