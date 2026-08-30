@@ -48,6 +48,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0042](./0042-expired-owner-heartbeat-recovery.md)                | Reject expired heartbeat before full Runtime recovery      | Accepted for M9.14       |
 | [0043](./0043-capacity-weighted-runtime-placement.md)             | Weight Runtime placement by declared relative capacity     | Accepted for M9.15       |
 | [0044](./0044-postgres-quorum-primary-failover.md)                | Follow an externally promoted PostgreSQL primary           | Accepted for M9.16       |
+| [0045](./0045-host-local-process-guardian.md)                     | Reclaim unreachable Runtime PTY process trees on-host      | Accepted for M9.17       |
 
 Statuses:
 

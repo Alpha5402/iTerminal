@@ -33,24 +33,27 @@ M9.8 gives root `session.create` its own global idempotency key and durable plac
 
 M9.16 accepts an ordered PostgreSQL URL list but does not implement database election. A new pool connection is usable only when PostgreSQL reports that recovery has ended and transactions are read-write. An endpoint/timeout failure retires that exact connection and advances only the next supervisor attempt; the failed SQL or transaction is never replayed automatically. `endpoint_index` is diagnostic and contains no URL or credential. The external database control plane must fence the former primary before promotion.
 
-| Environment variable                  | Default                         |
-| ------------------------------------- | ------------------------------- |
-| `ITERM_RUNTIME_OWNER_ID`              | derived from the Runtime socket |
-| `ITERM_RUNTIME_OWNER_INSTANCE_ID`     | random boot-unique UUID         |
-| `ITERM_RUNTIME_CAPACITY_WEIGHT`       | `1`                             |
-| `ITERM_RUNTIME_OWNER_LEASE_MS`        | `15000`                         |
-| `ITERM_SESSION_LEASE_MS`              | `15000`                         |
-| `ITERM_RUNTIME_DRAIN_TIMEOUT_MS`      | `5000`                          |
-| `ITERM_DATABASE_HEALTH_CHECK_MS`      | `1000`                          |
-| `ITERM_DATABASE_RECONNECT_INITIAL_MS` | `250`                           |
-| `ITERM_DATABASE_RECONNECT_MAX_MS`     | `30000`                         |
-| `ITERM_DATABASE_STATEMENT_TIMEOUT_MS` | `30000`                         |
-| `ITERM_DATABASE_URLS`                 | unset; ordered URL list         |
-| `ITERM_ACTOR_ACTION_RATE_LIMIT`       | `120`                           |
-| `ITERM_SESSION_ACTION_RATE_LIMIT`     | `240`                           |
-| `ITERM_ACTION_RATE_LIMIT_WINDOW_MS`   | `1000`                          |
+M9.17 starts one host-local Process Guardian for every durable Runtime. Shell registration completes before Session READY. Only a successful owner heartbeat plus Session-lease renewal rearms the Guardian; Runtime IPC loss or watchdog expiry freezes and terminates the registered PPID/PTY process set. PostgreSQL independently expires frozen idle transactions within the same lease budget. A replacement still creates a distinct PTY after `BROKEN/UNKNOWN` reconciliation. This is not a remotely callable signal API or whole-host fencing.
 
-Capacity weight is an integer from 1 through 1000 and expresses only the owner's relative share of new root Sessions. The owner and Session leases must each exceed two database health-check intervals. Session expiry is capped at the current owner lease expiry. The drain timeout is one shared budget for pending root-create settlement and accepted RPC response drain; expiry proceeds to Session closure without reassigning exact-owner work. The production Runtime Router uses the health/reconnect/statement-timeout values for degraded startup and recovery. These settings are valid only with exactly one of `ITERM_DATABASE_URL` or `ITERM_DATABASE_URLS`; the latter is comma-separated and ordered. Read-only standbys are rejected until an external control plane promotes one.
+| Environment variable                          | Default                         |
+| --------------------------------------------- | ------------------------------- |
+| `ITERM_RUNTIME_OWNER_ID`                      | derived from the Runtime socket |
+| `ITERM_RUNTIME_OWNER_INSTANCE_ID`             | random boot-unique UUID         |
+| `ITERM_RUNTIME_CAPACITY_WEIGHT`               | `1`                             |
+| `ITERM_RUNTIME_OWNER_LEASE_MS`                | `15000`                         |
+| `ITERM_SESSION_LEASE_MS`                      | `15000`                         |
+| `ITERM_RUNTIME_DRAIN_TIMEOUT_MS`              | `5000`                          |
+| `ITERM_DATABASE_HEALTH_CHECK_MS`              | `1000`                          |
+| `ITERM_DATABASE_RECONNECT_INITIAL_MS`         | `250`                           |
+| `ITERM_DATABASE_RECONNECT_MAX_MS`             | `30000`                         |
+| `ITERM_DATABASE_STATEMENT_TIMEOUT_MS`         | `30000`                         |
+| `ITERM_DATABASE_URLS`                         | unset; ordered URL list         |
+| `ITERM_RUNTIME_GUARDIAN_TERMINATION_GRACE_MS` | `100`                           |
+| `ITERM_ACTOR_ACTION_RATE_LIMIT`               | `120`                           |
+| `ITERM_SESSION_ACTION_RATE_LIMIT`             | `240`                           |
+| `ITERM_ACTION_RATE_LIMIT_WINDOW_MS`           | `1000`                          |
+
+Capacity weight is an integer from 1 through 1000 and expresses only the owner's relative share of new root Sessions. The Session lease must exceed two database health-check intervals; the owner lease must additionally cover the Guardian termination grace. Session expiry is capped at the current owner lease expiry. The drain timeout is one shared budget for pending root-create settlement and accepted RPC response drain; expiry proceeds to Session closure without reassigning exact-owner work. The production Runtime Router uses the health/reconnect/statement-timeout values for degraded startup and recovery. These settings are valid only with exactly one of `ITERM_DATABASE_URL` or `ITERM_DATABASE_URLS`; the latter is comma-separated and ordered. Read-only standbys are rejected until an external control plane promotes one.
 
 ## Actor configuration
 

@@ -85,6 +85,7 @@ jobs:
       - run: pnpm test:m8:network
       - run: bash scripts/run-m8-quorum-test.sh
       - run: bash scripts/run-m9-postgres-quorum-test.sh
+      - run: pnpm test:m9:reclamation
       - if: always()
         run: docker compose -f infra/compose/m8-rabbitmq-cluster.yml down -v
       - if: always()

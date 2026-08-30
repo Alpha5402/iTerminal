@@ -67,6 +67,7 @@ function ownerColumns(alias: string, includeActiveSessionCount = true): string {
 
 const OWNER_RETURNING = ownerColumns("runtime_workers");
 export interface PostgresRuntimeOwnerRegistryOptions {
+  readonly idleTransactionTimeoutMilliseconds?: number;
   readonly statementTimeoutMilliseconds?: number;
 }
 
@@ -82,8 +83,13 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
       options.statementTimeoutMilliseconds ?? 30_000,
       "statementTimeoutMilliseconds",
     );
+    const idleTransactionTimeoutMilliseconds = positiveInteger(
+      options.idleTransactionTimeoutMilliseconds ?? statementTimeoutMilliseconds,
+      "idleTransactionTimeoutMilliseconds",
+    );
     this.#endpoints = createPostgresEndpointPool(connectionString, {
       connectionTimeoutMillis: 5_000,
+      idle_in_transaction_session_timeout: idleTransactionTimeoutMilliseconds,
       max: 5,
       query_timeout: statementTimeoutMilliseconds,
       statement_timeout: statementTimeoutMilliseconds,

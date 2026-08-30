@@ -3,6 +3,7 @@ import {
   startRuntimeDaemon,
   type RuntimeDaemonDrainState,
   type RuntimeDaemonDurabilityState,
+  type RuntimeDaemonGuardianState,
 } from "./server.js";
 import { configuredPostgresConnectionTarget } from "@iterminal/persistence-postgres";
 
@@ -35,6 +36,9 @@ const databaseReconnectInitialMilliseconds = optionalPositiveInteger(
 const databaseReconnectMaxMilliseconds = optionalPositiveInteger("ITERM_DATABASE_RECONNECT_MAX_MS");
 const databaseHealthCheckMilliseconds = optionalPositiveInteger("ITERM_DATABASE_HEALTH_CHECK_MS");
 const drainTimeoutMilliseconds = optionalPositiveInteger("ITERM_RUNTIME_DRAIN_TIMEOUT_MS");
+const processGuardianTerminationGraceMilliseconds = optionalPositiveInteger(
+  "ITERM_RUNTIME_GUARDIAN_TERMINATION_GRACE_MS",
+);
 const daemon = await startRuntimeDaemon({
   socketPath,
   ...(actionRateLimitWindowMilliseconds === undefined ? {} : { actionRateLimitWindowMilliseconds }),
@@ -56,14 +60,24 @@ const daemon = await startRuntimeDaemon({
   ...(ownerId === undefined ? {} : { ownerId }),
   ...(ownerInstanceId === undefined ? {} : { ownerInstanceId }),
   ...(ownerLeaseMilliseconds === undefined ? {} : { ownerLeaseMilliseconds }),
+  ...(processGuardianTerminationGraceMilliseconds === undefined
+    ? {}
+    : { processGuardianTerminationGraceMilliseconds }),
   ...(sessionLeaseMilliseconds === undefined ? {} : { sessionLeaseMilliseconds }),
   ...(sessionActionRateLimit === undefined ? {} : { sessionActionRateLimit }),
   onDrainState: reportDrainState,
   onDurabilityState: reportDurabilityState,
+  onProcessGuardianState: reportProcessGuardianState,
 });
 process.stderr.write(
   `iTerminal Runtime daemon listening at ${daemon.socketPath} (${daemon.durable ? `postgres:${daemon.durabilityState().phase.toLowerCase()} owner_epoch=${daemon.ownerRegistration()?.epoch.toString() ?? "pending"}` : "memory"})\n`,
 );
+const processGuardian = daemon.processGuardian();
+if (processGuardian !== undefined) {
+  process.stderr.write(
+    `iTerminal Runtime Process Guardian ready pid=${processGuardian.pid?.toString() ?? "pending"} timeout_ms=${processGuardian.timeoutMilliseconds.toString()}\n`,
+  );
+}
 
 let closing = false;
 const shutdown = async (signal: string): Promise<void> => {
@@ -121,5 +135,17 @@ function reportDurabilityState(state: RuntimeDaemonDurabilityState): void {
 function reportDrainState(state: RuntimeDaemonDrainState): void {
   process.stderr.write(
     `iTerminal Runtime drain ${state.phase.toLowerCase()} pending_session_creations=${state.pendingSessionCreations.toString()}\n`,
+  );
+}
+
+function reportProcessGuardianState(state: RuntimeDaemonGuardianState): void {
+  if (state.state === "UNAVAILABLE") {
+    process.stderr.write(
+      `iTerminal Runtime Process Guardian unavailable error=${JSON.stringify(state.error ?? "unknown")}\n`,
+    );
+    return;
+  }
+  process.stderr.write(
+    `iTerminal Runtime Process Guardian reclaimed reason=${state.reason ?? "unknown"} registered_sessions=${state.registeredSessions?.toString() ?? "0"} process_count=${state.processCount?.toString() ?? "0"}\n`,
   );
 }

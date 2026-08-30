@@ -7,7 +7,11 @@ import {
   type RuntimeServiceOptions,
 } from "@iterminal/application";
 import { RuntimeError } from "@iterminal/domain";
-import { PtyShellExecutorFactory } from "@iterminal/executor-pty";
+import {
+  PtyProcessGuardian,
+  PtyShellExecutorFactory,
+  type PtyProcessGuardianEvent,
+} from "@iterminal/executor-pty";
 import {
   PostgresRuntimeDurability,
   PostgresRuntimeOwnerRegistry,
@@ -43,7 +47,16 @@ export interface RuntimeDaemonHandle extends RuntimeRpcServerHandle {
   readonly runtime: RuntimeService;
   durabilityState(): RuntimeDaemonDurabilityState;
   ownerRegistration(): RuntimeOwnerRecord | undefined;
+  processGuardian(): Readonly<{ pid: number | undefined; timeoutMilliseconds: number }> | undefined;
   waitUntilReady(): Promise<void>;
+}
+
+export interface RuntimeDaemonGuardianState {
+  readonly error?: string;
+  readonly processCount?: number;
+  readonly reason?: PtyProcessGuardianEvent["reason"];
+  readonly registeredSessions?: number;
+  readonly state: "RECLAIMED" | "UNAVAILABLE";
 }
 
 const DEFAULT_OWNER_LEASE_MILLISECONDS = 15_000;
@@ -51,6 +64,7 @@ const DEFAULT_SESSION_LEASE_MILLISECONDS = 15_000;
 const DEFAULT_DATABASE_HEALTH_CHECK_MILLISECONDS = 1_000;
 const DEFAULT_DRAIN_TIMEOUT_MILLISECONDS = 5_000;
 const DEFAULT_CAPACITY_WEIGHT = 1;
+const DEFAULT_GUARDIAN_TERMINATION_GRACE_MILLISECONDS = 100;
 
 export async function startRuntimeDaemon(options: {
   readonly actionRateLimitWindowMilliseconds?: number;
@@ -69,6 +83,7 @@ export async function startRuntimeDaemon(options: {
   readonly drainTimeoutMilliseconds?: number;
   readonly onDrainState?: (state: RuntimeDaemonDrainState) => void;
   readonly onDurabilityState?: (state: RuntimeDaemonDurabilityState) => void;
+  readonly onProcessGuardianState?: (state: RuntimeDaemonGuardianState) => void;
   readonly outboxMaxPending?: number;
   readonly ownerId?: string;
   readonly ownerInstanceId?: string;
@@ -76,6 +91,7 @@ export async function startRuntimeDaemon(options: {
   readonly sessionLeaseMilliseconds?: number;
   readonly sessionActionRateLimit?: number;
   readonly socketPath: string;
+  readonly processGuardianTerminationGraceMilliseconds?: number;
   readonly runtime?: RuntimeService;
 }): Promise<RuntimeDaemonHandle> {
   if (!isAbsolute(options.socketPath)) {
@@ -99,6 +115,7 @@ export async function startRuntimeDaemon(options: {
       options.onDrainState !== undefined ||
       options.ownerInstanceId !== undefined ||
       options.ownerLeaseMilliseconds !== undefined ||
+      options.processGuardianTerminationGraceMilliseconds !== undefined ||
       options.sessionActionRateLimit !== undefined ||
       options.sessionLeaseMilliseconds !== undefined)
   ) {
@@ -128,6 +145,8 @@ export async function startRuntimeDaemon(options: {
       options.outboxMaxPending !== undefined ||
       options.ownerInstanceId !== undefined ||
       options.ownerLeaseMilliseconds !== undefined ||
+      options.onProcessGuardianState !== undefined ||
+      options.processGuardianTerminationGraceMilliseconds !== undefined ||
       options.sessionActionRateLimit !== undefined ||
       options.sessionLeaseMilliseconds !== undefined)
   ) {
@@ -137,37 +156,6 @@ export async function startRuntimeDaemon(options: {
     );
   }
   const capacityWeight = boundedCapacityWeight(options.capacityWeight ?? DEFAULT_CAPACITY_WEIGHT);
-  const durability =
-    options.databaseUrl === undefined
-      ? undefined
-      : new PostgresRuntimeDurability(options.databaseUrl, {
-          ...(options.actionRateLimitWindowMilliseconds === undefined
-            ? {}
-            : { actionRateLimitWindowMilliseconds: options.actionRateLimitWindowMilliseconds }),
-          ...(options.actorActionRateLimit === undefined
-            ? {}
-            : { actorActionRateLimit: options.actorActionRateLimit }),
-          ...(options.beforeAcceptExecuteCommit === undefined
-            ? {}
-            : { beforeAcceptExecuteCommit: options.beforeAcceptExecuteCommit }),
-          ...(options.databaseStatementTimeoutMilliseconds === undefined
-            ? {}
-            : { statementTimeoutMilliseconds: options.databaseStatementTimeoutMilliseconds }),
-          ...(options.outboxMaxPending === undefined
-            ? {}
-            : { maxPendingOutbox: options.outboxMaxPending }),
-          ...(options.sessionActionRateLimit === undefined
-            ? {}
-            : { sessionActionRateLimit: options.sessionActionRateLimit }),
-        });
-  const ownerRegistry =
-    options.databaseUrl === undefined
-      ? undefined
-      : new PostgresRuntimeOwnerRegistry(options.databaseUrl, {
-          ...(options.databaseStatementTimeoutMilliseconds === undefined
-            ? {}
-            : { statementTimeoutMilliseconds: options.databaseStatementTimeoutMilliseconds }),
-        });
   const ownerId = options.ownerId ?? runtimeOwnerIdForSocket(options.socketPath);
   const ownerInstanceId = options.ownerInstanceId ?? `runtime_${randomUUID()}`;
   const ownerLeaseMilliseconds = positiveInteger(
@@ -186,25 +174,117 @@ export async function startRuntimeDaemon(options: {
     options.drainTimeoutMilliseconds ?? DEFAULT_DRAIN_TIMEOUT_MILLISECONDS,
     "drainTimeoutMilliseconds",
   );
+  const processGuardianTerminationGraceMilliseconds = positiveInteger(
+    options.processGuardianTerminationGraceMilliseconds ??
+      DEFAULT_GUARDIAN_TERMINATION_GRACE_MILLISECONDS,
+    "processGuardianTerminationGraceMilliseconds",
+  );
   if (
-    ownerRegistry !== undefined &&
-    (ownerLeaseMilliseconds <= databaseHealthCheckMilliseconds * 2 ||
+    options.databaseUrl !== undefined &&
+    (ownerLeaseMilliseconds <=
+      databaseHealthCheckMilliseconds * 2 + processGuardianTerminationGraceMilliseconds ||
       sessionLeaseMilliseconds <= databaseHealthCheckMilliseconds * 2)
   ) {
-    await Promise.all([durability?.close(), ownerRegistry.close()]);
     throw new RuntimeError(
       "INVALID_REQUEST",
-      "Runtime owner and Session leases must exceed two database health-check intervals",
+      "Runtime owner lease must also cover the Process Guardian grace period",
       {
         databaseHealthCheckMilliseconds,
         ownerLeaseMilliseconds,
+        processGuardianTerminationGraceMilliseconds,
         sessionLeaseMilliseconds,
       },
     );
   }
+  const processGuardianTimeoutMilliseconds =
+    options.databaseUrl === undefined
+      ? undefined
+      : ownerLeaseMilliseconds -
+        databaseHealthCheckMilliseconds -
+        processGuardianTerminationGraceMilliseconds;
+  const idleTransactionTimeoutMilliseconds = Math.min(
+    options.databaseStatementTimeoutMilliseconds ?? 30_000,
+    processGuardianTimeoutMilliseconds ?? 30_000,
+  );
+  const durability =
+    options.databaseUrl === undefined
+      ? undefined
+      : new PostgresRuntimeDurability(options.databaseUrl, {
+          ...(options.actionRateLimitWindowMilliseconds === undefined
+            ? {}
+            : { actionRateLimitWindowMilliseconds: options.actionRateLimitWindowMilliseconds }),
+          ...(options.actorActionRateLimit === undefined
+            ? {}
+            : { actorActionRateLimit: options.actorActionRateLimit }),
+          ...(options.beforeAcceptExecuteCommit === undefined
+            ? {}
+            : { beforeAcceptExecuteCommit: options.beforeAcceptExecuteCommit }),
+          idleTransactionTimeoutMilliseconds,
+          ...(options.databaseStatementTimeoutMilliseconds === undefined
+            ? {}
+            : { statementTimeoutMilliseconds: options.databaseStatementTimeoutMilliseconds }),
+          ...(options.outboxMaxPending === undefined
+            ? {}
+            : { maxPendingOutbox: options.outboxMaxPending }),
+          ...(options.sessionActionRateLimit === undefined
+            ? {}
+            : { sessionActionRateLimit: options.sessionActionRateLimit }),
+        });
+  const ownerRegistry =
+    options.databaseUrl === undefined
+      ? undefined
+      : new PostgresRuntimeOwnerRegistry(options.databaseUrl, {
+          idleTransactionTimeoutMilliseconds,
+          ...(options.databaseStatementTimeoutMilliseconds === undefined
+            ? {}
+            : { statementTimeoutMilliseconds: options.databaseStatementTimeoutMilliseconds }),
+        });
+  const runtimeForGuardian: { current?: RuntimeService } = {};
+  const processGuardian =
+    processGuardianTimeoutMilliseconds === undefined
+      ? undefined
+      : new PtyProcessGuardian({
+          leaseTimeoutMilliseconds: processGuardianTimeoutMilliseconds,
+          terminationGraceMilliseconds: processGuardianTerminationGraceMilliseconds,
+          onEvent: (event) => {
+            reportProcessGuardianState(options.onProcessGuardianState, {
+              processCount: event.processCount,
+              reason: event.reason,
+              registeredSessions: event.registeredSessions,
+              state: "RECLAIMED",
+            });
+            if (event.reason === "lease_timeout") {
+              runtimeForGuardian.current?.reportDurabilityUnavailable(
+                new RuntimeError(
+                  "OWNER_LEASE_LOST",
+                  "Host-local Process Guardian reclaimed an unrenewed Runtime owner",
+                  {
+                    processCount: event.processCount,
+                    registeredSessions: event.registeredSessions,
+                  },
+                  false,
+                ),
+              );
+            }
+          },
+          onFailure: (error) => {
+            reportProcessGuardianState(options.onProcessGuardianState, {
+              error: error.message,
+              state: "UNAVAILABLE",
+            });
+            runtimeForGuardian.current?.reportDurabilityUnavailable(
+              new RuntimeError(
+                "RUNTIME_UNAVAILABLE",
+                "Host-local Process Guardian is unavailable",
+                { reason: error.message },
+                true,
+              ),
+            );
+          },
+        });
   const runtime =
     options.runtime ??
-    new RuntimeService(new MemoryRuntimeStore(), new PtyShellExecutorFactory(), {
+    new RuntimeService(new MemoryRuntimeStore(), new PtyShellExecutorFactory(processGuardian), {
       ...(durability === undefined ? {} : { durability }),
       ...(options.checkpointEnvironmentKeys === undefined
         ? {}
@@ -217,6 +297,7 @@ export async function startRuntimeDaemon(options: {
       screenProjectionFactory: new XtermScreenProjectionFactory(),
       sessionLeaseMilliseconds,
     });
+  runtimeForGuardian.current = runtime;
   let rpc: RuntimeRpcServerHandle | undefined;
   let durabilityState: RuntimeDaemonDurabilityState =
     durability === undefined
@@ -265,6 +346,16 @@ export async function startRuntimeDaemon(options: {
                 registry: ownerRegistry,
               },
             }),
+        ...(processGuardian === undefined
+          ? {}
+          : {
+              onOwnerLeaseConfirmed: (remainingLeaseMilliseconds: number) =>
+                processGuardian.renew(
+                  remainingLeaseMilliseconds -
+                    databaseHealthCheckMilliseconds -
+                    processGuardianTerminationGraceMilliseconds,
+                ),
+            }),
         healthCheckMilliseconds: databaseHealthCheckMilliseconds,
         ...(options.databaseReconnectInitialMilliseconds === undefined
           ? {}
@@ -280,14 +371,15 @@ export async function startRuntimeDaemon(options: {
     }
   } catch (error) {
     await supervisor?.close().catch(() => undefined);
-    await rpc?.close().catch(() => undefined);
     await durability?.close().catch(() => undefined);
     await ownerRegistry?.close().catch(() => undefined);
+    await processGuardian?.close().catch(() => undefined);
     throw error;
   }
   if (rpc === undefined) {
     await durability?.close().catch(() => undefined);
     await ownerRegistry?.close().catch(() => undefined);
+    await processGuardian?.close().catch(() => undefined);
     throw new RuntimeError("RUNTIME_UNAVAILABLE", "Runtime RPC server did not start");
   }
   const rpcHandle = rpc;
@@ -296,6 +388,13 @@ export async function startRuntimeDaemon(options: {
     durable: durability !== undefined,
     durabilityState: () => durabilityState,
     ownerRegistration: () => supervisor?.ownerRegistration(),
+    processGuardian: () =>
+      processGuardian === undefined || processGuardianTimeoutMilliseconds === undefined
+        ? undefined
+        : {
+            pid: processGuardian.pid,
+            timeoutMilliseconds: processGuardianTimeoutMilliseconds,
+          },
     runtime,
     socketPath: rpcHandle.socketPath,
     close: () => {
@@ -320,6 +419,7 @@ export async function startRuntimeDaemon(options: {
         drainTimeoutMilliseconds,
         ownerLeaseMilliseconds,
         options.onDrainState,
+        processGuardian,
       ).finally(() => {
         closed = true;
       });
@@ -354,6 +454,7 @@ async function closeDaemon(
   drainTimeoutMilliseconds: number,
   ownerLeaseMilliseconds: number,
   onDrainState: ((state: RuntimeDaemonDrainState) => void) | undefined,
+  processGuardian: PtyProcessGuardian | undefined,
 ): Promise<void> {
   const errors: unknown[] = [];
   const ownerRegistration = supervisor?.ownerRegistration();
@@ -419,8 +520,20 @@ async function closeDaemon(
   }
   await durability?.close().catch((error: unknown) => errors.push(error));
   await ownerRegistry?.close().catch((error: unknown) => errors.push(error));
+  await processGuardian?.close().catch((error: unknown) => errors.push(error));
   if (errors.length > 0) {
     throw new AggregateError(errors, "Runtime daemon did not close cleanly");
+  }
+}
+
+function reportProcessGuardianState(
+  report: ((state: RuntimeDaemonGuardianState) => void) | undefined,
+  state: RuntimeDaemonGuardianState,
+): void {
+  try {
+    report?.(state);
+  } catch {
+    // Diagnostics must not change Process Guardian safety behavior.
   }
 }
 

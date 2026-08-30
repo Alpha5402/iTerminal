@@ -1,10 +1,10 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
-> 状态：Implementation Baseline v6.16 — M5/M6.6/M7.2 已通过 Browser Human L3；M6.7、M7.1 与 M9.1–M9.16 owner/routing/fencing/weighted-placement/rate-limit/process/partition/Router-recovery/crash/bounded-root-idempotency/drain-settlement/rolling-replacement/CPU-starvation/PostgreSQL-primary-failover 路径已通过 real PTY/PostgreSQL L2；M4 autonomous-model L3 仍待显式授权
+> 状态：Implementation Baseline v6.17 — M5/M6.6/M7.2 已通过 Browser Human L3；M6.7、M7.1 与 M9.1–M9.17 owner/routing/fencing/weighted-placement/rate-limit/process/partition/Router-recovery/crash/bounded-root-idempotency/drain-settlement/rolling-replacement/CPU-starvation/PostgreSQL-primary-failover/host-local-reclamation 路径已通过 real PTY/PostgreSQL L2；M4 autonomous-model L3 仍待显式授权
 >
 > 基线日期：2026-08-30
 >
-> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live Runtime 已接入 PostgreSQL write-ahead journal、bounded ingest loop、versioned dynamic ANSI/VT Virtual Screen，以及 generation-scoped Input Policy/Interaction Guard。M5/M6.6 增加 loopback Human Console 与受控 ResizeAction：真实无头 Chrome Human 和 official MCP SDK Agent 已在同一 PostgreSQL/zsh Session 中共享 cwd/env/Python REPL，并分别驱动同一 PTY 的 SIGWINCH。M6.7 增加不可作为安全事实的 exact-generation `terminal_state`。M7.1 增加 versioned Shell Checkpoint/fork，M7.2 增加 same-owner durable `BROKEN` rebuild projection 与 Browser Human 显式重建。M8.9 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放、DB/AMQP 恢复与真实三节点 RabbitMQ quorum leader failover。M9.1–M9.15 已完成 owner registry、central routing、Session fencing、capacity-weighted placement、rate limit、独立进程/分区/crash/retention/drain/rolling/CPU-starvation 路径。M9.16 新增 primary-only ordered PostgreSQL endpoints：真实三节点同步复制在旧 primary 失去 `ANY 1` 多数时有界 fail closed，外部先停止旧 primary、提升 standby1 并将 standby2 重挂为 quorum follower 后，同一 Runtime/Router PID 恢复，新 PTY 可用且旧 generation 保持 `BROKEN/UNKNOWN`。自动数据库选主、任意 split-brain 防护、remote process reclamation 与 long-duration soak 仍未实现。Autonomous model 授权、更广 TUI/跨浏览器/style parity、daemon restart 后 durable wait、Approval/secret 与完整 MVP/L4 仍未完成。
+> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live Runtime 已接入 PostgreSQL write-ahead journal、bounded ingest loop、versioned dynamic ANSI/VT Virtual Screen，以及 generation-scoped Input Policy/Interaction Guard。M5/M6.6 增加 loopback Human Console 与受控 ResizeAction：真实无头 Chrome Human 和 official MCP SDK Agent 已在同一 PostgreSQL/zsh Session 中共享 cwd/env/Python REPL，并分别驱动同一 PTY 的 SIGWINCH。M6.7 增加不可作为安全事实的 exact-generation `terminal_state`。M7.1 增加 versioned Shell Checkpoint/fork，M7.2 增加 same-owner durable `BROKEN` rebuild projection 与 Browser Human 显式重建。M8.9 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放、DB/AMQP 恢复与真实三节点 RabbitMQ quorum leader failover。M9.1–M9.16 已完成 owner registry、central routing、Session fencing、capacity-weighted placement、rate limit、独立进程/分区/crash/retention/drain/rolling/CPU-starvation/PostgreSQL-primary-failover 路径。M9.17 新增 durable Runtime host-local Guardian：旧 Runtime `SIGSTOP` 时独立冻结并终止同 PTY 的前后台进程，PostgreSQL 同时清理 frozen idle transaction；replacement 以 epoch 2 恢复 `BROKEN/UNKNOWN` 并仅创建新 PTY。真正整机/VM fencing、高基数 rolling 与 long-duration soak 仍未实现。Autonomous model 授权、更广 TUI/跨浏览器/style parity、daemon restart 后 durable wait、Approval/secret 与完整 MVP/L4 仍未完成。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -568,7 +568,7 @@ RabbitMQ 不负责 Action ordering，也不表达 exactly-once。`ExecutionReady
 - 方案 B：central router RPC 到 owner Worker。
 - 方案 C：每个 Session Executor 是独立 supervisor process，Worker 只与 supervisor 通信。
 
-M9.1–M9.16 已完成 registry、central Router forwarding、Session lease/fencing、capacity-weighted placement、durable rate limit、独立进程 chaos、单 owner/单 Router 数据库路径分区隔离、Router degraded cold-start recovery、Router claim/幂等 mutation in-flight crash、有界 durable root Session 创建幂等性、pre-drain placement 结算、六轮 rolling owner replacement、CPU-starved owner expiry fencing/recovery，以及受控 PostgreSQL synchronous-minority 到外部 promotion 的同进程恢复。旧 generation 的 PTY 永不迁移；后续 M9 工作是 remote reclamation 与 long-duration soak 验证。
+M9.1–M9.17 已完成 registry、central Router forwarding、Session lease/fencing、capacity-weighted placement、durable rate limit、独立进程 chaos、单 owner/单 Router 数据库路径分区隔离、Router degraded cold-start recovery、Router claim/幂等 mutation in-flight crash、有界 durable root Session 创建幂等性、pre-drain placement 结算、六轮 rolling owner replacement、CPU-starved owner expiry fencing/recovery、受控 PostgreSQL synchronous-minority 到外部 promotion 的同进程恢复，以及 host-local Guardian 对 unreachable Runtime PTY tree/frozen transaction 的回收。旧 generation 的 PTY 永不迁移；后续 M9 工作是高基数 rolling 与 long-duration soak 验证。
 
 ---
 
@@ -1022,7 +1022,8 @@ Exit Gate：每个故障点有确定期望；不确定写入进入 UNKNOWN，文
 - [x] CPU-starved owner heartbeat：普通 heartbeat/drain/stop 不得延长 DB-time 已过期 identity；真实 `SIGSTOP/SIGCONT` 后旧 PTY/BROKEN/released 与 same-process full recovery、新 Session-only PTY（M9.14 L2）。
 - [x] capacity-weighted placement：owner 声明 1–1000 relative weight，原子按 `placement_count / capacity_weight` 选择；1:2:3 经 drain/replacement 后累计 6/12/18，三个等级真实 zsh（M9.15 L2；不等于 hard capacity/active load）。
 - [x] PostgreSQL controlled minority/quorum failover：三节点 physical replication + `ANY 1`/`remote_apply`；reachable minority 有界熔断，外部停止 former primary 后提升/reparent，同一 Runtime/Router PID 通过 primary-only ordered endpoints 恢复，新 PTY 不接管旧 generation（M9.16 L2；不等于应用自动选主或任意 split-brain 防护）。
-- [ ] remote host reclamation、高基数/长时间 rolling drain 与 long soak；完成前 M9 不升级为 L4。
+- [x] host-local remote Runtime reclamation：独立 Guardian 仅由成功 DB owner/Session lease 续租；Runtime `SIGSTOP` 后冻结并终止 PPID-tree + PTY-TTY 进程集合，PostgreSQL 终止 frozen idle transaction，replacement epoch 2 + `BROKEN/UNKNOWN` + new-PTY-only（M9.17 L2；不等于整机/VM fencing）。
+- [ ] 高基数/长时间 rolling drain 与 long soak；完成前 M9 不升级为 L4。
 
 Exit Gate：3+ Worker chaos 下每个 generation 最多一个有效 PTY owner；不宣称 live PTY failover。
 
@@ -1198,5 +1199,6 @@ v1.0 还必须满足 M7–M10、fork 语义、故障矩阵、owner routing、mul
 27. [x] `fix(runtime): fence expired owner heartbeats`：heartbeat/drain/stop DB-time expiry predicate、真实 `SIGSTOP/SIGCONT`、healthy-owner progress、旧 Shell 回收与 same-process reconcile/new-PTY-only recovery（M9.14 L2）。
 28. [x] `feat(router): weight placement by owner capacity`：migration 013、Runtime weight config、PostgreSQL normalized debt claim、1:2:3 concurrent/process drain/replacement 与 real zsh evidence（M9.15 L2）。
 29. [x] `feat(postgres): follow externally promoted primaries`：primary-only ordered endpoint pool、Runtime/Router/relay/Worker 配置、三节点同步 minority、former-primary fencing、standby promotion/reparent 与 same-process new-PTY-only recovery（M9.16 L2）。
+30. [x] `feat(runtime): reclaim unreachable owner process trees`：host-local Guardian、PID/start + PPID/PTY snapshot、stop-before-kill、frozen PostgreSQL transaction timeout、旧 Runtime `SIGSTOP` 与 replacement new-PTY-only recovery（M9.17 L2）。
 
 M5 shared path 已闭合，但 M6 完整 L3 与其余 MVP Gate 未闭合前，不因为 M8 已有故障证据就宣称 MVP。

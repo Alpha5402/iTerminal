@@ -21,6 +21,7 @@ const OUTBOX_ADMISSION_LOCK = 1_746_883_921;
 
 export interface PostgresRuntimeRepositoryOptions extends ActionRateLimitOptions {
   readonly beforeAcceptExecuteCommit?: () => void;
+  readonly idleTransactionTimeoutMilliseconds?: number;
   readonly maxPendingOutbox?: number;
   readonly statementTimeoutMilliseconds?: number;
   readonly requireSessionFence?: boolean;
@@ -113,8 +114,13 @@ export class PostgresRuntimeRepository {
       options.statementTimeoutMilliseconds ?? DEFAULT_STATEMENT_TIMEOUT_MS,
       "statementTimeoutMilliseconds",
     );
+    const idleTransactionTimeoutMilliseconds = positiveInteger(
+      options.idleTransactionTimeoutMilliseconds ?? statementTimeoutMilliseconds,
+      "idleTransactionTimeoutMilliseconds",
+    );
     this.#pool = createPostgresEndpointPool(connectionString, {
       connectionTimeoutMillis: 5_000,
+      idle_in_transaction_session_timeout: idleTransactionTimeoutMilliseconds,
       max: 20,
       query_timeout: statementTimeoutMilliseconds,
       statement_timeout: statementTimeoutMilliseconds,

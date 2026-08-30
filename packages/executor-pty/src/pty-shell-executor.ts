@@ -35,6 +35,7 @@ import type { IPty } from "node-pty";
 
 import { BoundedByteRing } from "./bounded-byte-ring.js";
 import { ControlFrameDecoder, type ControlEvent } from "./control-protocol.js";
+import type { ShellProcessGuardian } from "./pty-process-guardian.js";
 import { createShellLaunchProfile } from "./shell-profile.js";
 
 const START_TIMEOUT_MS = 5_000;
@@ -70,8 +71,10 @@ interface ControlWaiter {
 }
 
 export class PtyShellExecutorFactory implements ShellExecutorFactory {
+  public constructor(private readonly processGuardian?: ShellProcessGuardian) {}
+
   public async create(options: CreateExecutorOptions): Promise<ShellExecutor> {
-    return PtyShellExecutor.start(options);
+    return PtyShellExecutor.start(options, this.processGuardian);
   }
 }
 
@@ -84,6 +87,7 @@ export class PtyShellExecutor implements ShellExecutor {
   readonly #events: ControlEvent[] = [];
   readonly #waiters = new Set<ControlWaiter>();
   readonly #pty: IPty;
+  readonly #processGuardian: ShellProcessGuardian | undefined;
   readonly #sessionOutput = new BoundedByteRing(SESSION_RING_BYTES);
   readonly #onOutput: (data: string) => void;
 
@@ -95,12 +99,14 @@ export class PtyShellExecutor implements ShellExecutor {
   }>;
   #closed = false;
   #fatalError?: Error;
+  #guardianRegistered = false;
 
   public readonly shell: ShellKind;
   public readonly shellPid: number;
 
-  private constructor(options: CreateExecutorOptions) {
+  private constructor(options: CreateExecutorOptions, processGuardian?: ShellProcessGuardian) {
     this.shell = options.shell;
+    this.#processGuardian = processGuardian;
     this.#onOutput = options.onOutput;
     this.#runtimeDirectory = mkdtempSync(join(tmpdir(), "iterminal-runtime-"));
     this.#controlFifo = join(this.#runtimeDirectory, "control.fifo");
@@ -160,12 +166,19 @@ export class PtyShellExecutor implements ShellExecutor {
     });
   }
 
-  public static async start(options: CreateExecutorOptions): Promise<PtyShellExecutor> {
-    const executor = new PtyShellExecutor(options);
+  public static async start(
+    options: CreateExecutorOptions,
+    processGuardian?: ShellProcessGuardian,
+  ): Promise<PtyShellExecutor> {
+    const executor = new PtyShellExecutor(options, processGuardian);
     try {
       const startIndex = executor.#events.length;
       await executor.#waitFor((event) => event.type === "hello", startIndex, START_TIMEOUT_MS);
       await executor.#waitFor((event) => event.type === "ready", startIndex, START_TIMEOUT_MS);
+      if (processGuardian !== undefined) {
+        executor.#guardianRegistered = true;
+        await processGuardian.register(executor.shellPid);
+      }
       return executor;
     } catch (error) {
       executor.close();
@@ -277,6 +290,10 @@ export class PtyShellExecutor implements ShellExecutor {
     }
     this.#waiters.clear();
     clearInterval(this.#controlPoll);
+    if (this.#guardianRegistered) {
+      this.#processGuardian?.unregister(this.shellPid);
+      this.#guardianRegistered = false;
+    }
     this.#pty.kill();
     closeSync(this.#controlFd);
     rmSync(this.#runtimeDirectory, { force: true, recursive: true });

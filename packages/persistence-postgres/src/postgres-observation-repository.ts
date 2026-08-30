@@ -88,6 +88,7 @@ interface EventRow {
 }
 
 export interface PostgresObservationRepositoryOptions {
+  readonly idleTransactionTimeoutMilliseconds?: number;
   readonly requireSessionFence?: boolean;
 }
 
@@ -100,8 +101,13 @@ export class PostgresObservationRepository {
     options: PostgresObservationRepositoryOptions = {},
   ) {
     this.#requireSessionFence = options.requireSessionFence ?? false;
+    const idleTransactionTimeoutMilliseconds = positiveInteger(
+      options.idleTransactionTimeoutMilliseconds ?? 30_000,
+      "idleTransactionTimeoutMilliseconds",
+    );
     this.#pool = createPostgresEndpointPool(connectionString, {
       connectionTimeoutMillis: 5_000,
+      idle_in_transaction_session_timeout: idleTransactionTimeoutMilliseconds,
       max: 10,
       query_timeout: 30_000,
       statement_timeout: 30_000,
@@ -462,6 +468,15 @@ export class PostgresObservationRepository {
       client.release();
     }
   }
+}
+
+function positiveInteger(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new RuntimeError("INVALID_REQUEST", `${name} must be a positive integer`, {
+      [name]: value,
+    });
+  }
+  return value;
 }
 
 function eventSelect(): string {

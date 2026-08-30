@@ -26,6 +26,7 @@ export function startPostgresRecoverySupervisor(options: {
   readonly initialDelayMilliseconds?: number;
   readonly jitterRatio?: number;
   readonly maxDelayMilliseconds?: number;
+  readonly onOwnerLeaseConfirmed?: (remainingLeaseMilliseconds: number) => Promise<void>;
   readonly ownership?: {
     readonly capacityWeight: number;
     readonly endpoint: string;
@@ -81,12 +82,16 @@ export function startPostgresRecoverySupervisor(options: {
           if (options.ownership === undefined) {
             await options.durability.healthCheck();
           } else {
+            const renewalStartedAt = performance.now();
             ownerRegistration = await options.ownership.registry.heartbeatOwner(
               ownerRegistration ?? missingOwnerRegistration(),
               options.ownership.leaseMilliseconds,
             );
             options.runtime.activateDurableOwner(ownerRegistration);
             await options.runtime.renewDurableSessionLeases();
+            await options.onOwnerLeaseConfirmed?.(
+              remainingLeaseMilliseconds(options.ownership.leaseMilliseconds, renewalStartedAt),
+            );
           }
         } catch (error) {
           options.runtime.reportDurabilityUnavailable(error);
@@ -123,6 +128,18 @@ export function startPostgresRecoverySupervisor(options: {
             ? "PostgreSQL outage invalidated Runtime owner"
             : "runtime owner restarted without a graceful close",
         );
+        if (options.ownership !== undefined) {
+          const renewalStartedAt = performance.now();
+          ownerRegistration = await options.ownership.registry.heartbeatOwner(
+            ownerRegistration ?? missingOwnerRegistration(),
+            options.ownership.leaseMilliseconds,
+          );
+          options.runtime.activateDurableOwner(ownerRegistration);
+          await options.runtime.renewDurableSessionLeases();
+          await options.onOwnerLeaseConfirmed?.(
+            remainingLeaseMilliseconds(options.ownership.leaseMilliseconds, renewalStartedAt),
+          );
+        }
         recoveredOnce = true;
         attempt = 0;
         options.updateState({
@@ -164,6 +181,10 @@ export function startPostgresRecoverySupervisor(options: {
       return closePromise;
     },
   };
+}
+
+function remainingLeaseMilliseconds(leaseMilliseconds: number, startedAt: number): number {
+  return Math.max(1, leaseMilliseconds - Math.ceil(performance.now() - startedAt));
 }
 
 function missingOwnerRegistration(): never {

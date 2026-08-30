@@ -50,6 +50,7 @@ These terms are protocol contracts. Avoid synonyms in code and public APIs unles
 - Registry epoch != Session fencing token != Execution expected version.
 - Capacity-weighted placement != active-load measurement, hard Session capacity, or overload shedding.
 - Writable-primary detection != database consensus, promotion authority, or former-primary fencing.
+- Host-local Process Guardian != whole-host fencing, live PTY migration, or Session takeover.
 - `RATE_LIMITED` != `BACKPRESSURE`, `PTY_BUSY`, or an interaction-policy denial.
 
 ## TerminalState evidence boundary
