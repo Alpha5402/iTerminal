@@ -42,6 +42,11 @@ const executeSchema = identitySchema.extend({
     .max(256 * 1_024),
   idempotencyKey: z.string().min(1).max(256),
 });
+const forkSessionSchema = identitySchema.extend({
+  allowStale: z.boolean(),
+  expectedCheckpointVersion: z.number().int().positive(),
+  idempotencyKey: z.string().min(1).max(256),
+});
 const inputSchema = identitySchema.extend({
   data: z
     .string()
@@ -195,6 +200,32 @@ export async function createHumanConsoleApp(
     actorForRequest(request, reply, actors, now);
     const { sessionId } = sessionParamsSchema.parse(request.params);
     return success(request, await options.gateway.getSession(sessionId));
+  });
+
+  app.get("/api/sessions/:sessionId/checkpoint", async (request, reply) => {
+    actorForRequest(request, reply, actors, now);
+    const { sessionId } = sessionParamsSchema.parse(request.params);
+    const { generation } = eventQuerySchema.pick({ generation: true }).parse(request.query);
+    return success(request, await options.gateway.getSessionCheckpoint(sessionId, generation));
+  });
+
+  app.post("/api/sessions/:sessionId/fork", async (request, reply) => {
+    const actor = actorForRequest(request, reply, actors, now);
+    const { sessionId } = sessionParamsSchema.parse(request.params);
+    const body = forkSessionSchema.parse(request.body);
+    return reply.status(201).send(
+      success(
+        request,
+        await options.gateway.forkSession({
+          actor,
+          allowStale: body.allowStale,
+          expectedCheckpointVersion: body.expectedCheckpointVersion,
+          idempotencyKey: body.idempotencyKey,
+          sessionGeneration: body.generation,
+          sessionId,
+        }),
+      ),
+    );
   });
 
   app.delete("/api/sessions/:sessionId", async (request, reply) => {
@@ -907,6 +938,13 @@ function allowedNextActions(code: string): readonly string[] {
       return ["refresh_screen", "reconnect_stream"];
     case "GEOMETRY_CHANGED":
       return ["refresh_screen", "retry_after_reobserve"];
+    case "CHECKPOINT_CHANGED":
+      return ["refresh_checkpoint", "retry_with_new_version"];
+    case "CHECKPOINT_STALE":
+      return ["review_checkpoint", "acknowledge_stale_context"];
+    case "CHECKPOINT_INVALID":
+    case "CHECKPOINT_NOT_FOUND":
+      return ["inspect_checkpoint", "create_clean_session"];
     case "EXECUTION_CHANGED":
       return ["refresh_session", "target_current_execution"];
     case "BACKPRESSURE":

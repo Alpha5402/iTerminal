@@ -1,10 +1,10 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
-> 状态：Implementation Baseline v5.9 — M5 shared path 与 M6.6 controlled geometry 已通过 Browser Human + official MCP Agent L3；M6.7 bounded TerminalState 与 M7.1 versioned checkpoint fork 已通过 real PTY/official MCP L2；M0–M4.1、M6.5 与 M8.9 后端路径保持 L2，M4 autonomous-model L3 仍待显式授权
+> 状态：Implementation Baseline v6.0 — M5 shared path、M6.6 controlled geometry 与 M7.2 durable Human rebuild 已通过真实 Browser Human L3；M6.7 bounded TerminalState 与 M7.1 versioned checkpoint fork 已通过 real PTY/official MCP L2；M0–M4.1、M6.5 与 M8.9 后端路径保持 L2，M4 autonomous-model L3 仍待显式授权
 >
 > 基线日期：2026-08-30
 >
-> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live Runtime 已接入 PostgreSQL write-ahead journal、bounded ingest loop、versioned dynamic ANSI/VT Virtual Screen，以及 generation-scoped Input Policy/Interaction Guard。M5/M6.6 增加 loopback Human Console 与受控 ResizeAction：真实无头 Chrome Human 和 official MCP SDK Agent 已在同一 PostgreSQL/zsh Session 中共享 cwd/env/Python REPL，并分别驱动同一 PTY 的 SIGWINCH。M6.7 增加不可作为安全事实的 exact-generation `terminal_state`。M7.1 增加 Shell READY control-channel checkpoint、运维 exact allowlist env、version/hash/CAS/staleness、cwd containment、PostgreSQL `session_forks`/child lineage/idempotency 与 `session_checkpoint|session_fork` MCP；真实 bash/zsh 中 READY/RUNNING/BROKEN parent 可重建独立 child，不复制 process/REPL/editor/alias/function/trap，也不隔离共享 workspace 文件。M8.9 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放、DB/AMQP 恢复与真实三节点 RabbitMQ quorum leader failover。Browser fork UX、新 daemon hydrate 历史 BROKEN parent、Autonomous model 授权、更广 TUI/跨浏览器/style parity、daemon restart 后 durable wait、Approval/secret、非对称分区、long soak、M9 fencing、多 Worker 与完整 MVP/L4 仍未完成。
+> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live Runtime 已接入 PostgreSQL write-ahead journal、bounded ingest loop、versioned dynamic ANSI/VT Virtual Screen，以及 generation-scoped Input Policy/Interaction Guard。M5/M6.6 增加 loopback Human Console 与受控 ResizeAction：真实无头 Chrome Human 和 official MCP SDK Agent 已在同一 PostgreSQL/zsh Session 中共享 cwd/env/Python REPL，并分别驱动同一 PTY 的 SIGWINCH。M6.7 增加不可作为安全事实的 exact-generation `terminal_state`。M7.1 增加 Shell READY control-channel checkpoint、运维 exact allowlist env、version/hash/CAS/staleness、cwd containment、PostgreSQL `session_forks`/child lineage/idempotency 与 `session_checkpoint|session_fork` MCP；真实 bash/zsh 中 READY/RUNNING/BROKEN parent 可重建独立 child，不复制 process/REPL/editor/alias/function/trap，也不隔离共享 workspace 文件。M7.2 在同一 stable owner 的新 daemon 中 hydrate 最多 100 个只读历史 BROKEN projection；Human Console 明示 stale/non-copy 边界并重建新 Session/PTY，真实 Chrome 路径已在恢复 cwd/env 后运行 `git status`。M8.9 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放、DB/AMQP 恢复与真实三节点 RabbitMQ quorum leader failover。Autonomous model 授权、更广 TUI/跨浏览器/style parity、daemon restart 后 durable wait、Approval/secret、跨 owner/fencing、非对称分区、long soak、多 Worker 与完整 MVP/L4 仍未完成。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -143,7 +143,7 @@ MVP 至少达到 L3；v1.0 必须达到 L4。
 - [ ] 同 Session 共享真实 Shell Context 达到 L3。
 - [ ] Action attribution + target execution + screen freshness 达到 L3。
 - [ ] `PTY_BUSY -> wait/input/control/fork` 的结构化冲突恢复达到 L3。
-- [ ] Persistent Shell crash/owner loss 不伪装为可恢复 Session。
+- [x] Persistent Shell crash/owner loss 不伪装为可恢复 Session；历史 parent 仅为无 Executor/Screen 的 `BROKEN` projection，重建创建新 Session/PTY（M7.2 L3 Human path）。
 - [ ] Agent 大输出按需寻址，不依赖对全量日志做 LLM summary。
 
 如果以上五项少于四项通过 L3，应重新评估定位，而不是继续堆远程/编排功能。
@@ -585,7 +585,7 @@ M9 spike/ADR 选型；不能让任意 Worker 消费后新建第二个“同 Sess
 
 后续按能力分阶段增加：
 
-- M7.2：新 daemon 从 durable checkpoint hydrate 历史 BROKEN parent 并接入 Browser Human rebuild/fork UX。
+- M7.2 已完成：新 daemon 从 durable checkpoint hydrate bounded 历史 BROKEN parent，并接入 Browser Human rebuild/fork UX；跨 owner/fencing 仍属 M9。
 - Event exact-get/全文 search 只有在 bounded schema、权限与分页契约冻结后才注册；底层 repository 已有能力不等于 MCP 工具已交付。
 
 调整稿使用的 `terminal_*` 名称仅视为产品草案。当前实现已使用上述稳定短名称；如发布前需要统一前缀，必须单独做命名 ADR、兼容别名与弃用周期，不能只改 TODO。
@@ -661,7 +661,7 @@ WebSocket 只承载 live event/screen/action transport，不是真相源。重�
 ### 12.3 Console 第一版功能
 
 - [x] 创建/关闭 Session generation。
-- [ ] 重建/fork Session（依赖 M7 checkpoint/fork 语义）。
+- [x] 重建/fork Session：展示 checkpoint version/status/age/cwd/env key、non-copy 限制与 stale acknowledgement，创建并选择新 Session/PTY（M7.2 L3）。
 - [x] 实时 xterm.js Terminal + current execution + Session status（canonical screen projection）。
 - [x] command composer、Input、Control、stream wait、PTY_BUSY allowed-next-action 建议。
 - [x] Human/Agent/System Action 标签与 bounded Timeline。
@@ -960,11 +960,11 @@ Exit Gate：M0–M6 的 L3 证据齐全；到此才能称为 MVP。
 - [x] M7.1 cwd/env/workspace/shell profile 恢复；cwd realpath/containment，只注入 filtered env。
 - [x] M7.1 PostgreSQL parent/child lineage、actor-scoped fork idempotency、fork/rebuild events。
 - [x] M7.1 缺失/变更/stale-unacknowledged/invalid cwd checkpoint 结构化失败。
-- [ ] M7.2 UI 明确“不复制 process/REPL/vim state”；MCP Tool description 已完成。
-- [ ] M7.2 Human Console fork/rebuild 操作；MCP `session_checkpoint|session_fork` 已注册。
-- [ ] M7.2 daemon/owner restart 后从 PostgreSQL hydrate 历史 BROKEN parent checkpoint，而不伪恢复旧 PTY。
+- [x] M7.2 UI 明确“不复制 process/REPL/vim/jobs/alias/function/trap/socket/fd state”，并说明 workspace files shared。
+- [x] M7.2 Human Console checkpoint inspection + exact-version stale-aware fork/rebuild；同一 checkpoint 的不确定 HTTP 重试复用 idempotency key。
+- [x] M7.2 daemon/owner restart 后从 PostgreSQL hydrate 最多 newest 100 个同 owner 历史 `BROKEN` parent checkpoint；无 Executor/Screen/Guard，不伪恢复旧 PTY。
 
-Exit Gate：parent busy 时 fork 后可独立 `git status`；child 继承可复现 context，不影响 parent PTY。
+Exit Gate：M7.2 Browser Human durable rebuild 已达 L3：新 child 在恢复 cwd/env 后独立运行 `git status`，历史 parent 保持 BROKEN。M7.1 busy-parent/official MCP 路径保持 L2；跨 owner/fencing、真实 model autonomy 与 L4 仍开放。
 
 ### M8 — Outbox、RabbitMQ 与 Crash Semantics（目标：L4）
 
@@ -1004,7 +1004,7 @@ Exit Gate：每个故障点有确定期望；不确定写入进入 UNKNOWN，文
 - [ ] generation-scoped Lease、renewal、fencing token。
 - [ ] 所有 Execution 状态提交校验 owner/generation/fencing。
 - [ ] 非 owner Worker 无法创建/写第二个同 Session PTY。
-- [ ] owner lost -> generation BROKEN；checkpoint rebuild 创建新 generation。
+- [x] owner lost -> old generation BROKEN；checkpoint rebuild 创建新 Session ID/generation 1 并保留 immutable lineage（same-owner M7.2）。
 - [ ] stale owner DB writes 被拒绝；旧 process group 尽力回收并告警。
 - [ ] 多 Session 的公平分配与 per-actor/session rate limit。
 
@@ -1138,7 +1138,7 @@ Exit Gate：3+ Worker chaos 下每个 generation 最多一个有效 PTY owner；
 - [x] Busy、target execution、screen freshness、Input Guard 均有自动化回归。
 - [ ] Shell Integration 不猜 prompt/静默时间；marker/control channel 有 spoof/chunk 测试。
 - [ ] PTY merged output 与 Agent bounded observation 语义一致。
-- [ ] Runtime crash 后旧 generation 明确 BROKEN/UNKNOWN，不伪恢复。
+- [x] Runtime crash/owner reconciliation 后旧 generation 明确 BROKEN/UNKNOWN；历史 hydration 只有 rebuild projection，不伪恢复 PTY。
 - [ ] Secret 不出现在 Action/Event/Snapshot/Checkpoint/MCP result/普通 log 抽检中。
 - [ ] README 明确安全假设、非沙箱、支持 Shell/平台与未完成项。
 
@@ -1157,7 +1157,7 @@ v1.0 还必须满足 M7–M10、fork 语义、故障矩阵、owner routing、mul
 7. `feat(persistence): persist actions executions and events`：PostgreSQL、CAS、idempotency、unknown recovery。
 8. `feat(observation): add bounded event queries`：完成 M3 后再开始 MCP adapter。
 
-当前已完成建议切片 1–8，并追加 M4.1 live durable journal、M6.1 live Virtual Screen base、M6.2 reactive screen observation、M6.3 bounded screen synchronization、M6.4 stable styled-cell observation、M8.1 reliable messaging、M8.2 owner-local queue dispatch、M8.3 Interaction/retry outage crash semantics、M8.4 admission/backpressure、M8.5 RabbitMQ process reconnect、M8.6 PostgreSQL owner recovery、M8.7 messaging-loop PostgreSQL recovery、M8.8 silent network blackhole recovery 与 M8.9 RabbitMQ quorum leader failover；后续仍严格按里程碑 Exit Gate 与 `docs/verification/` 证据推进。
+当前已完成建议切片 1–8，并追加 M4.1 live durable journal、M6.1 live Virtual Screen base、M6.2 reactive screen observation、M6.3 bounded screen synchronization、M6.4 stable styled-cell observation、M7.2 durable Human rebuild、M8.1 reliable messaging、M8.2 owner-local queue dispatch、M8.3 Interaction/retry outage crash semantics、M8.4 admission/backpressure、M8.5 RabbitMQ process reconnect、M8.6 PostgreSQL owner recovery、M8.7 messaging-loop PostgreSQL recovery、M8.8 silent network blackhole recovery 与 M8.9 RabbitMQ quorum leader failover；后续仍严格按里程碑 Exit Gate 与 `docs/verification/` 证据推进。
 
 下一批按依赖顺序推进：
 
@@ -1165,6 +1165,6 @@ v1.0 还必须满足 M7–M10、fork 语义、故障矩阵、owner routing、mul
 10. [x] `feat(console): add shared human terminal path`：完成 M5 最小 HTTP/WS、composer、interactive focus、actor/timeline 与 policy/guard UI，形成首条 L3 Browser Human + official MCP Agent 路径。
 11. [x] `feat(screen): add controlled resize and geometry ownership`：完成 canonical geometry owner、resize/reflow、CAS/UNKNOWN 与 Human/headless L3 fixture 对照。
 12. [x] `feat(screen): classify bounded terminal state evidence`：完成有 confidence/evidence/limitations 的 heuristic 与 real shell/REPL/TUI fixtures，不把 heuristic 当权限事实。
-13. [ ] `feat(session): fork from versioned shell checkpoint`：M7.1 backend/PostgreSQL/RPC/MCP L2 已完成；M7.2 仍需 Browser Human UX 与 cross-daemon durable rebuild 才闭合。
+13. [x] `feat(session): fork from versioned shell checkpoint`：M7.1 backend/PostgreSQL/RPC/MCP L2 + M7.2 Browser Human same-owner durable rebuild L3 已闭合；跨 owner/fencing 归 M9。
 
 M5 shared path 已闭合，但 M6 完整 L3 与其余 MVP Gate 未闭合前，不因为 M8 已有故障证据就宣称 MVP。

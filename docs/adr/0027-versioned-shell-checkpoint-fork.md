@@ -59,7 +59,7 @@ The Runtime serializes checkpoint selection and fork admission with parent Sessi
 
 ### M7.1 and M7.2 boundary
 
-M7.1 proves in-process Runtime/PostgreSQL/RPC/MCP fork behavior with real PTYs, including a busy parent. M7.2 adds Human Console workflow and durable rebuild from a checkpoint after daemon/owner loss. Until M7.2, a checkpoint row surviving restart is durable evidence but the new daemon does not yet hydrate arbitrary historical Sessions into its live routing table.
+M7.1 proves in-process Runtime/PostgreSQL/RPC/MCP fork behavior with real PTYs, including a busy parent. M7.2 is defined by ADR-0028: after same-owner daemon loss it hydrates a bounded, read-only historical `BROKEN` projection and uses this same explicit fork contract to create a new Session/PTY. It does not restore the old PTY or hydrate arbitrary audit history as live state.
 
 ## Consequences
 

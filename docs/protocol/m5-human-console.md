@@ -51,6 +51,8 @@ The HTTP status is only transport guidance. Clients branch on the stable Runtime
 | `POST`   | `/api/sessions`                                                   | `session.create`; body has `shell`, absolute `workspaceRoot`              |
 | `GET`    | `/api/sessions/:id`                                               | `session.get`                                                             |
 | `DELETE` | `/api/sessions/:id`                                               | exact-generation `session.close`                                          |
+| `GET`    | `/api/sessions/:id/checkpoint?generation=`                        | bounded checkpoint metadata; no environment values                        |
+| `POST`   | `/api/sessions/:id/fork`                                          | exact-version, stale-aware Human `session.fork`                           |
 | `POST`   | `/api/sessions/:id/execute`                                       | READY-only `execution.start`; command + idempotency key                   |
 | `POST`   | `/api/sessions/:id/input`                                         | RUNNING-only `input.send`; exact Execution and optional screen version    |
 | `POST`   | `/api/sessions/:id/control`                                       | RUNNING-only `control.send`; explicit delivery and Guard-bypass audit bit |
@@ -65,6 +67,8 @@ The HTTP status is only transport guidance. Clients branch on the stable Runtime
 | `GET`    | `/api/sessions/:id/stream?generation=&after=&afterScreenVersion=` | WebSocket observation upgrade                                             |
 
 READY Input/Control is rejected before Runtime write admission. RUNNING Execute continues to use the Runtime's `PTY_BUSY` result. The Console cannot turn an HTTP success into an Execution-completed claim: Execute returns accepted Action plus the initial Execution projection.
+
+For a historical `BROKEN` Session the Console does not open the live screen WebSocket. It reads durable Events, shows checkpoint version/status/age/cwd and environment key names, and requires an explicit stale acknowledgement before rebuild. The fork request uses the cookie-bound Human Actor, exact checkpoint version, and an idempotency key. Success selects a new Session/PTY; the historical parent remains `BROKEN`. The UI explicitly states that process, REPL/editor/vim, job, alias/function/trap, socket, and descriptor state is not copied and that workspace files remain shared.
 
 ## WebSocket frames
 

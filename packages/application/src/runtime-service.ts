@@ -45,6 +45,8 @@ import {
 import type {
   DurableSessionEvent,
   DurableForkAdmission,
+  DurableOwnerRecoveryResult,
+  DurableRebuildableSession,
   RuntimeDurability,
   RuntimeServiceOptions,
   RuntimeStore,
@@ -758,20 +760,106 @@ export class RuntimeService {
 
   public async recoverDurableOwner(reason: string): Promise<{
     readonly brokenSessions: number;
+    readonly hydratedSessions: number;
     readonly unknownExecutions: number;
   }> {
     try {
-      const recovered = (await this.#durability?.recoverOwner(this.#ownerId, reason)) ?? {
+      const recovered: DurableOwnerRecoveryResult = (await this.#durability?.recoverOwner(
+        this.#ownerId,
+        reason,
+      )) ?? {
         brokenSessions: 0,
+        rebuildableSessions: [],
         unknownExecutions: 0,
       };
+      let hydratedSessions = 0;
+      for (const rebuildable of recovered.rebuildableSessions) {
+        if (!this.#checkpointCompatibleWithRuntime(rebuildable)) continue;
+        const existing = this.store.getSession(rebuildable.session.id);
+        if (existing === undefined) {
+          this.store.createSession(rebuildable.session);
+          hydratedSessions += 1;
+        } else if (
+          existing.generation !== rebuildable.session.generation ||
+          existing.status !== "BROKEN"
+        ) {
+          throw new RuntimeError(
+            "DELIVERY_UNKNOWN",
+            "Durable rebuild projection conflicts with live Runtime state",
+            {
+              durableGeneration: rebuildable.session.generation,
+              durableStatus: rebuildable.session.status,
+              liveGeneration: existing.generation,
+              liveStatus: existing.status,
+              sessionId: existing.id,
+            },
+          );
+        } else {
+          existing.actionSequence = Math.max(
+            existing.actionSequence,
+            rebuildable.session.actionSequence,
+          );
+          existing.eventSequence = Math.max(
+            existing.eventSequence,
+            rebuildable.session.eventSequence,
+          );
+          existing.screenVersion = Math.max(
+            existing.screenVersion,
+            rebuildable.session.screenVersion,
+          );
+        }
+        this.#checkpoints.set(rebuildable.session.id, rebuildable.checkpoint);
+        this.#checkpointInvalid.delete(rebuildable.session.id);
+        const queue = this.#durableQueues.get(rebuildable.session.id);
+        if (queue !== undefined) delete queue.failure;
+      }
       this.#ownerDurabilityFailure = undefined;
-      return recovered;
+      return {
+        brokenSessions: recovered.brokenSessions,
+        hydratedSessions,
+        unknownExecutions: recovered.unknownExecutions,
+      };
     } catch (error) {
       const failure = durabilityError(error);
       this.#tripOwnerDurability(failure);
       throw failure;
     }
+  }
+
+  #checkpointCompatibleWithRuntime(rebuildable: DurableRebuildableSession): boolean {
+    const { checkpoint, session } = rebuildable;
+    if (
+      session.ownerId !== this.#ownerId ||
+      session.status !== "BROKEN" ||
+      session.activeExecutionId !== undefined ||
+      checkpoint.sessionId !== session.id ||
+      checkpoint.sourceGeneration !== session.generation ||
+      checkpoint.shell !== session.shell ||
+      checkpoint.workspaceRoot !== session.workspaceRoot ||
+      checkpoint.version < 1
+    ) {
+      return false;
+    }
+    const allowed = new Set(this.#checkpointEnvironmentKeys);
+    for (const [key, value] of Object.entries(checkpoint.filteredEnvironment)) {
+      if (
+        !allowed.has(key) ||
+        value.includes("\0") ||
+        value.includes("\n") ||
+        Buffer.byteLength(value) > MAX_CHECKPOINT_ENVIRONMENT_VALUE_BYTES
+      ) {
+        return false;
+      }
+    }
+    return (
+      checkpoint.contentHash ===
+      hashRequest({
+        cwd: checkpoint.cwd,
+        filteredEnvironment: checkpoint.filteredEnvironment,
+        shell: checkpoint.shell,
+        workspaceRoot: checkpoint.workspaceRoot,
+      })
+    );
   }
 
   public isDurabilityHealthy(): boolean {

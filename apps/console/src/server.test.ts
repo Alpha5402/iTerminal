@@ -182,6 +182,64 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
     expect(humanInput).toBeDefined();
     expect(JSON.stringify(events.events)).not.toContain("READY_BYPASS");
   }, 30_000);
+
+  it("exposes checkpoint inspection and attributes an explicit fork to the Human Actor", async () => {
+    const fixture = await createFixture(fixtures);
+    daemon = await startRuntimeDaemon({ socketPath: join(fixture.root, "runtime.sock") });
+    const runtime = new UnixRuntimeClient(daemon.socketPath);
+    consoleServer = await startHumanConsole({ gateway: runtime, port: 0 });
+    const bootstrapResponse = await fetch(`${consoleServer.url}/api/bootstrap`);
+    const cookie = required(bootstrapResponse.headers.get("set-cookie")).split(";", 1)[0] ?? "";
+    const bootstrap = await bodyResult<{ readonly actor: Actor }>(bootstrapResponse);
+
+    const parent = await requestResult<SessionResult>(consoleServer, cookie, "/api/sessions", {
+      body: { shell: "zsh", workspaceRoot: fixture.workspace },
+      method: "POST",
+    });
+    const checkpoint = await requestResult<CheckpointResult>(
+      consoleServer,
+      cookie,
+      `/api/sessions/${parent.id}/checkpoint?generation=${parent.generation.toString()}`,
+    );
+    expect(checkpoint).toMatchObject({ sourceStatus: "READY", stale: false, version: 1 });
+
+    const fork = await requestResult<ForkResult>(
+      consoleServer,
+      cookie,
+      `/api/sessions/${parent.id}/fork`,
+      {
+        body: {
+          allowStale: false,
+          expectedCheckpointVersion: checkpoint.version,
+          generation: parent.generation,
+          idempotencyKey: "m7-console-human-fork",
+        },
+        method: "POST",
+      },
+    );
+    expect(fork).toMatchObject({
+      checkpoint: { version: 2 },
+      replayed: false,
+      session: {
+        lineage: {
+          checkpointVersion: 2,
+          parentGeneration: parent.generation,
+          parentSessionId: parent.id,
+        },
+        status: "READY",
+      },
+    });
+    const events = await runtime.queryEvents(parent.id, parent.generation, 0, 500);
+    expect(events.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ actor: bootstrap.actor, type: "session.fork_requested" }),
+        expect.objectContaining({ actor: bootstrap.actor, type: "session.forked" }),
+      ]),
+    );
+
+    await runtime.closeSession(fork.session.id, fork.session.generation);
+    await runtime.closeSession(parent.id, parent.generation);
+  }, 30_000);
 });
 
 async function createFixture(fixtures: string[]): Promise<{
@@ -336,6 +394,25 @@ interface SessionResult {
 
 interface StartedResult {
   readonly execution: { readonly id: string };
+}
+
+interface CheckpointResult {
+  readonly sourceStatus: string;
+  readonly stale: boolean;
+  readonly version: number;
+}
+
+interface ForkResult {
+  readonly checkpoint: CheckpointResult;
+  readonly replayed: boolean;
+  readonly session: SessionResult & {
+    readonly lineage?: {
+      readonly checkpointVersion: number;
+      readonly parentGeneration: number;
+      readonly parentSessionId: string;
+    };
+    readonly status: string;
+  };
 }
 
 interface StreamFrame {

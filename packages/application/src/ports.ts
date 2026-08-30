@@ -160,6 +160,17 @@ export interface DurableForkAdmission {
   readonly requestHash: string;
 }
 
+export interface DurableRebuildableSession {
+  readonly checkpoint: ShellCheckpoint;
+  readonly session: Session;
+}
+
+export interface DurableOwnerRecoveryResult {
+  readonly brokenSessions: number;
+  readonly rebuildableSessions: readonly DurableRebuildableSession[];
+  readonly unknownExecutions: number;
+}
+
 export interface RuntimeDurability {
   createSession(session: Session, events: readonly DurableSessionEvent[]): Promise<void>;
   markSessionReady(
@@ -234,13 +245,7 @@ export interface RuntimeDurability {
     after: number,
     limit: number,
   ): Promise<EventPage>;
-  recoverOwner(
-    ownerId: string,
-    reason: string,
-  ): Promise<{
-    readonly brokenSessions: number;
-    readonly unknownExecutions: number;
-  }>;
+  recoverOwner(ownerId: string, reason: string): Promise<DurableOwnerRecoveryResult>;
 }
 
 export interface RuntimeServiceOptions {

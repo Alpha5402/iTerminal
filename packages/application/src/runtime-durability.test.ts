@@ -376,9 +376,10 @@ class ControlledDurability implements RuntimeDurability {
 
   public recoverOwner(): Promise<{
     readonly brokenSessions: number;
+    readonly rebuildableSessions: readonly [];
     readonly unknownExecutions: number;
   }> {
-    return Promise.resolve({ brokenSessions: 0, unknownExecutions: 0 });
+    return Promise.resolve({ brokenSessions: 0, rebuildableSessions: [], unknownExecutions: 0 });
   }
 }
 

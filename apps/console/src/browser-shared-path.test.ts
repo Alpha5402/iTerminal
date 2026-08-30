@@ -324,6 +324,119 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
       terminal_rows: 32,
     });
   }, 60_000);
+
+  it("lets a Human inspect and rebuild a same-owner historical checkpoint after daemon loss", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "iterminal-m7-browser-rebuild-")));
+    fixtures.push(root);
+    const workspace = join(root, "workspace");
+    const restoredCwd = join(workspace, "subdir");
+    await mkdir(restoredCwd, { recursive: true });
+    const ownerId = "owner-m7-browser-rebuild";
+
+    daemon = await startRuntimeDaemon({
+      checkpointEnvironmentKeys: ["ITERM_M7_SAFE"],
+      databaseUrl: databaseUrl ?? "",
+      ownerId,
+      socketPath: join(root, "a.sock"),
+    });
+    const firstRuntime = new UnixRuntimeClient(daemon.socketPath);
+    const parent = await firstRuntime.createSession({ shell: "zsh", workspaceRoot: workspace });
+    const parentMutation = await firstRuntime.startExecute({
+      actor: {
+        client: "m7-browser-fixture",
+        id: "agent-m7-browser-fixture",
+        principal: "local-m7-browser-fixture",
+        type: "agent",
+      },
+      command: "git init -q && cd subdir && export ITERM_M7_SAFE=historical",
+      idempotencyKey: "m7-browser-parent-state",
+      sessionGeneration: parent.generation,
+      sessionId: parent.id,
+    });
+    await firstRuntime.waitExecution(parentMutation.execution.id);
+    const sourceCheckpoint = await firstRuntime.getSessionCheckpoint(parent.id, parent.generation);
+    expect(sourceCheckpoint.version).toBe(2);
+
+    daemon.runtime.shutdownLiveOwner("injected browser owner loss");
+    await daemon.close();
+    daemon = undefined;
+
+    daemon = await startRuntimeDaemon({
+      checkpointEnvironmentKeys: ["ITERM_M7_SAFE"],
+      databaseUrl: databaseUrl ?? "",
+      ownerId,
+      socketPath: join(root, "b.sock"),
+    });
+    const replacementRuntime = new UnixRuntimeClient(daemon.socketPath);
+    consoleServer = await startHumanConsole({
+      gateway: replacementRuntime,
+      port: 0,
+      staticRoot,
+    });
+    browser = await chromium.launch({
+      args: ["--disable-background-networking", "--no-first-run"],
+      executablePath: browserExecutable,
+      headless: true,
+    });
+    page = await browser.newPage({ viewport: { height: 1_100, width: 1_600 } });
+    await page.goto(consoleServer.url, { waitUntil: "networkidle" });
+
+    await waitForPageText(page, ".status-strip", "BROKEN");
+    await waitForPageText(page, ".mode-note", "no live PTY or screen");
+    await waitForPageText(page, ".checkpoint-panel", "v2");
+    await waitForPageText(page, ".checkpoint-panel", restoredCwd);
+    await waitForPageText(page, ".checkpoint-panel", "ITERM_M7_SAFE");
+    await waitForPageText(page, ".checkpoint-warning", "does not copy processes");
+
+    const rebuild = page.getByRole("button", {
+      name: "Rebuild new Session from checkpoint",
+    });
+    await expect(rebuild.isDisabled()).resolves.toBe(true);
+    await page.getByRole("checkbox").check();
+    await expect(rebuild.isEnabled()).resolves.toBe(true);
+    await rebuild.click();
+    await waitForPageText(page, ".status-strip", "READY");
+
+    const childSessions = await replacementRuntime.listSessions();
+    const child = childSessions.find((session) => session.lineage?.parentSessionId === parent.id);
+    expect(child).toMatchObject({
+      lineage: {
+        checkpointVersion: sourceCheckpoint.version,
+        parentGeneration: parent.generation,
+        parentSessionId: parent.id,
+      },
+      status: "READY",
+    });
+    await page
+      .getByLabel("READY command composer")
+      .fill('git status --short && printf \'GIT_OK PWD=%s SAFE=%s\\n\' "$PWD" "$ITERM_M7_SAFE"');
+    await page.getByRole("button", { name: "Execute Action" }).click();
+    await waitForPageText(page, '[data-testid="screen-reader-output"]', "GIT_OK");
+    await waitForPageText(page, '[data-testid="screen-reader-output"]', `PWD=${restoredCwd}`);
+    await waitForPageText(page, '[data-testid="screen-reader-output"]', "SAFE=historical");
+
+    const durable = await pool.query<{
+      actor_id: string;
+      child_session_id: string;
+      child_status: string;
+      parent_status: string;
+    }>(
+      `SELECT f.actor_id, f.child_session_id, child.status AS child_status,
+              parent.status AS parent_status
+         FROM session_forks f
+         JOIN sessions child ON child.id = f.child_session_id
+         JOIN sessions parent ON parent.id = f.parent_session_id
+        WHERE f.parent_session_id = $1`,
+      [parent.id],
+    );
+    expect(durable.rows).toHaveLength(1);
+    expect(durable.rows[0]).toMatchObject({
+      child_session_id: child?.id,
+      child_status: "READY",
+      parent_status: "BROKEN",
+    });
+    expect(durable.rows[0]?.actor_id).toMatch(/^human_console_/);
+  }, 60_000);
 });
 
 async function connectAgent(socketPath: string): Promise<Client> {

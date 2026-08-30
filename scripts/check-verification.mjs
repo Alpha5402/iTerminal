@@ -18,6 +18,7 @@ const requiredReports = [
   { level: "L3", path: "docs/verification/M6/2026-08-30-controlled-terminal-geometry.md" },
   { level: "L2", path: "docs/verification/M6/2026-08-30-terminal-state-evidence.md" },
   { level: "L2", path: "docs/verification/M7/2026-08-30-checkpoint-fork.md" },
+  { level: "L3", path: "docs/verification/M7/2026-08-30-durable-human-rebuild.md" },
   { level: "L2", path: "docs/verification/M8/2026-08-30-reliable-messaging.md" },
   { level: "L2", path: "docs/verification/M8/2026-08-30-owner-dispatch.md" },
   { level: "L2", path: "docs/verification/M8/2026-08-30-interaction-crash-retry-outage.md" },

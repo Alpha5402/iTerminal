@@ -4,6 +4,8 @@ import type {
   DurableExecuteAdmission,
   DurableExecuteAdmissionResult,
   DurableForkAdmission,
+  DurableOwnerRecoveryResult,
+  DurableRebuildableSession,
   DurableSessionEvent,
   RuntimeDurability,
 } from "@iterminal/application";
@@ -34,6 +36,8 @@ export interface PostgresRuntimeDurabilityOptions {
   readonly maxPendingOutbox?: number;
   readonly statementTimeoutMilliseconds?: number;
 }
+
+const MAX_REBUILDABLE_SESSIONS = 100;
 
 export class PostgresRuntimeDurability implements RuntimeDurability {
   readonly #pool: Pool;
@@ -1011,10 +1015,7 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
     };
   }
 
-  public async recoverOwner(
-    ownerId: string,
-    reason: string,
-  ): Promise<{ readonly brokenSessions: number; readonly unknownExecutions: number }> {
+  public async recoverOwner(ownerId: string, reason: string): Promise<DurableOwnerRecoveryResult> {
     return this.#transaction(async (client) => {
       const executions = await client.query<{ id: string }>(
         `UPDATE executions
@@ -1060,8 +1061,90 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
           },
         ]);
       }
+      const rebuildable = await client.query<{
+        checkpoint_version: number;
+        content_hash: string;
+        created_at: Date;
+        current_generation: number;
+        cwd: string;
+        filtered_env: unknown;
+        forked_at: Date | null;
+        next_action_sequence: string;
+        next_event_sequence: string;
+        observed_at: Date;
+        owner_id: string;
+        parent_generation: number | null;
+        parent_session_id: string | null;
+        screen_version: string;
+        session_id: string;
+        shell: "bash" | "zsh";
+        source_checkpoint_hash: string | null;
+        source_checkpoint_version: number | null;
+        workspace_root: string;
+      }>(
+        `SELECT s.id AS session_id, s.current_generation, s.shell, s.workspace_root,
+                s.owner_id, s.next_action_sequence, s.screen_version, s.created_at,
+                s.parent_session_id, s.parent_generation, s.source_checkpoint_version,
+                s.source_checkpoint_hash, s.forked_at, g.next_event_sequence,
+                c.checkpoint_version, c.cwd, c.filtered_env, c.content_hash, c.observed_at
+           FROM sessions s
+           JOIN session_generations g
+             ON g.session_id = s.id AND g.generation = s.current_generation
+           JOIN shell_checkpoints c
+             ON c.session_id = s.id AND c.source_generation = s.current_generation
+          WHERE s.owner_id = $1 AND s.status = 'BROKEN' AND g.status = 'BROKEN'
+          ORDER BY s.updated_at DESC, s.created_at DESC, s.id
+          LIMIT $2`,
+        [ownerId, MAX_REBUILDABLE_SESSIONS],
+      );
       return {
         brokenSessions: sessions.rowCount ?? 0,
+        rebuildableSessions: rebuildable.rows.flatMap((row) => {
+          const filteredEnvironment = stringRecord(row.filtered_env);
+          if (filteredEnvironment === undefined) return [];
+          const session: Session = {
+            actionSequence: Number.parseInt(row.next_action_sequence, 10),
+            createdAt: row.created_at.toISOString(),
+            eventSequence: Number.parseInt(row.next_event_sequence, 10),
+            generation: row.current_generation,
+            id: row.session_id,
+            ownerId: row.owner_id,
+            screenVersion: Number.parseInt(row.screen_version, 10),
+            shell: row.shell,
+            status: "BROKEN",
+            workspaceRoot: row.workspace_root,
+            ...(row.parent_session_id === null ||
+            row.parent_generation === null ||
+            row.source_checkpoint_version === null ||
+            row.source_checkpoint_hash === null ||
+            row.forked_at === null
+              ? {}
+              : {
+                  lineage: {
+                    checkpointHash: row.source_checkpoint_hash,
+                    checkpointVersion: row.source_checkpoint_version,
+                    forkedAt: row.forked_at.toISOString(),
+                    parentGeneration: row.parent_generation,
+                    parentSessionId: row.parent_session_id,
+                  },
+                }),
+          };
+          const recovered: DurableRebuildableSession = {
+            checkpoint: {
+              contentHash: row.content_hash,
+              cwd: row.cwd,
+              filteredEnvironment,
+              observedAt: row.observed_at.toISOString(),
+              sessionId: row.session_id,
+              shell: row.shell,
+              sourceGeneration: row.current_generation,
+              version: row.checkpoint_version,
+              workspaceRoot: row.workspace_root,
+            },
+            session,
+          };
+          return [recovered];
+        }),
         unknownExecutions: executions.rowCount ?? 0,
       };
     });
@@ -1090,6 +1173,13 @@ function positiveInteger(value: number, name: string): number {
     });
   }
   return value;
+}
+
+function stringRecord(value: unknown): Readonly<Record<string, string>> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const entries = Object.entries(value);
+  if (entries.some(([, item]) => typeof item !== "string")) return undefined;
+  return Object.fromEntries(entries);
 }
 
 async function insertEvents(

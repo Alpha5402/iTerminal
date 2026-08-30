@@ -17,12 +17,42 @@ interface Actor {
 
 interface Session {
   readonly activeExecutionId?: string;
+  readonly eventSequence: number;
   readonly generation: number;
   readonly id: string;
+  readonly lineage?: {
+    readonly checkpointHash: string;
+    readonly checkpointVersion: number;
+    readonly forkedAt: string;
+    readonly parentGeneration: number;
+    readonly parentSessionId: string;
+  };
   readonly screenVersion: number;
   readonly shell: "bash" | "zsh";
   readonly status: SessionStatus;
   readonly workspaceRoot: string;
+}
+
+interface ShellCheckpoint {
+  readonly ageMilliseconds: number;
+  readonly contentHash: string;
+  readonly cwd: string;
+  readonly environmentKeys: readonly string[];
+  readonly observedAt: string;
+  readonly sessionId: string;
+  readonly shell: "bash" | "zsh";
+  readonly sourceGeneration: number;
+  readonly sourceStatus: SessionStatus;
+  readonly stale: boolean;
+  readonly version: number;
+  readonly workspaceRoot: string;
+}
+
+interface SessionForkResult {
+  readonly checkpoint: ShellCheckpoint;
+  readonly limitations: readonly string[];
+  readonly replayed: boolean;
+  readonly session: Session;
 }
 
 interface InteractionGuard {
@@ -113,6 +143,8 @@ function App(): React.JSX.Element {
   const [selectedId, setSelectedId] = useState<string>();
   const [session, setSession] = useState<Session>();
   const [interaction, setInteraction] = useState<InteractionState>();
+  const [checkpoint, setCheckpoint] = useState<ShellCheckpoint>();
+  const [staleAcknowledged, setStaleAcknowledged] = useState(false);
   const [screen, setScreen] = useState<ScreenSnapshot>();
   const [timeline, setTimeline] = useState<readonly SessionEvent[]>([]);
   const [cursor, setCursor] = useState(0);
@@ -134,6 +166,7 @@ function App(): React.JSX.Element {
   const socket = useRef<WebSocket | undefined>(undefined);
   const reconnectTimer = useRef<number | undefined>(undefined);
   const reconnectAttempt = useRef(0);
+  const forkIdempotency = useRef(new Map<string, string>());
   const latestSession = useRef<Session | undefined>(undefined);
   const latestInteraction = useRef<InteractionState | undefined>(undefined);
   const latestScreen = useRef<ScreenSnapshot | undefined>(undefined);
@@ -278,10 +311,32 @@ function App(): React.JSX.Element {
     setInteraction(undefined);
     setScreen(undefined);
     latestScreen.current = undefined;
+    terminal.current?.reset();
+    setBrowserTerminalMirror("");
     setCursor(saved?.cursor ?? 0);
     latestCursor.current = saved?.cursor ?? 0;
     setTimeline(saved?.events ?? []);
+    setCheckpoint(undefined);
+    setStaleAcknowledged(false);
     let disposed = false;
+    if (selected.status === "BROKEN" || selected.status === "CLOSED") {
+      setStreamState("offline");
+      const after = Math.max(0, selected.eventSequence - MAX_TIMELINE_EVENTS);
+      void api<{ readonly events: readonly SessionEvent[]; readonly truncated: boolean }>(
+        `/api/sessions/${encodeURIComponent(selected.id)}/events?generation=${selected.generation.toString()}&after=${after.toString()}&limit=${MAX_TIMELINE_EVENTS.toString()}`,
+      )
+        .then((page) => {
+          if (disposed) return;
+          setTimeline(page.events);
+          setCursor(page.events.at(-1)?.sequence ?? 0);
+        })
+        .catch((reason: unknown) => {
+          if (!disposed) setError(normalizeClientError(reason));
+        });
+      return () => {
+        disposed = true;
+      };
+    }
     const connect = (): void => {
       if (disposed) return;
       setStreamState("connecting");
@@ -333,6 +388,26 @@ function App(): React.JSX.Element {
       socket.current = undefined;
     };
   }, [applyStreamFrame, selectedGeneration, selectedId]);
+
+  useEffect(() => {
+    if (session === undefined || session.status === "CLOSED") {
+      setCheckpoint(undefined);
+      return;
+    }
+    let disposed = false;
+    void api<ShellCheckpoint>(
+      `/api/sessions/${encodeURIComponent(session.id)}/checkpoint?generation=${session.generation.toString()}`,
+    )
+      .then((next) => {
+        if (!disposed) setCheckpoint(next);
+      })
+      .catch((reason: unknown) => {
+        if (!disposed) setError(normalizeClientError(reason));
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [session?.generation, session?.id, session?.status]);
 
   useEffect(() => {
     if (session?.status !== "RUNNING") setInteractive(false);
@@ -598,6 +673,51 @@ function App(): React.JSX.Element {
     }
   };
 
+  const forkSession = async (): Promise<void> => {
+    if (session === undefined || checkpoint === undefined) return;
+    if (checkpoint.stale && !staleAcknowledged) {
+      setError({
+        allowedNextActions: ["review_checkpoint", "acknowledge_stale_context"],
+        code: "CHECKPOINT_STALE",
+        details: { checkpointVersion: checkpoint.version, sourceStatus: checkpoint.sourceStatus },
+        message: "Acknowledge that this rebuild uses the last completed READY checkpoint.",
+        requestId: "browser-local",
+        retryable: false,
+      });
+      return;
+    }
+    try {
+      const requestScope = `${session.id}:${session.generation.toString()}:${checkpoint.version.toString()}:${checkpoint.contentHash}:${checkpoint.stale.toString()}`;
+      let idempotencyKey = forkIdempotency.current.get(requestScope);
+      if (idempotencyKey === undefined) {
+        idempotencyKey = crypto.randomUUID();
+        forkIdempotency.current.set(requestScope, idempotencyKey);
+        if (forkIdempotency.current.size > 32) {
+          const oldest = forkIdempotency.current.keys().next().value;
+          if (oldest !== undefined) forkIdempotency.current.delete(oldest);
+        }
+      }
+      const forked = await api<SessionForkResult>(
+        `/api/sessions/${encodeURIComponent(session.id)}/fork`,
+        {
+          body: {
+            allowStale: checkpoint.stale,
+            expectedCheckpointVersion: checkpoint.version,
+            generation: session.generation,
+            idempotencyKey,
+          },
+          method: "POST",
+        },
+      );
+      forkIdempotency.current.delete(requestScope);
+      await refreshSessions();
+      setSelectedId(forked.session.id);
+      setStaleAcknowledged(false);
+    } catch (reason) {
+      setError(normalizeClientError(reason));
+    }
+  };
+
   const resizeTerminal = async (event: React.FormEvent): Promise<void> => {
     event.preventDefault();
     if (session === undefined || screen === undefined) return;
@@ -655,6 +775,9 @@ function App(): React.JSX.Element {
                 <strong>{candidate.shell}</strong>
                 <span>{candidate.status}</span>
                 <small>{candidate.workspaceRoot}</small>
+                {candidate.lineage !== undefined && (
+                  <small>from {candidate.lineage.parentSessionId}</small>
+                )}
               </button>
             ))}
           </div>
@@ -750,12 +873,65 @@ function App(): React.JSX.Element {
                 <span>Raw keys become 20 ms InputAction batches.</span>
               </div>
             ) : (
-              <p className="mode-note">Select or create a READY Session.</p>
+              <p className="mode-note">
+                {session?.status === "BROKEN"
+                  ? "Historical generation: no live PTY or screen. Rebuild from its checkpoint."
+                  : "Select or create a READY Session."}
+              </p>
             )}
           </div>
         </section>
 
         <aside className="inspector" aria-label="Interaction and timeline">
+          <section className="checkpoint-panel" aria-label="Shell checkpoint and rebuild">
+            <div className="section-title">
+              <h2>Shell checkpoint</h2>
+              <span>{checkpoint === undefined ? "—" : `v${checkpoint.version.toString()}`}</span>
+            </div>
+            {checkpoint === undefined ? (
+              <p className="mode-note">No rebuildable checkpoint is currently selected.</p>
+            ) : (
+              <>
+                <dl className="facts">
+                  <dt>Source</dt>
+                  <dd>{checkpoint.sourceStatus}</dd>
+                  <dt>Age</dt>
+                  <dd>{formatAge(checkpoint.ageMilliseconds)}</dd>
+                  <dt>cwd</dt>
+                  <dd className="fact-path">{checkpoint.cwd}</dd>
+                  <dt>Environment</dt>
+                  <dd>{checkpoint.environmentKeys.join(", ") || "none"}</dd>
+                </dl>
+                <p className="checkpoint-warning">
+                  Creates a new PTY. It does not copy processes, REPL/editor memory, vim buffers,
+                  jobs, aliases, functions, traps, sockets, or file descriptors. Workspace files
+                  remain shared with the parent.
+                </p>
+                {checkpoint.stale && (
+                  <label className="stale-acknowledgement">
+                    <input
+                      checked={staleAcknowledged}
+                      onChange={(event) => setStaleAcknowledged(event.target.checked)}
+                      type="checkbox"
+                    />
+                    I understand this uses the last completed READY boundary, not the lost or
+                    running foreground state.
+                  </label>
+                )}
+                {session !== undefined && session.status !== "CLOSED" && (
+                  <button
+                    disabled={checkpoint.stale && !staleAcknowledged}
+                    onClick={() => void forkSession()}
+                    type="button"
+                  >
+                    {session.status === "BROKEN"
+                      ? "Rebuild new Session from checkpoint"
+                      : "Fork new Session from checkpoint"}
+                  </button>
+                )}
+              </>
+            )}
+          </section>
           <section>
             <div className="section-title">
               <h2>Interaction</h2>
@@ -980,6 +1156,18 @@ function actorName(actor: Actor): string {
 function formatTime(value: string | undefined): string {
   if (value === undefined) return "—";
   return new Date(value).toLocaleTimeString();
+}
+
+function formatAge(milliseconds: number): string {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return "unknown";
+  if (milliseconds < 1_000) return "just now";
+  const seconds = Math.floor(milliseconds / 1_000);
+  if (seconds < 60) return `${seconds.toString()}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes.toString()}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours.toString()}h`;
+  return `${Math.floor(hours / 24).toString()}d`;
 }
 
 class ConsoleApiError extends Error {

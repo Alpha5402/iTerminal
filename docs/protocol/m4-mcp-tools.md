@@ -1,6 +1,6 @@
 # M4 MCP stdio protocol
 
-M6.1–M7.1 extend this protocol with bounded screen observation, synchronization, stable styled-cell metadata, generation-scoped interaction policy, controlled terminal geometry, advisory terminal-state evidence, and versioned checkpoint fork while preserving the M4 Action and Event contracts.
+M6.1–M7.2 extend this protocol with bounded screen observation, synchronization, stable styled-cell metadata, generation-scoped interaction policy, controlled terminal geometry, advisory terminal-state evidence, versioned checkpoint fork, and same-owner durable rebuild while preserving the M4 Action and Event contracts.
 
 iTerminal uses the official Model Context Protocol TypeScript SDK v2 and `serveStdio`. The bridge logs only to stderr because stdout is the MCP framing channel. A separate Runtime daemon owns all live state; set `ITERM_RUNTIME_SOCKET` to its absolute Unix socket path before starting the bridge.
 
@@ -9,7 +9,7 @@ The daemon has two explicit storage modes:
 - Without `ITERM_DATABASE_URL`, it is a development-only in-memory live Runtime.
 - With `ITERM_DATABASE_URL`, Execute/Input/Control/Resize admission, interaction policy/Guard state, Shell Checkpoints, Session fork lineage/idempotency, and lifecycle facts are committed to PostgreSQL, PTY output enters a bounded per-Session ingest loop, and `events_query` reads the durable Event stream.
 
-In both modes the PTY remains process-local live truth. Restart recovery marks the previous stable owner generation `BROKEN` and ambiguous work `UNKNOWN`; it never rebuilds a fake live Session from rows.
+In both modes the PTY remains process-local live truth. Restart recovery marks the previous stable owner generation `BROKEN` and ambiguous work `UNKNOWN`; a PostgreSQL-backed daemon may expose a bounded same-owner `BROKEN` rebuild projection, but it has no Executor, screen, or fake READY state.
 
 ## Actor configuration
 
@@ -81,7 +81,7 @@ Guard expiry is bounded and versioned, not ownership: default TTL is 500 ms, acc
 
 `session_checkpoint` returns the latest exact-generation checkpoint version, content hash, canonical workspace/cwd, Shell, observation age, source status, staleness, and included environment key names. It never returns environment values. The daemon defaults checkpoint capture to `LANG`, `LC_ALL`, and `LC_CTYPE`; operators may set exact additional names with `ITERM_CHECKPOINT_ENV_KEYS`. Credential-like, Runtime-reserved, dynamic-loader, and Shell-startup names plus more than 32 configured keys are rejected; values above 4 KiB or containing newline/NUL are not checkpointed, and malformed control frames fail closed.
 
-`session_fork` requires `expectedCheckpointVersion`, an Actor-scoped idempotency key, and `allowStale: true` for a RUNNING/RESERVED/BROKEN parent. A READY source is re-certified into the next checkpoint version. The child restores only workspace/cwd, Shell kind, and filtered environment; it shares filesystem contents and never copies foreground/background processes, REPL/editor state, descriptors, job control, aliases, functions, or traps. Missing, changed, stale-unacknowledged, or invalid checkpoints fail before a child is admitted. M7.1 does not yet hydrate a historical parent into a new daemon after owner restart.
+`session_fork` requires `expectedCheckpointVersion`, an Actor-scoped idempotency key, and `allowStale: true` for a RUNNING/RESERVED/BROKEN parent. A READY source is re-certified into the next checkpoint version. The child restores only workspace/cwd, Shell kind, and filtered environment; it shares filesystem contents and never copies foreground/background processes, REPL/editor state, descriptors, job control, aliases, functions, or traps. Missing, changed, stale-unacknowledged, or invalid checkpoints fail before a child is admitted. After same-owner restart, the newest bounded valid historical parents are addressable only as `BROKEN` rebuild projections; clients inspect and explicitly fork them into new Session IDs.
 
 `screen_region` validates that the requested row/column rectangle fits the current canonical geometry. Coordinates and widths are terminal cells, not JavaScript string offsets; a wide glyph clipped by either region edge is represented as blank space. `screen_diff` retains 64 process-local revisions and returns bounded complete-row replacements plus current frame metadata. A future or evicted `afterVersion` returns `resyncRequired: true` with the current full snapshot. A diff crossing resize returns the same shape with reason `geometry_changed`; clients must replace their whole viewport instead of applying old coordinates. The ring is not durable and cannot resume a lost PTY generation.
 

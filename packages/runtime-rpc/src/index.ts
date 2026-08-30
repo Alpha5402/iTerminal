@@ -427,6 +427,7 @@ export async function startRuntimeRpcServer(options: {
   const server = createServer((socket) => {
     activeSockets.add(socket);
     socket.once("close", () => activeSockets.delete(socket));
+    socket.on("error", () => socket.destroy());
     handleSocket(socket, options.gateway, options.isReady);
   });
   const previousUmask = process.umask(0o177);
@@ -1013,6 +1014,7 @@ async function dispatch(
 }
 
 function writeResponse(socket: Socket, response: RpcResponse): void {
+  if (socket.destroyed || !socket.writable) return;
   socket.end(`${JSON.stringify(response)}\n`);
 }
 

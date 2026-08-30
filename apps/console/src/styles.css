@@ -47,6 +47,11 @@ button {
   cursor: pointer;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 button:hover,
 button:focus-visible,
 select:focus-visible,
@@ -314,6 +319,44 @@ textarea {
   margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.checkpoint-panel {
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #172033;
+}
+
+.checkpoint-panel button {
+  width: 100%;
+}
+
+.checkpoint-warning {
+  margin: 0;
+  padding: 0.7rem;
+  border: 1px solid #78350f;
+  border-radius: 8px;
+  color: #fcd34d;
+  background: rgb(120 53 15 / 18%);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.stale-acknowledgement {
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  color: #fbbf24;
+  line-height: 1.45;
+}
+
+.stale-acknowledgement input {
+  width: auto;
+  margin-top: 0.15rem;
+}
+
+.fact-path {
+  direction: rtl;
+  text-align: left;
+  white-space: nowrap;
 }
 
 .timeline {
