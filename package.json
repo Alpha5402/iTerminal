@@ -21,6 +21,7 @@
     "mcp": "tsx apps/mcp/src/main.ts",
     "outbox-relay": "tsx apps/outbox-relay/src/main.ts",
     "router": "tsx apps/runtime-router/src/main.ts",
+    "rpc:grant": "tsx apps/rpc-grant/src/main.ts",
     "spike:shell": "tsx spikes/shell-integration/src/cli.ts",
     "test": "vitest run",
     "test:m1": "vitest run packages/application/src/runtime-service.test.ts",

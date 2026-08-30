@@ -438,7 +438,12 @@ function startChild(
 ): ManagedChild {
   const child = spawn(process.execPath, ["--import", "tsx", join(repositoryRoot, entrypoint)], {
     cwd: repositoryRoot,
-    env: { ...process.env, ...environment },
+    env: {
+      ...process.env,
+      ITERM_RPC_TEST_ALLOW_UNAUTHENTICATED: "1",
+      NODE_ENV: "test",
+      ...environment,
+    },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const managed: ManagedChild = { label, process: child, stderr: "" };

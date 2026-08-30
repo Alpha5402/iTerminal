@@ -31,6 +31,7 @@ These terms are protocol contracts. Avoid synonyms in code and public APIs unles
 | Fencing token      | Globally monotonic Session-lease token checked inside every live durable mutation transaction.    |
 | Execution version  | Optimistic version for one Execution transition; independent of owner identity and fencing.       |
 | Runtime Router     | Stateless local RPC adapter that resolves durable owner routes and forwards to the exact daemon.  |
+| Runtime RPC grant  | Signed, expiring operation allowlist bound to an exact or bounded-prefix Actor scope.             |
 | Placement claim    | Atomic weighted assignment attempt for one new root Session using stable historical attempt debt. |
 | Action rate limit  | Durable database-time admission bound scoped independently to one Actor and one Session.          |
 | `UNKNOWN`          | The Runtime cannot prove whether a write or external side effect occurred/completed.              |
@@ -53,7 +54,7 @@ These terms are protocol contracts. Avoid synonyms in code and public APIs unles
 - Writable-primary detection != database consensus, promotion authority, or former-primary fencing.
 - Host-local Process Guardian != whole-host fencing, live PTY migration, or Session takeover.
 - `RATE_LIMITED` != `BACKPRESSURE`, `PTY_BUSY`, or an interaction-policy denial.
-- Actor identity != authenticated transport grant; M10.1 still has a trusted-local self-asserted RPC Actor.
+- Actor identity != Runtime RPC grant != Application capability admission; all three must agree.
 
 ## TerminalState evidence boundary
 

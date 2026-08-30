@@ -305,6 +305,8 @@ async function startService(
       ITERM_RABBITMQ_RECONNECT_INITIAL_MS: "100",
       ITERM_RABBITMQ_RECONNECT_MAX_MS: "500",
       ITERM_RABBITMQ_URL: rabbitMqUrl ?? "",
+      ITERM_RPC_TEST_ALLOW_UNAUTHENTICATED: "1",
+      NODE_ENV: "test",
       ...environment,
     },
     stdio: ["pipe", "pipe", "pipe"],

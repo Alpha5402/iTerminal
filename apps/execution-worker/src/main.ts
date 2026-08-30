@@ -5,6 +5,7 @@ import {
 } from "@iterminal/persistence-postgres";
 
 import { startExecutionWorker } from "./server.js";
+import { runtimeRpcAuthorizationFromEnvironment } from "@iterminal/runtime-rpc";
 
 const databaseUrl = configuredPostgresConnectionTarget({
   ...(process.env.ITERM_DATABASE_URL === undefined ? {} : { url: process.env.ITERM_DATABASE_URL }),
@@ -15,12 +16,14 @@ const databaseUrl = configuredPostgresConnectionTarget({
 if (databaseUrl === undefined) {
   throw new Error("ITERM_DATABASE_URL or ITERM_DATABASE_URLS is required");
 }
+const runtimeRpcAuthorization = runtimeRpcAuthorizationFromEnvironment(process.env);
 
 const worker = await startExecutionWorker({
   databaseUrl,
   rabbitMqUrl: rabbitMqEndpoints(),
   runtimeSocketPath: requiredEnvironment("ITERM_RUNTIME_SOCKET"),
   runtimeRoutingMode: runtimeRoutingMode(),
+  ...(runtimeRpcAuthorization === undefined ? {} : { runtimeRpcAuthorization }),
   ...(process.env.ITERM_CONSUMER_ID === undefined
     ? {}
     : { consumerId: process.env.ITERM_CONSUMER_ID }),

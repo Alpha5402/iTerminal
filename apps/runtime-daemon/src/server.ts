@@ -24,6 +24,7 @@ import {
   defaultRuntimeSocketPath,
   runtimeOwnerIdForSocket,
   startRuntimeRpcServer,
+  type RuntimeRpcAuthentication,
   type RuntimeRpcServerHandle,
 } from "@iterminal/runtime-rpc";
 
@@ -94,6 +95,7 @@ export async function startRuntimeDaemon(options: {
   readonly sessionActionRateLimit?: number;
   readonly socketPath: string;
   readonly processGuardianTerminationGraceMilliseconds?: number;
+  readonly rpcAuthentication?: RuntimeRpcAuthentication;
   readonly runtime?: RuntimeService;
 }): Promise<RuntimeDaemonHandle> {
   if (!isAbsolute(options.socketPath)) {
@@ -335,6 +337,9 @@ export async function startRuntimeDaemon(options: {
   let supervisor: PostgresRecoverySupervisor | undefined;
   try {
     rpc = await startRuntimeRpcServer({
+      ...(options.rpcAuthentication === undefined
+        ? {}
+        : { authentication: options.rpcAuthentication }),
       gateway: new LocalRuntimeGateway(runtime),
       isReady,
       socketPath: options.socketPath,

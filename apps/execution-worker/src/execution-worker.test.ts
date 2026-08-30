@@ -1,6 +1,6 @@
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { access, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
@@ -9,7 +9,12 @@ import { PostgresMessagingRepository } from "@iterminal/persistence-postgres";
 import { RabbitMqPublisher, runtimeQueueTopology } from "@iterminal/queue-rabbitmq";
 import { startRuntimeDaemon, type RuntimeDaemonHandle } from "@iterminal/runtime-daemon";
 import { startRuntimeRouter, type RuntimeRouterHandle } from "@iterminal/runtime-router";
-import { UnixRuntimeClient } from "@iterminal/runtime-rpc";
+import {
+  signRuntimeRpcGrant,
+  UnixRuntimeClient,
+  type RuntimeRpcActorGrant,
+  type RuntimeRpcGrantClaims,
+} from "@iterminal/runtime-rpc";
 import amqp from "amqplib";
 import { Pool } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -105,6 +110,69 @@ describeDispatch("M8.2 owner-local Execution dispatch", () => {
 
     expect(await readFile(fixture.sideEffect, "utf8")).toBe("once\n");
     expect(await eventCount(session.id, "execution.write_attempted")).toBe(1);
+    await client.closeSession(session.id, session.generation);
+  }, 30_000);
+
+  it("dispatches with an exact least-privilege Worker service grant", async () => {
+    const fixture = await createFixture("rpc-auth");
+    const queuePrefix = createQueuePrefix("rpc-auth");
+    const ownerId = "owner-m10-worker-auth";
+    const secret = randomBytes(32);
+    const audience = "iterminal-m10-worker";
+    const authentication = { audience, secret };
+    const daemon = await startRuntimeDaemon({
+      databaseHealthCheckMilliseconds: 50,
+      databaseReconnectInitialMilliseconds: 25,
+      databaseReconnectJitterRatio: 0,
+      databaseReconnectMaxMilliseconds: 25,
+      databaseUrl: databaseUrl ?? "",
+      executionDispatch: "external",
+      ownerId,
+      ownerLeaseMilliseconds: 300,
+      rpcAuthentication: authentication,
+      socketPath: fixture.socketPath,
+    });
+    await daemon.waitUntilReady();
+    daemons.push(daemon);
+    const workerToken = signRuntimeRpcGrant(
+      secret,
+      serviceGrant(audience, m10WorkerService, ["execution.dispatch"]),
+    );
+    const worker = await startExecutionWorker({
+      consumerId: "worker-m10-rpc-auth",
+      databaseUrl: databaseUrl ?? "",
+      ownerId,
+      queuePrefix,
+      rabbitMqUrl: rabbitMqUrl ?? "",
+      runtimeRpcAuthorization: workerToken,
+      runtimeSocketPath: fixture.socketPath,
+    });
+    await worker.waitUntilConnected();
+    workers.push(worker);
+    const publisher = await createPublisher(queuePrefix);
+    const agentToken = signRuntimeRpcGrant(
+      secret,
+      serviceGrant(audience, { ...testActor, kind: "exact" }, [
+        "execution.start",
+        "execution.wait",
+        "session.close",
+        "session.create",
+      ]),
+    );
+    const client = new UnixRuntimeClient(daemon.socketPath, { authorization: agentToken });
+    const session = await client.createSession({ shell: "zsh", workspaceRoot: fixture.workspace });
+    const admitted = await client.startExecute({
+      actor: testActor,
+      command: "printf 'authenticated-worker\\n'",
+      idempotencyKey: "m10-authenticated-worker",
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+    });
+    const relay = new OutboxRelay("publisher-m10-rpc-auth", messaging, publisher);
+    expect(await relay.publishBatch()).toEqual({ claimed: 1, failed: 0, published: 1 });
+    const completed = await client.waitExecution(admitted.execution.id);
+    expect(completed.status).toBe("COMPLETED");
+    expect(completed.output).toContain("authenticated-worker");
     await client.closeSession(session.id, session.generation);
   }, 30_000);
 
@@ -357,6 +425,32 @@ const testActor = {
   capabilities: ACTOR_CAPABILITY_PROFILES.agent,
   type: "agent" as const,
 };
+
+const m10WorkerService: RuntimeRpcActorGrant = {
+  capabilities: ACTOR_CAPABILITY_PROFILES.system,
+  client: "execution-worker",
+  id: "system-m10-execution-worker",
+  kind: "exact",
+  principal: "local-execution-worker",
+  type: "system",
+};
+
+function serviceGrant(
+  audience: string,
+  actor: RuntimeRpcActorGrant,
+  operations: RuntimeRpcGrantClaims["operations"],
+): RuntimeRpcGrantClaims {
+  const issuedAt = Math.floor(Date.now() / 1_000);
+  return {
+    actor,
+    audience,
+    expiresAt: issuedAt + 60,
+    grantId: `m10-service-${actor.kind === "exact" ? actor.id : actor.idPrefix}`,
+    issuedAt,
+    operations,
+    version: 1,
+  };
+}
 
 interface Fixture {
   readonly root: string;

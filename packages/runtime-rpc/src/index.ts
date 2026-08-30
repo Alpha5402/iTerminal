@@ -23,6 +23,7 @@ import type {
 } from "@iterminal/application";
 import type { RuntimeService } from "@iterminal/application";
 import type {
+  Actor,
   ControlAction,
   EventPage,
   ExecuteAction,
@@ -49,6 +50,16 @@ import {
   isCanonicalActorCapabilities,
 } from "@iterminal/domain";
 import * as z from "zod/v4";
+
+import {
+  authorizeRuntimeRpcGrant,
+  currentRuntimeRpcGrantToken,
+  runWithVerifiedRuntimeRpcGrant,
+  verifyRuntimeRpcGrant,
+  type RuntimeRpcAuthentication,
+} from "./auth.js";
+
+export * from "./auth.js";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
@@ -243,6 +254,10 @@ const operationSchemas = {
 } as const;
 
 export type RuntimeOperation = keyof typeof operationSchemas;
+export const RUNTIME_RPC_OPERATIONS = Object.freeze(
+  (Object.keys(operationSchemas) as RuntimeOperation[]).sort(),
+);
+const runtimeRpcOperationSet = new Set(RUNTIME_RPC_OPERATIONS);
 
 export interface StartedExecutionView {
   readonly action: ExecuteAction;
@@ -412,6 +427,7 @@ export class LocalRuntimeGateway implements RuntimeGateway {
 }
 
 interface RpcRequest {
+  readonly authorization?: string;
   readonly id: string;
   readonly operation: RuntimeOperation;
   readonly input: unknown;
@@ -437,6 +453,7 @@ export interface RuntimeRpcServerHandle {
 }
 
 export async function startRuntimeRpcServer(options: {
+  readonly authentication?: RuntimeRpcAuthentication;
   readonly socketPath: string;
   readonly gateway: RuntimeGateway;
   readonly isReady?: () => boolean;
@@ -448,7 +465,7 @@ export async function startRuntimeRpcServer(options: {
     activeSockets.add(socket);
     socket.once("close", () => activeSockets.delete(socket));
     socket.on("error", () => socket.destroy());
-    handleSocket(socket, options.gateway, options.isReady, activeResponses);
+    handleSocket(socket, options.gateway, options.isReady, options.authentication, activeResponses);
   });
   const previousUmask = process.umask(0o177);
   try {
@@ -513,7 +530,14 @@ export async function startRuntimeRpcServer(options: {
 }
 
 export class UnixRuntimeClient implements RuntimeGateway {
-  public constructor(private readonly socketPath: string) {}
+  public constructor(
+    private readonly socketPath: string,
+    private readonly options: Readonly<{ readonly authorization?: string }> = {},
+  ) {
+    if (options.authorization !== undefined && options.authorization.length === 0) {
+      throw new RuntimeError("INVALID_REQUEST", "Runtime RPC authorization cannot be empty");
+    }
+  }
 
   public createSession(request: CreateSessionRequest): Promise<Session> {
     const idempotencyKey = request.idempotencyKey ?? `session_create_${randomUUID()}`;
@@ -744,7 +768,15 @@ export class UnixRuntimeClient implements RuntimeGateway {
       }
       signal?.addEventListener("abort", onAbort, { once: true });
       socket.once("connect", () => {
-        socket.write(`${JSON.stringify({ id, input, operation })}\n`);
+        const authorization = this.options.authorization ?? currentRuntimeRpcGrantToken();
+        socket.write(
+          `${JSON.stringify({
+            ...(authorization === undefined ? {} : { authorization }),
+            id,
+            input,
+            operation,
+          })}\n`,
+        );
       });
       socket.on("data", (chunk: string) => {
         buffer += chunk;
@@ -790,6 +822,7 @@ function handleSocket(
   socket: Socket,
   gateway: RuntimeGateway,
   isReady: (() => boolean) | undefined,
+  authentication: RuntimeRpcAuthentication | undefined,
   activeResponses: Set<Promise<void>>,
 ): void {
   socket.setEncoding("utf8");
@@ -805,7 +838,7 @@ function handleSocket(
     const line = buffer.slice(0, newline);
     buffer = "";
     socket.pause();
-    const response = respond(socket, line, gateway, isReady);
+    const response = respond(socket, line, gateway, isReady, authentication);
     activeResponses.add(response);
     void response.then(
       () => activeResponses.delete(response),
@@ -819,6 +852,7 @@ async function respond(
   line: string,
   gateway: RuntimeGateway,
   isReady: (() => boolean) | undefined,
+  authentication: RuntimeRpcAuthentication | undefined,
 ): Promise<void> {
   let id = "unassigned";
   const abortController = new AbortController();
@@ -841,6 +875,17 @@ async function respond(
       throw new RuntimeError("INVALID_REQUEST", "Unsupported Runtime RPC operation");
     }
     const operation = parsed.operation;
+    const grant =
+      authentication === undefined
+        ? undefined
+        : verifyRuntimeRpcGrant(
+            typeof parsed.authorization === "string" ? parsed.authorization : "",
+            authentication,
+            runtimeRpcOperationSet,
+          );
+    if (parsed.authorization !== undefined && typeof parsed.authorization !== "string") {
+      throw new RuntimeError("INVALID_REQUEST", "Runtime RPC authorization is invalid");
+    }
     if (isReady !== undefined && !isReady()) {
       throw new RuntimeError(
         "RUNTIME_UNAVAILABLE",
@@ -850,7 +895,10 @@ async function respond(
       );
     }
     const input = operationSchemas[operation].parse(parsed.input);
-    const result = await dispatch(gateway, operation, input, abortController.signal);
+    if (grant !== undefined) authorizeRuntimeRpcGrant(grant, operation, inputActor(input));
+    const invoke = () => dispatch(gateway, operation, input, abortController.signal);
+    const result =
+      grant === undefined ? await invoke() : await runWithVerifiedRuntimeRpcGrant(grant, invoke);
     writeResponse(socket, { id, ok: true, result });
   } catch (error) {
     const runtimeError = normalizeError(error);
@@ -867,6 +915,12 @@ async function respond(
   } finally {
     socket.off("close", onSocketClose);
   }
+}
+
+function inputActor(input: unknown): Actor | undefined {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return undefined;
+  const actor = (input as Readonly<{ actor?: unknown }>).actor;
+  return actor === undefined ? undefined : (actor as Actor);
 }
 
 async function dispatch(

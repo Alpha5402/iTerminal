@@ -225,7 +225,9 @@ async function connectClient(socketPath: string): Promise<Client> {
       ITERM_ACTOR_CLIENT: "m6-state-client",
       ITERM_ACTOR_ID: "agent-m6-state",
       ITERM_ACTOR_PRINCIPAL: "m6-state-agent",
+      ITERM_RPC_TEST_ALLOW_UNAUTHENTICATED: "1",
       ITERM_RUNTIME_SOCKET: socketPath,
+      NODE_ENV: "test",
     },
     stderr: "pipe",
   });

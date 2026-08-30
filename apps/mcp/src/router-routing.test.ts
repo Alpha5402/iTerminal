@@ -128,7 +128,9 @@ describeDatabase("M9.2 official MCP Client through central Router", () => {
         ITERM_ACTOR_CLIENT: "m9-router-test",
         ITERM_ACTOR_ID: "agent-m9-router",
         ITERM_ACTOR_PRINCIPAL: "m9-router-test",
+        ITERM_RPC_TEST_ALLOW_UNAUTHENTICATED: "1",
         ITERM_RUNTIME_SOCKET: socketPath,
+        NODE_ENV: "test",
       },
       stderr: "pipe",
     });

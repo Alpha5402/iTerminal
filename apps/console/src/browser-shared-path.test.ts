@@ -451,7 +451,9 @@ async function connectAgent(socketPath: string): Promise<Client> {
       ITERM_ACTOR_CLIENT: "m5-browser-agent",
       ITERM_ACTOR_ID: "agent-m5-browser",
       ITERM_ACTOR_PRINCIPAL: "m5-browser-agent",
+      ITERM_RPC_TEST_ALLOW_UNAUTHENTICATED: "1",
       ITERM_RUNTIME_SOCKET: socketPath,
+      NODE_ENV: "test",
     },
     stderr: "pipe",
   });

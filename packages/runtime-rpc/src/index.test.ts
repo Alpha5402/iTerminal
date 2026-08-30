@@ -5,9 +5,20 @@ import { createConnection } from "node:net";
 
 import type { RuntimeError } from "@iterminal/domain";
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
+import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
-import { startRuntimeRpcServer, UnixRuntimeClient, type RuntimeGateway } from "./index.js";
+import {
+  authorizeRuntimeRpcGrant,
+  runtimeRpcAuthenticationFromEnvironment,
+  runtimeRpcAuthorizationFromEnvironment,
+  signRuntimeRpcGrant,
+  startRuntimeRpcServer,
+  UnixRuntimeClient,
+  verifyRuntimeRpcGrant,
+  type RuntimeGateway,
+  type RuntimeRpcGrantClaims,
+} from "./index.js";
 
 describe("UnixRuntimeClient delivery classification", () => {
   it("marks a read failure retryable when the daemon is unavailable", async () => {
@@ -294,8 +305,213 @@ describe("UnixRuntimeClient delivery classification", () => {
   });
 });
 
+describe("Runtime RPC signed grants", () => {
+  it("requires a valid unexpired grant and enforces its operation allowlist", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-auth-"));
+    const secret = randomBytes(32);
+    const authentication = { audience: "runtime-rpc-test", secret };
+    const server = await startRuntimeRpcServer({
+      authentication,
+      gateway: stubGateway(),
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    const token = signRuntimeRpcGrant(secret, exactAgentGrant(["session.list"]));
+    try {
+      await expect(new UnixRuntimeClient(server.socketPath).listSessions()).rejects.toMatchObject({
+        code: "POLICY_DENIED",
+        message: "Runtime RPC authorization failed",
+      });
+      await expect(
+        new UnixRuntimeClient(server.socketPath, { authorization: `${token}x` }).listSessions(),
+      ).rejects.toMatchObject({ code: "POLICY_DENIED" });
+      const authorized = new UnixRuntimeClient(server.socketPath, { authorization: token });
+      await expect(authorized.listSessions()).resolves.toEqual([]);
+      await expect(authorized.getSession("not-allowed")).rejects.toMatchObject({
+        code: "POLICY_DENIED",
+      });
+    } finally {
+      await server.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
+  it("binds an exact grant to the Actor instead of trusting the request body", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-actor-auth-"));
+    const secret = randomBytes(32);
+    const server = await startRuntimeRpcServer({
+      authentication: { audience: "runtime-rpc-test", secret },
+      gateway: stubGateway(),
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    const client = new UnixRuntimeClient(server.socketPath, {
+      authorization: signRuntimeRpcGrant(secret, exactAgentGrant(["execution.start"])),
+    });
+    try {
+      await expect(
+        client.startExecute({
+          actor: {
+            capabilities: ACTOR_CAPABILITY_PROFILES.human,
+            client: "human-console-web",
+            id: "human-forged",
+            principal: "local-console:forged",
+            type: "human",
+          },
+          command: "true",
+          idempotencyKey: "forged-human",
+          sessionGeneration: 1,
+          sessionId: "session-test",
+        }),
+      ).rejects.toMatchObject({ code: "POLICY_DENIED" });
+    } finally {
+      await server.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
+  it("forwards only a verified request grant across a Router-style RPC hop", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-auth-forward-"));
+    const secret = randomBytes(32);
+    const authentication = { audience: "runtime-rpc-test", secret };
+    const owner = await startRuntimeRpcServer({
+      authentication,
+      gateway: stubGateway(),
+      socketPath: join(fixture, "owner.sock"),
+    });
+    const router = await startRuntimeRpcServer({
+      authentication,
+      gateway: new UnixRuntimeClient(owner.socketPath),
+      socketPath: join(fixture, "router.sock"),
+    });
+    const token = signRuntimeRpcGrant(secret, exactAgentGrant(["session.list"]));
+    try {
+      await expect(
+        new UnixRuntimeClient(router.socketPath, { authorization: token }).listSessions(),
+      ).resolves.toEqual([]);
+      await expect(new UnixRuntimeClient(owner.socketPath).listSessions()).rejects.toMatchObject({
+        code: "POLICY_DENIED",
+      });
+    } finally {
+      await router.close();
+      await owner.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects an expired grant at the owner boundary", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-auth-expired-"));
+    const secret = randomBytes(32);
+    const claims = exactAgentGrant(["session.list"], 1_000);
+    const server = await startRuntimeRpcServer({
+      authentication: {
+        audience: "runtime-rpc-test",
+        now: () => new Date(1_061_000),
+        secret,
+      },
+      gateway: stubGateway(),
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    const client = new UnixRuntimeClient(server.socketPath, {
+      authorization: signRuntimeRpcGrant(secret, claims),
+    });
+    try {
+      await expect(client.listSessions()).rejects.toMatchObject({ code: "POLICY_DENIED" });
+    } finally {
+      await server.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
+  it("admits only a paired Human Console id and principal suffix", () => {
+    const secret = randomBytes(32);
+    const issuedAt = Math.floor(Date.now() / 1_000);
+    const token = signRuntimeRpcGrant(secret, {
+      actor: {
+        capabilities: ACTOR_CAPABILITY_PROFILES.human,
+        client: "human-console-web",
+        idPrefix: "human_console_",
+        kind: "paired_prefix",
+        principalPrefix: "local-console:",
+        type: "human",
+      },
+      audience: "runtime-rpc-test",
+      expiresAt: issuedAt + 60,
+      grantId: "console-prefix-test",
+      issuedAt,
+      operations: ["execution.start"],
+      version: 1,
+    });
+    const grant = verifyRuntimeRpcGrant(
+      token,
+      { audience: "runtime-rpc-test", secret },
+      new Set(["execution.start"]),
+    );
+    expect(() =>
+      authorizeRuntimeRpcGrant(grant, "execution.start", {
+        capabilities: ACTOR_CAPABILITY_PROFILES.human,
+        client: "human-console-web",
+        id: "human_console_cookie-1",
+        principal: "local-console:cookie-1",
+        type: "human",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      authorizeRuntimeRpcGrant(grant, "execution.start", {
+        capabilities: ACTOR_CAPABILITY_PROFILES.human,
+        client: "human-console-web",
+        id: "human_console_cookie-1",
+        principal: "local-console:cookie-2",
+        type: "human",
+      }),
+    ).toThrowError(expect.objectContaining({ code: "POLICY_DENIED" }));
+  });
+
+  it("requires production credentials and permits only an explicit test bypass", () => {
+    const encodedSecret = randomBytes(32).toString("base64url");
+    expect(() => runtimeRpcAuthenticationFromEnvironment({})).toThrowError(
+      expect.objectContaining({ code: "INVALID_REQUEST" }),
+    );
+    expect(
+      runtimeRpcAuthenticationFromEnvironment({ ITERM_RPC_AUTH_SECRET: encodedSecret }),
+    ).toMatchObject({ audience: "iterminal-runtime-rpc" });
+    expect(() => runtimeRpcAuthorizationFromEnvironment({})).toThrowError(
+      expect.objectContaining({ code: "INVALID_REQUEST" }),
+    );
+    expect(
+      runtimeRpcAuthorizationFromEnvironment({
+        ITERM_RPC_TEST_ALLOW_UNAUTHENTICATED: "1",
+        NODE_ENV: "test",
+      }),
+    ).toBeUndefined();
+    expect(() =>
+      runtimeRpcAuthorizationFromEnvironment({ ITERM_RPC_TEST_ALLOW_UNAUTHENTICATED: "1" }),
+    ).toThrowError(expect.objectContaining({ code: "POLICY_DENIED" }));
+  });
+});
+
 function missingSocket(suffix: string): string {
   return join(tmpdir(), `iterminal-missing-${process.pid.toString()}-${suffix}.sock`);
+}
+
+function exactAgentGrant(
+  operations: RuntimeRpcGrantClaims["operations"],
+  issuedAt = Math.floor(Date.now() / 1_000),
+): RuntimeRpcGrantClaims {
+  return {
+    actor: {
+      capabilities: ACTOR_CAPABILITY_PROFILES.agent,
+      client: "test-mcp",
+      id: "agent-rpc-test",
+      kind: "exact",
+      principal: "local-agent-test",
+      type: "agent",
+    },
+    audience: "runtime-rpc-test",
+    expiresAt: issuedAt + 60,
+    grantId: "rpc-test-grant",
+    issuedAt,
+    operations,
+    version: 1,
+  };
 }
 
 function readResponse(socket: ReturnType<typeof createConnection>): Promise<unknown> {

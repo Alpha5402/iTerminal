@@ -216,6 +216,15 @@ importers:
         specifier: workspace:*
         version: link:../../packages/queue-rabbitmq
 
+  apps/rpc-grant:
+    dependencies:
+      '@iterminal/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
+      '@iterminal/runtime-rpc':
+        specifier: workspace:*
+        version: link:../../packages/runtime-rpc
+
   apps/runtime-daemon:
     dependencies:
       '@iterminal/application':

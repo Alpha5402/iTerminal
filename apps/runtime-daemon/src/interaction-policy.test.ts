@@ -268,7 +268,9 @@ async function connectAgent(socketPath: string): Promise<Client> {
       ITERM_ACTOR_CLIENT: "m6-interaction-agent",
       ITERM_ACTOR_ID: "agent-m6-interaction",
       ITERM_ACTOR_PRINCIPAL: "m6-interaction-agent",
+      ITERM_RPC_TEST_ALLOW_UNAUTHENTICATED: "1",
       ITERM_RUNTIME_SOCKET: socketPath,
+      NODE_ENV: "test",
     },
     stderr: "pipe",
   });

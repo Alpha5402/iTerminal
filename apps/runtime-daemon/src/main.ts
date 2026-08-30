@@ -6,6 +6,7 @@ import {
   type RuntimeDaemonGuardianState,
 } from "./server.js";
 import { configuredPostgresConnectionTarget } from "@iterminal/persistence-postgres";
+import { runtimeRpcAuthenticationFromEnvironment } from "@iterminal/runtime-rpc";
 
 const socketPath = process.env.ITERM_RUNTIME_SOCKET ?? defaultRuntimeSocketPath();
 const databaseUrl = configuredPostgresConnectionTarget({
@@ -40,6 +41,7 @@ const drainTimeoutMilliseconds = optionalPositiveInteger("ITERM_RUNTIME_DRAIN_TI
 const processGuardianTerminationGraceMilliseconds = optionalPositiveInteger(
   "ITERM_RUNTIME_GUARDIAN_TERMINATION_GRACE_MS",
 );
+const rpcAuthentication = runtimeRpcAuthenticationFromEnvironment(process.env);
 const daemon = await startRuntimeDaemon({
   socketPath,
   ...(actionRateLimitWindowMilliseconds === undefined ? {} : { actionRateLimitWindowMilliseconds }),
@@ -65,6 +67,7 @@ const daemon = await startRuntimeDaemon({
   ...(processGuardianTerminationGraceMilliseconds === undefined
     ? {}
     : { processGuardianTerminationGraceMilliseconds }),
+  ...(rpcAuthentication === undefined ? {} : { rpcAuthentication }),
   ...(sessionLeaseMilliseconds === undefined ? {} : { sessionLeaseMilliseconds }),
   ...(sessionActionRateLimit === undefined ? {} : { sessionActionRateLimit }),
   onDrainState: reportDrainState,

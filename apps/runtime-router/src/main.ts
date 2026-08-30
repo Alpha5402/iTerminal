@@ -1,6 +1,7 @@
 import type { RuntimeRouterDatabaseState } from "./postgres-recovery-supervisor.js";
 import { defaultRuntimeRouterSocketPath, startRuntimeRouter } from "./server.js";
 import { configuredPostgresConnectionTarget } from "@iterminal/persistence-postgres";
+import { runtimeRpcAuthenticationFromEnvironment } from "@iterminal/runtime-rpc";
 
 const databaseUrl = configuredPostgresConnectionTarget({
   ...(process.env.ITERM_DATABASE_URL === undefined ? {} : { url: process.env.ITERM_DATABASE_URL }),
@@ -11,9 +12,11 @@ const databaseUrl = configuredPostgresConnectionTarget({
 if (databaseUrl === undefined) {
   throw new Error("ITERM_DATABASE_URL or ITERM_DATABASE_URLS is required");
 }
+const rpcAuthentication = runtimeRpcAuthenticationFromEnvironment(process.env);
 
 const router = await startRuntimeRouter({
   databaseUrl,
+  ...(rpcAuthentication === undefined ? {} : { rpcAuthentication }),
   superviseDatabase: true,
   onDatabaseState: reportDatabaseState,
   socketPath: process.env.ITERM_ROUTER_SOCKET ?? defaultRuntimeRouterSocketPath(),

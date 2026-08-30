@@ -2,6 +2,8 @@
 
 **Result: PASS at L2 (real local zsh/PTTY + Unix Runtime RPC + official MCP SDK Agent + PostgreSQL 17).** Actor authority is now an explicit closed capability set, capability denial happens before Action allocation or PTY delivery, and one durable Actor id cannot be rewritten with a different type, principal, client, or capability set.
 
+> Historical scope note: this report records the M10.1 boundary as verified on 2026-08-30. M10.2 subsequently closed the listed local Runtime RPC self-assertion gap; see the [M10.2 verification](./2026-08-31-runtime-rpc-authentication.md). The remaining items below are intentionally preserved as what this M10.1 run itself did not prove.
+
 ## Environment
 
 - macOS arm64 host, Node.js 26.4.0, pnpm 10.33.2.

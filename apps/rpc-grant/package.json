@@ -1,0 +1,11 @@
+{
+  "name": "@iterminal/rpc-grant",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/issuer.ts",
+  "dependencies": {
+    "@iterminal/domain": "workspace:*",
+    "@iterminal/runtime-rpc": "workspace:*"
+  }
+}

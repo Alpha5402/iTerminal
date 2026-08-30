@@ -292,7 +292,9 @@ async function connectClient(name: string): Promise<Client> {
       ITERM_ACTOR_CLIENT: "m4-test-mcp",
       ITERM_ACTOR_ID: "agent-m4",
       ITERM_ACTOR_PRINCIPAL: "m4-test-agent",
+      ITERM_RPC_TEST_ALLOW_UNAUTHENTICATED: "1",
       ITERM_RUNTIME_SOCKET: daemon.socketPath,
+      NODE_ENV: "test",
     },
     stderr: "pipe",
   });

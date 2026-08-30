@@ -48,6 +48,7 @@ import {
 import {
   startRuntimeRpcServer,
   UnixRuntimeClient,
+  type RuntimeRpcAuthentication,
   type RuntimeGateway,
   type RuntimeRpcServerHandle,
   type StartedExecutionView,
@@ -435,6 +436,7 @@ export async function startRuntimeRouter(options: {
   readonly databaseUrl: PostgresConnectionTarget;
   readonly hooks?: RuntimeRouterHooks;
   readonly onDatabaseState?: (state: RuntimeRouterDatabaseState) => void;
+  readonly rpcAuthentication?: RuntimeRpcAuthentication;
   readonly socketPath: string;
   readonly superviseDatabase?: boolean;
 }): Promise<RuntimeRouterHandle> {
@@ -474,7 +476,13 @@ export async function startRuntimeRouter(options: {
       options.hooks,
       supervisor?.gate,
     );
-    rpc = await startRuntimeRpcServer({ gateway, socketPath: options.socketPath });
+    rpc = await startRuntimeRpcServer({
+      ...(options.rpcAuthentication === undefined
+        ? {}
+        : { authentication: options.rpcAuthentication }),
+      gateway,
+      socketPath: options.socketPath,
+    });
     const rpcHandle = rpc;
     const databaseSupervisor = supervisor;
     let closePromise: Promise<void> | undefined;

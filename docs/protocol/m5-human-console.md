@@ -12,7 +12,7 @@ The Human Console is a trusted-local adapter defined by ADR-0024. It never owns 
 - `GET /api/bootstrap` creates or resumes the opaque `iterminal_console` HttpOnly, SameSite=Strict cookie. No credential appears in a URL.
 - Request bodies cannot select `actor`, `session status`, or Runtime owner.
 
-This boundary prevents ambient web pages and DNS-rebinding hostnames from driving the local Console. It is not remote authentication or multi-user authorization. The Console-to-Runtime RPC Actor remains self-asserted until ADR-0048 binds it to a scoped grant, so M10.1 capability checks alone are not an authentication claim.
+This boundary prevents ambient web pages and DNS-rebinding hostnames from driving the local Console. M10.2 additionally requires one signed Console-to-Runtime grant scoped to `human_console_<suffix>` and `local-console:<same-suffix>`, the exact `human-console-web` client, canonical Human capabilities, and an explicit operation allowlist. The Runtime checks that scope before dispatch and the owner repeats verification after a Router hop. It is still local same-OS-user authentication, not remote or multi-user isolation.
 
 ## Response envelope
 

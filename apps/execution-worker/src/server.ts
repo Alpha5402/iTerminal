@@ -42,6 +42,7 @@ export interface ExecutionWorkerOptions {
   readonly rabbitMqReconnectJitterRatio?: number;
   readonly rabbitMqReconnectMaxMilliseconds?: number;
   readonly runtimeRoutingMode?: "owner" | "router";
+  readonly runtimeRpcAuthorization?: string;
   readonly onPostgresConnectionState?: (state: PostgresConnectionState) => void;
   readonly onRabbitMqConnectionState?: (state: RabbitMqConnectionState) => void;
   readonly runtimeSocketPath: string;
@@ -84,7 +85,11 @@ export async function startExecutionWorker(
       options.onPostgresConnectionState?.(state);
     },
   });
-  const runtime = new UnixRuntimeClient(options.runtimeSocketPath);
+  const runtime = new UnixRuntimeClient(options.runtimeSocketPath, {
+    ...(options.runtimeRpcAuthorization === undefined
+      ? {}
+      : { authorization: options.runtimeRpcAuthorization }),
+  });
   const processor = new ExecutionReadyProcessor(
     consumerId,
     repository,

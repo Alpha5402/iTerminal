@@ -1,4 +1,4 @@
-import { UnixRuntimeClient } from "@iterminal/runtime-rpc";
+import { UnixRuntimeClient, runtimeRpcAuthorizationFromEnvironment } from "@iterminal/runtime-rpc";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 
@@ -17,7 +17,10 @@ const actor = {
   principal: process.env.ITERM_ACTOR_PRINCIPAL ?? "local-agent",
   type: "agent" as const,
 };
-const gateway = new UnixRuntimeClient(socketPath);
+const runtimeRpcAuthorization = runtimeRpcAuthorizationFromEnvironment(process.env);
+const gateway = new UnixRuntimeClient(socketPath, {
+  ...(runtimeRpcAuthorization === undefined ? {} : { authorization: runtimeRpcAuthorization }),
+});
 const handle = serveStdio(() => createMcpServer(gateway, actor));
 process.stderr.write("iTerminal MCP bridge listening on stdio\n");
 

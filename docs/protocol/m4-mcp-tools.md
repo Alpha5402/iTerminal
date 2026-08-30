@@ -70,7 +70,7 @@ One bridge process represents one Agent Actor:
 
 The Actor type is always `agent`, and the bridge supplies the canonical Agent capability profile: `approval.request`, `session.execute`, `session.fork`, `terminal.control`, `terminal.input`, and `terminal.resize`. Tool arguments cannot choose an Actor, claim to be Human, or add capabilities. Runtime RPC requires the exact canonical capability list and Application admission checks it independently from Input Policy and Guard state.
 
-M10.1 does not yet authenticate this assertion at the Runtime RPC socket. A raw trusted-local RPC client can still construct an Actor body; ADR-0048 owns scoped, unforgeable grants. This is an explicit remaining boundary, not remote or multi-user authorization.
+M10.2 requires the bridge to present an expiring exact-Actor Runtime RPC grant. The Runtime compares the grant's Agent id, principal, client, and canonical capabilities with the request body before gateway dispatch; the operation must also appear in the grant allowlist. A central Router forwards only an already-verified grant and the owner verifies it again. This remains local same-OS-user authentication, not remote or multi-user isolation.
 
 ## Tools
 
@@ -148,22 +148,26 @@ Direct single-owner development uses two terminals:
 
 ```bash
 ITERM_DATABASE_URL=postgresql://iterminal@127.0.0.1:5432/iterminal \
+  ITERM_RPC_AUTH_SECRET="$SERVER_SECRET" \
   ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm daemon
-ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm mcp
+ITERM_RPC_GRANT="$MCP_GRANT" ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm mcp
 ```
 
 The multi-owner path adds the Router and points adapters at its stable socket:
 
 ```bash
 ITERM_DATABASE_URL=postgresql://iterminal@127.0.0.1:5432/iterminal \
+  ITERM_RPC_AUTH_SECRET="$SERVER_SECRET" \
   ITERM_RUNTIME_OWNER_ID=owner-a ITERM_RUNTIME_SOCKET=/tmp/iterminal-a.sock pnpm daemon
 ITERM_DATABASE_URL=postgresql://iterminal@127.0.0.1:5432/iterminal \
+  ITERM_RPC_AUTH_SECRET="$SERVER_SECRET" \
   ITERM_RUNTIME_OWNER_ID=owner-b ITERM_RUNTIME_SOCKET=/tmp/iterminal-b.sock pnpm daemon
 ITERM_DATABASE_URL=postgresql://iterminal@127.0.0.1:5432/iterminal \
+  ITERM_RPC_AUTH_SECRET="$SERVER_SECRET" \
   ITERM_ROUTER_SOCKET=/tmp/iterminal-router.sock pnpm router
-ITERM_RUNTIME_SOCKET=/tmp/iterminal-router.sock pnpm mcp
+ITERM_RPC_GRANT="$MCP_GRANT" ITERM_RUNTIME_SOCKET=/tmp/iterminal-router.sock pnpm mcp
 ```
 
-An Execution Worker that uses this socket must also set `ITERM_RUNTIME_ROUTING_MODE=router`. Owner mode remains the default and retains its exact owner-ID check.
+Create `SERVER_SECRET` and an exact `MCP_GRANT` whose Actor fields match `ITERM_ACTOR_*` by following the [M10.2 authentication protocol](./m10-runtime-rpc-authentication.md). An Execution Worker that uses this socket must also receive its own `ITERM_RPC_GRANT` limited to `execution.dispatch` and set `ITERM_RUNTIME_ROUTING_MODE=router`. Owner mode remains the default and retains its exact owner-ID check.
 
 The second command is normally launched by an MCP Client, not by a Human directly. The official SDK v2 serving guide documents `serveStdio` and the requirement that logs stay off stdout: <https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/serving/stdio.md>.
