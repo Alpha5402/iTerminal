@@ -185,6 +185,7 @@ function stubGateway(): RuntimeGateway {
     getScreenCells: unsupported,
     getScreenDiff: unsupported,
     getScreenRegion: unsupported,
+    getTerminalState: unsupported,
     getSession: unsupported,
     listSessions: () => Promise.resolve([]),
     queryEvents: unsupported,

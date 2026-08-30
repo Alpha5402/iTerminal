@@ -22,6 +22,7 @@ import type {
   TerminalScreenSnapshot,
   TerminalScreenSearchResult,
   TerminalScreenWaitResult,
+  TerminalStateObservation,
 } from "@iterminal/domain";
 import {
   DEFAULT_INTERACTION_GUARD_TTL_MS,
@@ -46,6 +47,7 @@ import type {
   TerminalScreenProjection,
   TerminalScreenProjectionFactory,
 } from "./ports.js";
+import { classifyTerminalState } from "./terminal-state.js";
 
 const DEFAULT_EVENT_LIMIT = 100;
 const MAX_EVENT_LIMIT = 500;
@@ -368,6 +370,26 @@ export class RuntimeService {
         true,
       );
     }
+  }
+
+  public async getTerminalState(
+    sessionId: string,
+    generation: number,
+  ): Promise<TerminalStateObservation> {
+    return this.#withMutationLock(sessionId, async () => {
+      const screen = await this.getScreen(sessionId, generation);
+      const session = this.#requireGeneration(sessionId, generation);
+      const execution =
+        session.activeExecutionId === undefined
+          ? undefined
+          : this.store.getExecution(session.activeExecutionId);
+      return classifyTerminalState({
+        ...(execution === undefined ? {} : { execution }),
+        observedAt: this.#timestamp(),
+        screen,
+        session,
+      });
+    });
   }
 
   public async searchScreen(request: ScreenSearchRequest): Promise<TerminalScreenSearchResult> {

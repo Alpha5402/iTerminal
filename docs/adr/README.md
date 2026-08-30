@@ -29,6 +29,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0023](./0023-generation-scoped-interaction-policy.md)  | Version policy and short Human Interaction Guards        | Accepted for M6.5        |
 | [0024](./0024-human-console-transport.md)               | Keep Human HTTP/WS as a loopback Runtime adapter         | Accepted for M5          |
 | [0025](./0025-controlled-terminal-geometry.md)          | Make resize an explicit Runtime-owned versioned Action   | Accepted for M6.6        |
+| [0026](./0026-bounded-terminal-state-evidence.md)       | Expose bounded advisory terminal-state evidence          | Accepted for M6.7        |
 
 Statuses:
 

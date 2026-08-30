@@ -36,6 +36,7 @@ import type {
   TerminalScreenSearchResult,
   TerminalScreenSnapshot,
   TerminalScreenWaitResult,
+  TerminalStateObservation,
 } from "@iterminal/domain";
 import { MAX_TERMINAL_COLUMNS, MAX_TERMINAL_ROWS, RuntimeError } from "@iterminal/domain";
 import * as z from "zod/v4";
@@ -166,6 +167,7 @@ const operationSchemas = {
     idempotencyKey: z.string().min(1).max(256),
     rows: z.number().int().min(12).max(MAX_TERMINAL_ROWS),
   }),
+  "terminal.state.get": sessionIdentitySchema,
   "screen.cells": screenRectangleSchema,
   "screen.diff": sessionIdentitySchema.extend({
     afterVersion: z.number().int().nonnegative(),
@@ -220,6 +222,7 @@ export interface RuntimeGateway {
   getSession(sessionId: string): Promise<Session>;
   listSessions(): Promise<readonly Session[]>;
   getScreen(sessionId: string, generation: number): Promise<TerminalScreenSnapshot>;
+  getTerminalState(sessionId: string, generation: number): Promise<TerminalStateObservation>;
   getScreenCells(request: ScreenCellsRequest): Promise<TerminalScreenCellsResult>;
   getScreenDiff(request: ScreenDiffRequest): Promise<TerminalScreenDiffResult>;
   getScreenRegion(request: ScreenRegionRequest): Promise<TerminalScreenRegionResult>;
@@ -266,6 +269,13 @@ export class LocalRuntimeGateway implements RuntimeGateway {
 
   public getScreen(sessionId: string, generation: number): Promise<TerminalScreenSnapshot> {
     return this.runtime.getScreen(sessionId, generation);
+  }
+
+  public getTerminalState(
+    sessionId: string,
+    generation: number,
+  ): Promise<TerminalStateObservation> {
+    return this.runtime.getTerminalState(sessionId, generation);
   }
 
   public getScreenCells(request: ScreenCellsRequest): Promise<TerminalScreenCellsResult> {
@@ -446,6 +456,13 @@ export class UnixRuntimeClient implements RuntimeGateway {
 
   public getScreen(sessionId: string, generation: number): Promise<TerminalScreenSnapshot> {
     return this.#request("screen.get", { generation, sessionId });
+  }
+
+  public getTerminalState(
+    sessionId: string,
+    generation: number,
+  ): Promise<TerminalStateObservation> {
+    return this.#request("terminal.state.get", { generation, sessionId });
   }
 
   public getScreenCells(request: ScreenCellsRequest): Promise<TerminalScreenCellsResult> {
@@ -899,6 +916,10 @@ async function dispatch(
     case "screen.get": {
       const request = operationSchemas[operation].parse(input);
       return gateway.getScreen(request.sessionId, request.generation);
+    }
+    case "terminal.state.get": {
+      const request = operationSchemas[operation].parse(input);
+      return gateway.getTerminalState(request.sessionId, request.generation);
     }
     case "screen.cells": {
       const request = operationSchemas[operation].parse(input);

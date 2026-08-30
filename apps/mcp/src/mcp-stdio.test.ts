@@ -53,6 +53,7 @@ describe("M4 stdio MCP bridge", () => {
       "session_get",
       "session_list",
       "terminal_resize",
+      "terminal_state",
     ]);
 
     const session = await callTool<SessionResult>(first, "session_create", {

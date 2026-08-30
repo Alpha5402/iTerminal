@@ -131,6 +131,56 @@ export interface TerminalScreenWaitResult {
   readonly execution?: Execution;
 }
 
+export type TerminalStateKind =
+  "shell_ready" | "running" | "editor" | "pager" | "repl" | "password" | "confirm" | "unknown";
+
+export type TerminalStateConfidence = "high" | "medium" | "low";
+
+export type TerminalStateEvidenceCode =
+  | "session.starting"
+  | "session.ready"
+  | "session.reserved"
+  | "session.running"
+  | "session.broken"
+  | "session.closed"
+  | "execution.running"
+  | "command.editor_family"
+  | "command.pager_family"
+  | "command.repl_family"
+  | "command.monitor_family"
+  | "screen.alternate_buffer"
+  | "screen.editor_marker"
+  | "screen.pager_marker"
+  | "screen.repl_prompt"
+  | "screen.password_prompt"
+  | "screen.confirm_prompt";
+
+export interface TerminalStateEvidence {
+  readonly code: TerminalStateEvidenceCode;
+  readonly source: "runtime" | "execution" | "screen";
+  readonly strength: "fact" | "signal";
+}
+
+export type TerminalStateLimitation =
+  | "advisory_not_authorization"
+  | "not_readiness_or_completion"
+  | "screen_content_spoofable"
+  | "command_may_not_be_foreground"
+  | "terminal_echo_mode_unobserved"
+  | "process_state_not_reconstructed";
+
+export interface TerminalStateObservation {
+  readonly advisory: true;
+  readonly confidence: TerminalStateConfidence;
+  readonly evidence: readonly TerminalStateEvidence[];
+  readonly executionId?: string;
+  readonly frame: TerminalScreenFrame;
+  readonly kind: TerminalStateKind;
+  readonly limitations: readonly TerminalStateLimitation[];
+  readonly observedAt: string;
+  readonly sessionStatus: SessionStatus;
+}
+
 export interface Actor {
   readonly id: string;
   readonly type: ActorType;

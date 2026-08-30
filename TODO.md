@@ -1,10 +1,10 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
-> 状态：Implementation Baseline v5.7 — M5 shared path 与 M6.6 controlled geometry 已通过 Browser Human + official MCP Agent L3；M0–M4.1、M6.5 与 M8.9 后端路径已通过 L2，M4 autonomous-model L3 仍待显式授权
+> 状态：Implementation Baseline v5.8 — M5 shared path 与 M6.6 controlled geometry 已通过 Browser Human + official MCP Agent L3；M6.7 bounded TerminalState 已通过 real PTY/official MCP L2；M0–M4.1、M6.5 与 M8.9 后端路径保持 L2，M4 autonomous-model L3 仍待显式授权
 >
 > 基线日期：2026-08-30
 >
-> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live Runtime 已接入 PostgreSQL write-ahead journal、bounded ingest loop、versioned dynamic ANSI/VT Virtual Screen，以及 generation-scoped Input Policy/Interaction Guard。M5/M6.6 增加 loopback Human Console 与受控 ResizeAction：真实无头 Chrome Human 和 official MCP SDK Agent 已在同一 PostgreSQL/zsh Session 中共享 cwd/env/Python REPL，并分别驱动同一 PTY 的 SIGWINCH；`geometryVersion` CAS、跨几何 full resync、browser/headless 文本一致、Action 归属与 UNKNOWN/BROKEN 均有证据。Viewer 布局不拥有 geometry。M8.9 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放、DB/AMQP 恢复与真实三节点 RabbitMQ quorum leader failover。Autonomous model 授权、更广 TUI/跨浏览器/style parity、daemon restart 后 durable wait、Approval/secret、非对称分区、long soak、M9 fencing、多 Worker 与完整 MVP/L4 仍未完成。
+> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live Runtime 已接入 PostgreSQL write-ahead journal、bounded ingest loop、versioned dynamic ANSI/VT Virtual Screen，以及 generation-scoped Input Policy/Interaction Guard。M5/M6.6 增加 loopback Human Console 与受控 ResizeAction：真实无头 Chrome Human 和 official MCP SDK Agent 已在同一 PostgreSQL/zsh Session 中共享 cwd/env/Python REPL，并分别驱动同一 PTY 的 SIGWINCH；`geometryVersion` CAS、跨几何 full resync、browser/headless 文本一致、Action 归属与 UNKNOWN/BROKEN 均有证据。M6.7 增加 exact-generation 只读 `terminal_state`：Runtime/Execution 事实与有界 command/screen signal 分层，不把 password/confirm/editor/pager/REPL heuristic 当作授权、READY、完成、Approval 或 secret-channel 事实。Viewer 布局不拥有 geometry。M8.9 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放、DB/AMQP 恢复与真实三节点 RabbitMQ quorum leader failover。Autonomous model 授权、更广 TUI/跨浏览器/style parity、daemon restart 后 durable wait、Approval/secret、非对称分区、long soak、M9 fencing、多 Worker 与完整 MVP/L4 仍未完成。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -580,11 +580,10 @@ M9 spike/ADR 选型；不能让任意 Worker 消费后新建第二个“同 Sess
 - Session：`session_create`、`session_get`、`session_list`、`session_close`。
 - Action/Execution：`execute`、`execution_get`、`execution_wait`、`input`、`control`、`terminal_resize`。
 - Event：`events_query`。
-- Screen：`screen_get`、`screen_region`、`screen_cells`、`screen_diff`、`screen_search`、`screen_wait`。
+- Screen：`screen_get`、`screen_region`、`screen_cells`、`screen_diff`、`screen_search`、`screen_wait`、`terminal_state`。
 
 后续按能力分阶段增加：
 
-- M6.5：只读 `interaction_get`，让 Agent 在 Input/Control/Resize 前观察 policy、guard、version 与 expiry；Agent 默认不能经 MCP 修改 policy 或持有 Human Guard。
 - M7：`session_fork`；完成 checkpoint/fork 语义前不注册空壳。
 - Event exact-get/全文 search 只有在 bounded schema、权限与分页契约冻结后才注册；底层 repository 已有能力不等于 MCP 工具已交付。
 
@@ -872,8 +871,8 @@ Exit Gate：已通过 L3 shared path。真实无头 Chrome Human Console + offic
 - [ ] daemon restart 后的 durable wait/subscription 恢复。
 - [x] expected screen version 与 `SCREEN_CHANGED`：Agent 读屏后 Human Actor 经 Runtime RPC 改屏，Agent stale input 被拒绝。
 - [x] common/human_guarded/human_only/agent_only 与短期 Guard（L2 backend + L3 Browser Human/MCP shared path）。
-- [ ] TerminalState heuristic + confidence/evidence。
-- [ ] shell/REPL/vim/nano/top/pager/confirm/password-like fixtures。
+- [x] exact-generation read-only `TerminalState` heuristic + closed confidence/evidence/limitations；不当作安全事实。
+- [x] real bash/zsh + official MCP 的 shell/REPL/vim/nano/top/pager/confirm/password-like/spoof fixtures（L2）。
 
 核心场景：
 
@@ -882,7 +881,7 @@ Exit Gate：已通过 L3 shared path。真实无头 Chrome Human Console + offic
 - [x] Human raw input 活跃时 Agent input 不插入半行；guard 过期/释放后可继续（L2 RPC + L3 Browser Human/MCP）。
 - [x] Human xterm.js 与 Agent headless screen 在 Human/Agent resize 后文本一致（L3 Chrome + official MCP；style/pixel parity 仍未覆盖）。
 
-#### M6.5 — Input Policy 与 Interaction Guard（下一可执行切片，目标：L2）
+#### M6.5 — Input Policy 与 Interaction Guard（已完成 backend L2）
 
 这是一项 generation-scoped 协调机制，不是 Human/Agent ownership，也不是长期锁。建议先在 ADR-0023 冻结下列精确契约，再写代码：
 
@@ -940,6 +939,15 @@ interface InteractionState {
 - [x] L2 real PostgreSQL + PTY + official MCP Client：Human RPC 持有 Guard 时 Agent MCP input 返回 `INPUT_GUARDED` 且画面无半行；Guard 到期/释放后 Agent 可继续；`human_only/agent_only/common` 行为与矩阵一致。
 - [ ] L2 crash/restart：Guard 与 policy durable 可观察；旧 generation Guard 不影响新 generation；未知 Input/Control 仍遵守 ADR-0011，绝不因 Guard 过期自动重放。
 - [x] 功能闭合后运行受影响测试、`pnpm verify`、`git diff --check`，保存 `docs/verification/M6/2026-08-30-interaction-guard.md`；该报告保持 backend L2，Browser/MCP L3 另见 M5 verification。
+
+#### M6.7 — Bounded TerminalState Evidence（已完成 L2）
+
+- [x] ADR-0026 冻结只读、exact-generation、snapshot-bound 的证据契约和安全边界。
+- [x] Domain/Application 实现 closed-enum `kind/confidence/evidence/limitations`，最多各 8 项，不返回 raw command/screen/input/env/secret。
+- [x] Runtime RPC `terminal.state.get` 与 MCP `terminal_state`；读取不写 Event、Action 或 `session_snapshots`。
+- [x] READY/RUNNING 优先使用 Shell Integration 事实；prompt-looking 文本、alternate buffer、command family 仅为 signal。
+- [x] real PTY/official MCP fixture 覆盖 bash/zsh READY、stable RUNNING、Python REPL、vim、nano、less、top、confirm、password-like、spoof 与 stale generation。
+- [x] 证据报告保持 L2；未授权 autonomous model 自动输入，不宣称 foreground-process/echo-mode 重建或 M6 全量 L3。
 
 Exit Gate：M0–M6 的 L3 证据齐全；到此才能称为 MVP。
 
@@ -1154,7 +1162,7 @@ v1.0 还必须满足 M7–M10、fork 语义、故障矩阵、owner routing、mul
 9. [x] `feat(interaction): enforce generation-scoped input policy and guards`：完成 M6.5 Domain/Application/PostgreSQL/RPC/MCP 与 L2 场景，不包含 Human Console。
 10. [x] `feat(console): add shared human terminal path`：完成 M5 最小 HTTP/WS、composer、interactive focus、actor/timeline 与 policy/guard UI，形成首条 L3 Browser Human + official MCP Agent 路径。
 11. [x] `feat(screen): add controlled resize and geometry ownership`：完成 canonical geometry owner、resize/reflow、CAS/UNKNOWN 与 Human/headless L3 fixture 对照。
-12. `feat(screen): classify bounded terminal state evidence`：只实现有 confidence/evidence 的 heuristic 与 shell/REPL/TUI fixtures，不把 heuristic 当权限事实。
+12. [x] `feat(screen): classify bounded terminal state evidence`：完成有 confidence/evidence/limitations 的 heuristic 与 real shell/REPL/TUI fixtures，不把 heuristic 当权限事实。
 13. `feat(session): fork from versioned shell checkpoint`：进入 M7；只复制明确列出的可重建 context。
 
 M5 shared path 已闭合，但 M6 完整 L3 与其余 MVP Gate 未闭合前，不因为 M8 已有故障证据就宣称 MVP。
