@@ -21,15 +21,18 @@ export interface OutboxRelayHandle {
 }
 
 export interface StartOutboxRelayOptions extends RelayOptions {
+  readonly databaseConnectionTimeoutMilliseconds?: number;
   readonly databaseHealthCheckMilliseconds?: number;
   readonly databaseReconnectInitialMilliseconds?: number;
   readonly databaseReconnectJitterRatio?: number;
   readonly databaseReconnectMaxMilliseconds?: number;
+  readonly databaseOperationTimeoutMilliseconds?: number;
   readonly databaseUrl: string;
   readonly onPostgresConnectionState?: (state: PostgresConnectionState) => void;
   readonly onRabbitMqConnectionState?: (state: RabbitMqConnectionState) => void;
   readonly publisherId?: string;
   readonly queuePrefix?: string;
+  readonly rabbitMqHeartbeatSeconds?: number;
   readonly rabbitMqReconnectInitialMilliseconds?: number;
   readonly rabbitMqReconnectJitterRatio?: number;
   readonly rabbitMqReconnectMaxMilliseconds?: number;
@@ -41,6 +44,9 @@ export async function startOutboxRelay(
 ): Promise<OutboxRelayHandle> {
   let databaseState: PostgresConnectionState = { attempt: 0, state: "CONNECTING" };
   const repository = await SupervisedPostgresMessagingRepository.start(options.databaseUrl, {
+    ...(options.databaseConnectionTimeoutMilliseconds === undefined
+      ? {}
+      : { connectionTimeoutMilliseconds: options.databaseConnectionTimeoutMilliseconds }),
     ...(options.databaseHealthCheckMilliseconds === undefined
       ? {}
       : { healthCheckMilliseconds: options.databaseHealthCheckMilliseconds }),
@@ -53,6 +59,9 @@ export async function startOutboxRelay(
     ...(options.databaseReconnectMaxMilliseconds === undefined
       ? {}
       : { maxDelayMilliseconds: options.databaseReconnectMaxMilliseconds }),
+    ...(options.databaseOperationTimeoutMilliseconds === undefined
+      ? {}
+      : { operationTimeoutMilliseconds: options.databaseOperationTimeoutMilliseconds }),
     onConnectionState: (state) => {
       databaseState = state;
       options.onPostgresConnectionState?.(state);
@@ -63,6 +72,9 @@ export async function startOutboxRelay(
     options.rabbitMqUrl,
     runtimeQueueTopology(options.queuePrefix ?? "iterminal"),
     {
+      ...(options.rabbitMqHeartbeatSeconds === undefined
+        ? {}
+        : { heartbeatSeconds: options.rabbitMqHeartbeatSeconds }),
       ...(options.rabbitMqReconnectInitialMilliseconds === undefined
         ? {}
         : { initialDelayMilliseconds: options.rabbitMqReconnectInitialMilliseconds }),

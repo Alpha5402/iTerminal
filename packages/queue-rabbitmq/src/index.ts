@@ -18,6 +18,8 @@ import amqp, {
   type Options,
 } from "amqplib";
 
+export const DEFAULT_RABBITMQ_HEARTBEAT_SECONDS = 5;
+
 export interface RabbitMqTopology {
   readonly deadLetterExchange: string;
   readonly deadLetterQueue: string;
@@ -91,8 +93,11 @@ export class RabbitMqPublisher implements DurableMessagePublisher {
   public static async connect(
     url: string,
     topology: RabbitMqTopology = runtimeQueueTopology(),
+    options: RabbitMqConnectionOptions = {},
   ): Promise<RabbitMqPublisher> {
-    const connection = await amqp.connect(url, { timeout: 5_000 });
+    const connection = await amqp.connect(withHeartbeat(url, options.heartbeatSeconds), {
+      timeout: 5_000,
+    });
     const channel = await connection.createConfirmChannel();
     attachErrorSinks(connection, channel);
     await assertRuntimeQueueTopology(channel, topology);
@@ -122,6 +127,7 @@ export class RabbitMqPublisher implements DurableMessagePublisher {
 }
 
 export interface RabbitMqConsumerOptions {
+  readonly heartbeatSeconds?: number;
   readonly prefetch?: number;
   readonly retryPublishFailureBackoffMilliseconds?: number;
   readonly topology?: RabbitMqTopology;
@@ -135,6 +141,7 @@ export interface RabbitMqConnectionState {
 }
 
 export interface RabbitMqReconnectOptions {
+  readonly heartbeatSeconds?: number;
   readonly initialDelayMilliseconds?: number;
   readonly jitterRatio?: number;
   readonly maxDelayMilliseconds?: number;
@@ -188,7 +195,9 @@ export class RabbitMqExecutionReadyConsumer {
     options: RabbitMqConsumerOptions = {},
   ): Promise<RabbitMqExecutionReadyConsumer> {
     const topology = options.topology ?? runtimeQueueTopology();
-    const connection = await amqp.connect(url, { timeout: 5_000 });
+    const connection = await amqp.connect(withHeartbeat(url, options.heartbeatSeconds), {
+      timeout: 5_000,
+    });
     const channel = await connection.createChannel();
     const retryChannel = await connection.createConfirmChannel();
     attachErrorSinks(connection, channel, retryChannel);
@@ -358,7 +367,11 @@ export class SupervisedRabbitMqPublisher implements DurableMessagePublisher {
     const attempt = this.#attempt + 1;
     notifyConnectionState(this.#reconnect, { attempt, state: "CONNECTING" });
     try {
-      const publisher = await RabbitMqPublisher.connect(this.url, this.topology);
+      const publisher = await RabbitMqPublisher.connect(this.url, this.topology, {
+        ...(this.#reconnect.heartbeatSeconds === undefined
+          ? {}
+          : { heartbeatSeconds: this.#reconnect.heartbeatSeconds }),
+      });
       if (this.#closed) {
         await publisher.close();
         throw new Error("RabbitMQ publisher is closed");
@@ -438,6 +451,9 @@ export class SupervisedRabbitMqExecutionReadyConsumer {
       notifyConnectionState(this.#reconnect, { attempt, state: "CONNECTING" });
       try {
         const consumer = await RabbitMqExecutionReadyConsumer.connect(this.url, this.processor, {
+          ...(this.#reconnect.heartbeatSeconds === undefined
+            ? {}
+            : { heartbeatSeconds: this.#reconnect.heartbeatSeconds }),
           ...(this.options.prefetch === undefined ? {} : { prefetch: this.options.prefetch }),
           ...(this.options.retryPublishFailureBackoffMilliseconds === undefined
             ? {}
@@ -533,6 +549,7 @@ function attachErrorSinks(...emitters: Array<Channel | ChannelModel>): void {
 }
 
 interface NormalizedReconnectOptions {
+  readonly heartbeatSeconds?: number;
   readonly initialDelayMilliseconds: number;
   readonly jitterRatio: number;
   readonly maxDelayMilliseconds: number;
@@ -560,7 +577,16 @@ function normalizeReconnectOptions(options: RabbitMqReconnectOptions): Normalize
   if (!Number.isFinite(jitterRatio) || jitterRatio < 0 || jitterRatio > 1) {
     throw new Error("RabbitMQ reconnect jitter ratio must be between zero and one");
   }
+  if (
+    options.heartbeatSeconds !== undefined &&
+    (!Number.isSafeInteger(options.heartbeatSeconds) || options.heartbeatSeconds < 1)
+  ) {
+    throw new Error("RabbitMQ heartbeat must be a positive integer in seconds");
+  }
   return {
+    ...(options.heartbeatSeconds === undefined
+      ? {}
+      : { heartbeatSeconds: options.heartbeatSeconds }),
     initialDelayMilliseconds,
     jitterRatio,
     maxDelayMilliseconds,
@@ -570,6 +596,27 @@ function normalizeReconnectOptions(options: RabbitMqReconnectOptions): Normalize
       : { onConnectionState: options.onConnectionState }),
     random: options.random ?? Math.random,
   };
+}
+
+interface RabbitMqConnectionOptions {
+  readonly heartbeatSeconds?: number;
+}
+
+function withHeartbeat(url: string, heartbeatSeconds?: number): string {
+  if (
+    heartbeatSeconds !== undefined &&
+    (!Number.isSafeInteger(heartbeatSeconds) || heartbeatSeconds < 1)
+  ) {
+    throw new Error("RabbitMQ heartbeat must be a positive integer in seconds");
+  }
+  const parsed = new URL(url);
+  if (heartbeatSeconds !== undefined || !parsed.searchParams.has("heartbeat")) {
+    parsed.searchParams.set(
+      "heartbeat",
+      (heartbeatSeconds ?? DEFAULT_RABBITMQ_HEARTBEAT_SECONDS).toString(),
+    );
+  }
+  return parsed.toString();
 }
 
 function reconnectDelay(attempt: number, options: NormalizedReconnectOptions): number {

@@ -5,7 +5,10 @@ import type {
 } from "@iterminal/messaging";
 import { RuntimeError } from "@iterminal/domain";
 
-import { PostgresMessagingRepository } from "./postgres-messaging-repository.js";
+import {
+  PostgresMessagingRepository,
+  type PostgresMessagingRepositoryOptions,
+} from "./postgres-messaging-repository.js";
 
 export interface PostgresConnectionState {
   readonly attempt: number;
@@ -24,6 +27,9 @@ export interface PostgresReconnectOptions {
   readonly random?: () => number;
 }
 
+export interface SupervisedPostgresMessagingOptions
+  extends PostgresReconnectOptions, PostgresMessagingRepositoryOptions {}
+
 export class SupervisedPostgresMessagingRepository
   implements OutboxRepository, ConsumerInbox, ExecutionReadyInspector
 {
@@ -41,16 +47,23 @@ export class SupervisedPostgresMessagingRepository
   #state: PostgresConnectionState = { attempt: 0, state: "CONNECTING" };
   #wake = deferred<void>();
 
-  private constructor(connectionString: string, options: PostgresReconnectOptions) {
+  private constructor(connectionString: string, options: SupervisedPostgresMessagingOptions) {
     this.#options = normalizeReconnectOptions(options);
-    this.#repository = new PostgresMessagingRepository(connectionString);
+    this.#repository = new PostgresMessagingRepository(connectionString, {
+      ...(options.connectionTimeoutMilliseconds === undefined
+        ? {}
+        : { connectionTimeoutMilliseconds: options.connectionTimeoutMilliseconds }),
+      ...(options.operationTimeoutMilliseconds === undefined
+        ? {}
+        : { operationTimeoutMilliseconds: options.operationTimeoutMilliseconds }),
+    });
     this.#runPromise = this.#run();
     void this.#runPromise.catch(() => undefined);
   }
 
   public static async start(
     connectionString: string,
-    options: PostgresReconnectOptions = {},
+    options: SupervisedPostgresMessagingOptions = {},
   ): Promise<SupervisedPostgresMessagingRepository> {
     const repository = new SupervisedPostgresMessagingRepository(connectionString, options);
     try {
@@ -286,8 +299,11 @@ const POSTGRES_AVAILABILITY_MESSAGES = [
   "connection ended unexpectedly",
   "connection is closed",
   "connection terminated unexpectedly",
+  "connection terminated due to connection timeout",
+  "query read timeout",
   "server closed the connection unexpectedly",
   "terminating connection due to administrator command",
+  "timeout exceeded when trying to connect",
 ];
 
 interface NormalizedReconnectOptions {

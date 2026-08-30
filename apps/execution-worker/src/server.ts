@@ -22,10 +22,12 @@ export interface ExecutionWorkerHandle {
 export interface ExecutionWorkerOptions {
   readonly beforeDispatch?: (message: ExecutionReadyMessage) => void;
   readonly consumerId?: string;
+  readonly databaseConnectionTimeoutMilliseconds?: number;
   readonly databaseHealthCheckMilliseconds?: number;
   readonly databaseReconnectInitialMilliseconds?: number;
   readonly databaseReconnectJitterRatio?: number;
   readonly databaseReconnectMaxMilliseconds?: number;
+  readonly databaseOperationTimeoutMilliseconds?: number;
   readonly databaseUrl: string;
   readonly inboxLeaseMilliseconds?: number;
   readonly maxAttempts?: number;
@@ -33,7 +35,9 @@ export interface ExecutionWorkerOptions {
   readonly prefetch?: number;
   readonly queuePrefix?: string;
   readonly rabbitMqUrl: string;
+  readonly rabbitMqHeartbeatSeconds?: number;
   readonly rabbitMqReconnectInitialMilliseconds?: number;
+  readonly rabbitMqReconnectJitterRatio?: number;
   readonly rabbitMqReconnectMaxMilliseconds?: number;
   readonly onPostgresConnectionState?: (state: PostgresConnectionState) => void;
   readonly onRabbitMqConnectionState?: (state: RabbitMqConnectionState) => void;
@@ -47,6 +51,9 @@ export async function startExecutionWorker(
   const consumerId = options.consumerId ?? `execution-worker:${ownerId}`;
   let databaseState: PostgresConnectionState = { attempt: 0, state: "CONNECTING" };
   const repository = await SupervisedPostgresMessagingRepository.start(options.databaseUrl, {
+    ...(options.databaseConnectionTimeoutMilliseconds === undefined
+      ? {}
+      : { connectionTimeoutMilliseconds: options.databaseConnectionTimeoutMilliseconds }),
     ...(options.databaseHealthCheckMilliseconds === undefined
       ? {}
       : { healthCheckMilliseconds: options.databaseHealthCheckMilliseconds }),
@@ -59,6 +66,9 @@ export async function startExecutionWorker(
     ...(options.databaseReconnectMaxMilliseconds === undefined
       ? {}
       : { maxDelayMilliseconds: options.databaseReconnectMaxMilliseconds }),
+    ...(options.databaseOperationTimeoutMilliseconds === undefined
+      ? {}
+      : { operationTimeoutMilliseconds: options.databaseOperationTimeoutMilliseconds }),
     onConnectionState: (state) => {
       databaseState = state;
       options.onPostgresConnectionState?.(state);
@@ -166,12 +176,18 @@ async function runConsumerLifecycle(input: {
       input.options.rabbitMqUrl,
       input.processor,
       {
+        ...(input.options.rabbitMqHeartbeatSeconds === undefined
+          ? {}
+          : { heartbeatSeconds: input.options.rabbitMqHeartbeatSeconds }),
         ...(input.options.prefetch === undefined ? {} : { prefetch: input.options.prefetch }),
         ...(input.options.rabbitMqReconnectInitialMilliseconds === undefined
           ? {}
           : {
               initialDelayMilliseconds: input.options.rabbitMqReconnectInitialMilliseconds,
             }),
+        ...(input.options.rabbitMqReconnectJitterRatio === undefined
+          ? {}
+          : { jitterRatio: input.options.rabbitMqReconnectJitterRatio }),
         ...(input.options.rabbitMqReconnectMaxMilliseconds === undefined
           ? {}
           : { maxDelayMilliseconds: input.options.rabbitMqReconnectMaxMilliseconds }),

@@ -15,19 +15,32 @@ import { Pool, type PoolClient } from "pg";
 import { migrateDatabase } from "./migrate.js";
 import { guardPostgresPool } from "./postgres-pool.js";
 
+export interface PostgresMessagingRepositoryOptions {
+  readonly connectionTimeoutMilliseconds?: number;
+  readonly operationTimeoutMilliseconds?: number;
+}
+
 export class PostgresMessagingRepository
   implements OutboxRepository, ConsumerInbox, ExecutionReadyInspector
 {
   readonly #pool: Pool;
 
-  public constructor(connectionString: string) {
+  public constructor(connectionString: string, options: PostgresMessagingRepositoryOptions = {}) {
+    const connectionTimeoutMilliseconds = positiveInteger(
+      options.connectionTimeoutMilliseconds ?? 5_000,
+      "connectionTimeoutMilliseconds",
+    );
+    const operationTimeoutMilliseconds = positiveInteger(
+      options.operationTimeoutMilliseconds ?? 30_000,
+      "operationTimeoutMilliseconds",
+    );
     this.#pool = guardPostgresPool(
       new Pool({
         connectionString,
-        connectionTimeoutMillis: 5_000,
+        connectionTimeoutMillis: connectionTimeoutMilliseconds,
         max: 20,
-        query_timeout: 30_000,
-        statement_timeout: 30_000,
+        query_timeout: operationTimeoutMilliseconds,
+        statement_timeout: operationTimeoutMilliseconds,
       }),
     );
   }
@@ -385,4 +398,13 @@ function truncateError(value: string): string {
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function positiveInteger(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new RuntimeError("INVALID_REQUEST", `${name} must be a positive integer`, {
+      [name]: value,
+    });
+  }
+  return value;
 }

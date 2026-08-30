@@ -21,6 +21,9 @@ const relay = await startOutboxRelay({
           "ITERM_RABBITMQ_RECONNECT_INITIAL_MS",
         ),
       }),
+  ...(process.env.ITERM_RABBITMQ_HEARTBEAT_SECONDS === undefined
+    ? {}
+    : { rabbitMqHeartbeatSeconds: positiveInteger("ITERM_RABBITMQ_HEARTBEAT_SECONDS") }),
   ...(process.env.ITERM_RABBITMQ_RECONNECT_MAX_MS === undefined
     ? {}
     : {
@@ -29,6 +32,20 @@ const relay = await startOutboxRelay({
   ...(process.env.ITERM_DATABASE_HEALTH_CHECK_MS === undefined
     ? {}
     : { databaseHealthCheckMilliseconds: positiveInteger("ITERM_DATABASE_HEALTH_CHECK_MS") }),
+  ...(process.env.ITERM_DATABASE_CONNECTION_TIMEOUT_MS === undefined
+    ? {}
+    : {
+        databaseConnectionTimeoutMilliseconds: positiveInteger(
+          "ITERM_DATABASE_CONNECTION_TIMEOUT_MS",
+        ),
+      }),
+  ...(process.env.ITERM_DATABASE_OPERATION_TIMEOUT_MS === undefined
+    ? {}
+    : {
+        databaseOperationTimeoutMilliseconds: positiveInteger(
+          "ITERM_DATABASE_OPERATION_TIMEOUT_MS",
+        ),
+      }),
   ...(process.env.ITERM_DATABASE_RECONNECT_INITIAL_MS === undefined
     ? {}
     : {

@@ -9,6 +9,7 @@ describe("PostgreSQL availability classification", () => {
     Object.assign(new Error("administrator shutdown"), { code: "57P01" }),
     Object.assign(new Error("transport failure"), { code: "08006" }),
     new Error("Connection terminated unexpectedly"),
+    new Error("Query read timeout"),
     new RuntimeError("RUNTIME_UNAVAILABLE", "messaging repository unavailable"),
   ])("recognizes a reconnectable transport failure", (error) => {
     expect(isPostgresAvailabilityError(error)).toBe(true);
