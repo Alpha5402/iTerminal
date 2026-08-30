@@ -213,12 +213,62 @@ export interface Session {
   readonly workspaceRoot: string;
   readonly createdAt: string;
   readonly ownerId: string;
+  readonly lineage?: SessionLineage;
   status: SessionStatus;
   activeExecutionId?: string;
   screenVersion: number;
   actionSequence: number;
   eventSequence: number;
   closedAt?: string;
+}
+
+export interface SessionLineage {
+  readonly checkpointHash: string;
+  readonly checkpointVersion: number;
+  readonly forkedAt: string;
+  readonly parentGeneration: number;
+  readonly parentSessionId: string;
+}
+
+export interface ShellCheckpoint {
+  readonly contentHash: string;
+  readonly cwd: string;
+  readonly filteredEnvironment: Readonly<Record<string, string>>;
+  readonly observedAt: string;
+  readonly sessionId: string;
+  readonly shell: ShellKind;
+  readonly sourceGeneration: number;
+  readonly version: number;
+  readonly workspaceRoot: string;
+}
+
+export interface ShellCheckpointView {
+  readonly ageMilliseconds: number;
+  readonly contentHash: string;
+  readonly cwd: string;
+  readonly environmentKeys: readonly string[];
+  readonly observedAt: string;
+  readonly sessionId: string;
+  readonly shell: ShellKind;
+  readonly sourceGeneration: number;
+  readonly sourceStatus: SessionStatus;
+  readonly stale: boolean;
+  readonly version: number;
+  readonly workspaceRoot: string;
+}
+
+export type SessionForkLimitation =
+  | "process_state_not_copied"
+  | "repl_editor_state_not_copied"
+  | "shell_implicit_state_not_copied"
+  | "workspace_filesystem_shared"
+  | "filtered_environment_only";
+
+export interface SessionForkResult {
+  readonly checkpoint: ShellCheckpointView;
+  readonly limitations: readonly SessionForkLimitation[];
+  readonly replayed: boolean;
+  readonly session: Session;
 }
 
 export interface Execution {

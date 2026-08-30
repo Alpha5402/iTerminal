@@ -10,6 +10,7 @@ import type {
   CreateSessionRequest,
   ExecuteRequest,
   InputRequest,
+  ForkSessionRequest,
   ReleaseInteractionGuardRequest,
   RenewInteractionGuardRequest,
   ResizeRequest,
@@ -30,6 +31,8 @@ import type {
   InteractionState,
   ResizeAction,
   Session,
+  SessionForkResult,
+  ShellCheckpointView,
   TerminalScreenCellsResult,
   TerminalScreenDiffResult,
   TerminalScreenRegionResult,
@@ -54,6 +57,10 @@ const runtimeErrorCodes = new Set<RuntimeError["code"]>([
   "EXECUTION_CHANGED",
   "SCREEN_CHANGED",
   "GEOMETRY_CHANGED",
+  "CHECKPOINT_NOT_FOUND",
+  "CHECKPOINT_CHANGED",
+  "CHECKPOINT_STALE",
+  "CHECKPOINT_INVALID",
   "INPUT_GUARDED",
   "INTERACTION_GUARD_CHANGED",
   "POLICY_DENIED",
@@ -202,9 +209,16 @@ const operationSchemas = {
     timeoutMilliseconds: z.number().int().min(1).max(300_000).default(30_000),
   }),
   "session.close": sessionIdentitySchema,
+  "session.checkpoint.get": sessionIdentitySchema,
   "session.create": z.strictObject({
     shell: z.enum(["bash", "zsh"]),
     workspaceRoot: z.string().min(1).max(4096),
+  }),
+  "session.fork": sessionIdentitySchema.extend({
+    actor: actorSchema,
+    allowStale: z.boolean(),
+    expectedCheckpointVersion: z.number().int().positive(),
+    idempotencyKey: z.string().min(1).max(256),
   }),
   "session.get": z.strictObject({ sessionId: z.string().min(1).max(256) }),
   "session.list": z.strictObject({}),
@@ -219,6 +233,8 @@ export interface StartedExecutionView {
 
 export interface RuntimeGateway {
   createSession(request: CreateSessionRequest): Promise<Session>;
+  getSessionCheckpoint(sessionId: string, generation: number): Promise<ShellCheckpointView>;
+  forkSession(request: ForkSessionRequest): Promise<SessionForkResult>;
   getSession(sessionId: string): Promise<Session>;
   listSessions(): Promise<readonly Session[]>;
   getScreen(sessionId: string, generation: number): Promise<TerminalScreenSnapshot>;
@@ -257,6 +273,14 @@ export class LocalRuntimeGateway implements RuntimeGateway {
 
   public createSession(request: CreateSessionRequest): Promise<Session> {
     return this.runtime.createSession(request);
+  }
+
+  public getSessionCheckpoint(sessionId: string, generation: number): Promise<ShellCheckpointView> {
+    return Promise.resolve(this.runtime.getSessionCheckpoint(sessionId, generation));
+  }
+
+  public forkSession(request: ForkSessionRequest): Promise<SessionForkResult> {
+    return this.runtime.forkSession(request);
   }
 
   public getSession(sessionId: string): Promise<Session> {
@@ -443,6 +467,21 @@ export class UnixRuntimeClient implements RuntimeGateway {
     return this.#request("session.create", {
       shell: request.shell,
       workspaceRoot: request.workspaceRoot,
+    });
+  }
+
+  public getSessionCheckpoint(sessionId: string, generation: number): Promise<ShellCheckpointView> {
+    return this.#request("session.checkpoint.get", { generation, sessionId });
+  }
+
+  public forkSession(request: ForkSessionRequest): Promise<SessionForkResult> {
+    return this.#request("session.fork", {
+      actor: request.actor,
+      allowStale: request.allowStale,
+      expectedCheckpointVersion: request.expectedCheckpointVersion,
+      generation: request.sessionGeneration,
+      idempotencyKey: request.idempotencyKey,
+      sessionId: request.sessionId,
     });
   }
 
@@ -784,6 +823,21 @@ async function dispatch(
         workspaceRoot: request.workspaceRoot,
       });
     }
+    case "session.checkpoint.get": {
+      const request = operationSchemas[operation].parse(input);
+      return gateway.getSessionCheckpoint(request.sessionId, request.generation);
+    }
+    case "session.fork": {
+      const request = operationSchemas[operation].parse(input);
+      return gateway.forkSession({
+        actor: request.actor,
+        allowStale: request.allowStale,
+        expectedCheckpointVersion: request.expectedCheckpointVersion,
+        idempotencyKey: request.idempotencyKey,
+        sessionGeneration: request.generation,
+        sessionId: request.sessionId,
+      });
+    }
     case "session.get": {
       const request = operationSchemas[operation].parse(input);
       return gateway.getSession(request.sessionId);
@@ -1037,6 +1091,7 @@ function connectionError(
 function isMutating(operation: RuntimeOperation): boolean {
   return (
     operation === "session.create" ||
+    operation === "session.fork" ||
     operation === "session.close" ||
     operation === "execution.dispatch" ||
     operation === "execution.start" ||

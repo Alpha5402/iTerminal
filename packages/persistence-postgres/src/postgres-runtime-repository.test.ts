@@ -165,6 +165,7 @@ describeDatabase("PostgresRuntimeRepository", () => {
         sessionId: session.id,
         shell: "zsh",
         sourceGeneration: 1,
+        workspaceRoot: "/new",
       }),
     ).toBe(true);
     expect(
@@ -177,6 +178,7 @@ describeDatabase("PostgresRuntimeRepository", () => {
         sessionId: session.id,
         shell: "zsh",
         sourceGeneration: 1,
+        workspaceRoot: "/old",
       }),
     ).toBe(false);
 

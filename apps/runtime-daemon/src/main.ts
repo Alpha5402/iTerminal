@@ -8,6 +8,7 @@ const socketPath = process.env.ITERM_RUNTIME_SOCKET ?? defaultRuntimeSocketPath(
 const databaseUrl = process.env.ITERM_DATABASE_URL;
 const ownerId = process.env.ITERM_RUNTIME_OWNER_ID;
 const executionDispatch = parseExecutionDispatch(process.env.ITERM_EXECUTION_DISPATCH);
+const checkpointEnvironmentKeys = optionalEnvironmentKeys("ITERM_CHECKPOINT_ENV_KEYS");
 const databaseStatementTimeoutMilliseconds = optionalPositiveInteger(
   "ITERM_DATABASE_STATEMENT_TIMEOUT_MS",
 );
@@ -19,6 +20,7 @@ const databaseReconnectMaxMilliseconds = optionalPositiveInteger("ITERM_DATABASE
 const databaseHealthCheckMilliseconds = optionalPositiveInteger("ITERM_DATABASE_HEALTH_CHECK_MS");
 const daemon = await startRuntimeDaemon({
   socketPath,
+  ...(checkpointEnvironmentKeys === undefined ? {} : { checkpointEnvironmentKeys }),
   ...(databaseUrl === undefined ? {} : { databaseUrl }),
   ...(executionDispatch === undefined ? {} : { executionDispatch }),
   ...(databaseStatementTimeoutMilliseconds === undefined
@@ -66,6 +68,15 @@ function optionalPositiveInteger(name: string): number | undefined {
     throw new Error(`${name} must be a positive integer`);
   }
   return value;
+}
+
+function optionalEnvironmentKeys(name: string): readonly string[] | undefined {
+  const raw = process.env[name];
+  if (raw === undefined) return undefined;
+  return raw
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value !== "");
 }
 
 function reportDurabilityState(state: RuntimeDaemonDurabilityState): void {

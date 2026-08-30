@@ -33,6 +33,7 @@
     "test:m6:resize": "vitest run packages/terminal-screen/src/index.test.ts packages/persistence-postgres/src/postgres-terminal-geometry.test.ts apps/runtime-daemon/src/resize.test.ts",
     "test:m6:resize:browser": "pnpm build:console && vitest run apps/console/src/browser-shared-path.test.ts",
     "test:m6:state": "vitest run packages/application/src/terminal-state.test.ts apps/mcp/src/terminal-state.test.ts",
+    "test:m7:fork": "vitest run --maxWorkers=1 packages/executor-pty/src/control-protocol.test.ts packages/application/src/session-fork.test.ts apps/mcp/src/session-fork.test.ts apps/runtime-daemon/src/session-fork-durable.test.ts",
     "test:m8:messaging": "vitest run packages/queue-rabbitmq/src/rabbitmq-messaging.test.ts",
     "test:m8:dispatch": "vitest run apps/execution-worker/src/execution-worker.test.ts",
     "test:m8:interactions": "vitest run apps/runtime-daemon/src/interaction-crash.test.ts",

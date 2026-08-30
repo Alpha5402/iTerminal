@@ -177,6 +177,7 @@ function stubGateway(): RuntimeGateway {
   return {
     closeSession: unsupported,
     createSession: unsupported,
+    forkSession: unsupported,
     dispatchExecution: unsupported,
     acquireInteractionGuard: unsupported,
     getExecution: unsupported,
@@ -187,6 +188,7 @@ function stubGateway(): RuntimeGateway {
     getScreenRegion: unsupported,
     getTerminalState: unsupported,
     getSession: unsupported,
+    getSessionCheckpoint: unsupported,
     listSessions: () => Promise.resolve([]),
     queryEvents: unsupported,
     releaseInteractionGuard: unsupported,

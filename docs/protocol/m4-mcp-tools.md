@@ -1,13 +1,13 @@
 # M4 MCP stdio protocol
 
-M6.1–M6.7 extend this protocol with bounded screen observation, synchronization, stable styled-cell metadata, generation-scoped interaction policy, controlled terminal geometry, and advisory terminal-state evidence while preserving the M4 Action and Event contracts.
+M6.1–M7.1 extend this protocol with bounded screen observation, synchronization, stable styled-cell metadata, generation-scoped interaction policy, controlled terminal geometry, advisory terminal-state evidence, and versioned checkpoint fork while preserving the M4 Action and Event contracts.
 
 iTerminal uses the official Model Context Protocol TypeScript SDK v2 and `serveStdio`. The bridge logs only to stderr because stdout is the MCP framing channel. A separate Runtime daemon owns all live state; set `ITERM_RUNTIME_SOCKET` to its absolute Unix socket path before starting the bridge.
 
 The daemon has two explicit storage modes:
 
 - Without `ITERM_DATABASE_URL`, it is a development-only in-memory live Runtime.
-- With `ITERM_DATABASE_URL`, Execute/Input/Control/Resize admission, interaction policy/Guard state, and lifecycle facts are committed to PostgreSQL, PTY output enters a bounded per-Session ingest loop, and `events_query` reads the durable Event stream.
+- With `ITERM_DATABASE_URL`, Execute/Input/Control/Resize admission, interaction policy/Guard state, Shell Checkpoints, Session fork lineage/idempotency, and lifecycle facts are committed to PostgreSQL, PTY output enters a bounded per-Session ingest loop, and `events_query` reads the durable Event stream.
 
 In both modes the PTY remains process-local live truth. Restart recovery marks the previous stable owner generation `BROKEN` and ambiguous work `UNKNOWN`; it never rebuilds a fake live Session from rows.
 
@@ -25,27 +25,29 @@ The Actor type is always `agent` in M4. Tool arguments cannot claim to be Human 
 
 ## Tools
 
-| Tool              | Result/behavior                                                                       |
-| ----------------- | ------------------------------------------------------------------------------------- |
-| `session_create`  | Starts one persistent bash/zsh PTY at an existing workspace                           |
-| `session_get`     | Returns current live projection and active Execution                                  |
-| `session_list`    | Lists daemon-owned Sessions                                                           |
-| `session_close`   | Terminates the exact generation's PTY/process group                                   |
-| `execute`         | Returns accepted Action and DISPATCHING/RUNNING Execution immediately                 |
-| `execution_get`   | Reads current bounded Execution projection                                            |
-| `execution_wait`  | Waits for a terminal Execution state without replay                                   |
-| `interaction_get` | Reads exact-generation policy, state version, and active short Human Guard            |
-| `input`           | Writes one batch to an exact generation/Execution, optionally screen-version guarded  |
-| `control`         | Delivers explicit TTY control bytes or process-group signal                           |
-| `terminal_resize` | Applies one guarded, geometry-versioned resize to the shared PTY and Virtual Screen   |
-| `events_query`    | Returns at most 500 Events after a generation-scoped sequence                         |
-| `screen_get`      | Returns the bounded live ANSI/VT viewport, cursor, buffer, and screen version         |
-| `screen_region`   | Reads a bounded rectangle using zero-based terminal-cell coordinates                  |
-| `screen_cells`    | Reads sparse material cells with palette/RGB colors and standard SGR attributes       |
-| `screen_diff`     | Returns retained row replacements or an explicit full-snapshot resync                 |
-| `screen_search`   | Searches literal text in the current viewport with bounded terminal-cell coordinates  |
-| `screen_wait`     | Reactively waits for text, version, stability, or an exact Execution's terminal state |
-| `terminal_state`  | Classifies one exact-generation live frame with bounded evidence and limitations      |
+| Tool                 | Result/behavior                                                                       |
+| -------------------- | ------------------------------------------------------------------------------------- |
+| `session_create`     | Starts one persistent bash/zsh PTY at an existing workspace                           |
+| `session_get`        | Returns current live projection and active Execution                                  |
+| `session_list`       | Lists daemon-owned Sessions                                                           |
+| `session_close`      | Terminates the exact generation's PTY/process group                                   |
+| `session_checkpoint` | Reads bounded latest checkpoint metadata without environment values                   |
+| `session_fork`       | Rebuilds a new Session from an exact checkpoint version with stale acknowledgement    |
+| `execute`            | Returns accepted Action and DISPATCHING/RUNNING Execution immediately                 |
+| `execution_get`      | Reads current bounded Execution projection                                            |
+| `execution_wait`     | Waits for a terminal Execution state without replay                                   |
+| `interaction_get`    | Reads exact-generation policy, state version, and active short Human Guard            |
+| `input`              | Writes one batch to an exact generation/Execution, optionally screen-version guarded  |
+| `control`            | Delivers explicit TTY control bytes or process-group signal                           |
+| `terminal_resize`    | Applies one guarded, geometry-versioned resize to the shared PTY and Virtual Screen   |
+| `events_query`       | Returns at most 500 Events after a generation-scoped sequence                         |
+| `screen_get`         | Returns the bounded live ANSI/VT viewport, cursor, buffer, and screen version         |
+| `screen_region`      | Reads a bounded rectangle using zero-based terminal-cell coordinates                  |
+| `screen_cells`       | Reads sparse material cells with palette/RGB colors and standard SGR attributes       |
+| `screen_diff`        | Returns retained row replacements or an explicit full-snapshot resync                 |
+| `screen_search`      | Searches literal text in the current viewport with bounded terminal-cell coordinates  |
+| `screen_wait`        | Reactively waits for text, version, stability, or an exact Execution's terminal state |
+| `terminal_state`     | Classifies one exact-generation live frame with bounded evidence and limitations      |
 
 Every successful tool result contains a JSON text block and `structuredContent: { result }`. Domain failures are tool-level errors with a JSON text envelope:
 
@@ -76,6 +78,10 @@ Guard expiry is bounded and versioned, not ownership: default TTL is 500 ms, acc
 `screen_search` and `screen_wait` observe only the live current viewport; neither scans scrollback nor durable Events. A wait timeout is bounded to 1–300,000 ms and returns `matched: false`, `reason: "timeout"`, and the latest snapshot instead of raising a transport error. A stable condition means only that no `screenVersion` was applied during its interval—it does not prove prompt readiness or command completion. If an RPC client disconnects, the daemon aborts that client's server-side wait.
 
 `terminal_state` is an exact-generation, read-only advisory observation. It combines authoritative Session/Execution facts with closed-enum command-family and current-viewport signals, returning `kind`, `confidence`, bounded `evidence`, explicit `limitations`, and the exact screen frame used. It never returns raw command or screen text. Password/confirmation guesses remain low-confidence because terminal text is spoofable and echo mode is not observed; editor/pager/REPL command-family guesses are at most medium-confidence. Clients MUST NOT use this tool alone for authorization, readiness/completion, Approval, secret-channel activation, target selection, automatic input/control, or post-crash reconstruction.
+
+`session_checkpoint` returns the latest exact-generation checkpoint version, content hash, canonical workspace/cwd, Shell, observation age, source status, staleness, and included environment key names. It never returns environment values. The daemon defaults checkpoint capture to `LANG`, `LC_ALL`, and `LC_CTYPE`; operators may set exact additional names with `ITERM_CHECKPOINT_ENV_KEYS`. Credential-like, Runtime-reserved, dynamic-loader, and Shell-startup names plus more than 32 configured keys are rejected; values above 4 KiB or containing newline/NUL are not checkpointed, and malformed control frames fail closed.
+
+`session_fork` requires `expectedCheckpointVersion`, an Actor-scoped idempotency key, and `allowStale: true` for a RUNNING/RESERVED/BROKEN parent. A READY source is re-certified into the next checkpoint version. The child restores only workspace/cwd, Shell kind, and filtered environment; it shares filesystem contents and never copies foreground/background processes, REPL/editor state, descriptors, job control, aliases, functions, or traps. Missing, changed, stale-unacknowledged, or invalid checkpoints fail before a child is admitted. M7.1 does not yet hydrate a historical parent into a new daemon after owner restart.
 
 `screen_region` validates that the requested row/column rectangle fits the current canonical geometry. Coordinates and widths are terminal cells, not JavaScript string offsets; a wide glyph clipped by either region edge is represented as blank space. `screen_diff` retains 64 process-local revisions and returns bounded complete-row replacements plus current frame metadata. A future or evicted `afterVersion` returns `resyncRequired: true` with the current full snapshot. A diff crossing resize returns the same shape with reason `geometry_changed`; clients must replace their whole viewport instead of applying old coordinates. The ring is not durable and cannot resume a lost PTY generation.
 

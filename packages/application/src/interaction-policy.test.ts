@@ -365,6 +365,13 @@ class InteractiveExecutor implements ShellExecutor {
 
   public constructor(public readonly shell: ShellKind) {}
 
+  public checkpoint(): Readonly<{
+    cwd: string;
+    filteredEnvironment: Readonly<Record<string, string>>;
+  }> {
+    return { cwd: "/tmp", filteredEnvironment: {} };
+  }
+
   public execute(command: string, callbacks: ShellExecuteCallbacks): Promise<ShellExecutionResult> {
     callbacks.onStarted(command);
     return new Promise(() => undefined);

@@ -52,7 +52,11 @@ interface PendingExecution {
   readonly reject: (error: Error) => void;
   readonly timer: NodeJS.Timeout;
   resultExitCode?: number;
-  readyEvent?: Readonly<{ exitCode: number; cwd: string }>;
+  readyEvent?: Readonly<{
+    exitCode: number;
+    cwd: string;
+    filteredEnvironment: Readonly<Record<string, string>>;
+  }>;
   barrierSeen: boolean;
   started: boolean;
 }
@@ -85,6 +89,10 @@ export class PtyShellExecutor implements ShellExecutor {
 
   #pending: PendingExecution | undefined;
   #pendingPtyText = "";
+  #latestCheckpoint?: Readonly<{
+    cwd: string;
+    filteredEnvironment: Readonly<Record<string, string>>;
+  }>;
   #closed = false;
   #fatalError?: Error;
 
@@ -101,6 +109,7 @@ export class PtyShellExecutor implements ShellExecutor {
     let shellPty: IPty | undefined;
     try {
       const workspaceRoot = realpathSync(options.workspaceRoot);
+      const initialCwd = realpathSync(options.initialCwd ?? workspaceRoot);
       const fifo = spawnSync("mkfifo", [this.#controlFifo], { encoding: "utf8" });
       if (fifo.status !== 0) {
         throw new Error(`mkfifo failed: ${fifo.stderr || String(fifo.status)}`);
@@ -114,8 +123,12 @@ export class PtyShellExecutor implements ShellExecutor {
       );
       shellPty = pty.spawn(profile.executable, [...profile.args], {
         cols: CANONICAL_TERMINAL_COLUMNS,
-        cwd: workspaceRoot,
-        env: childEnvironment(profile.env),
+        cwd: initialCwd,
+        env: childEnvironment({
+          ...options.initialEnvironment,
+          ...profile.env,
+          ITERMINAL_CHECKPOINT_ENV_KEYS: options.checkpointEnvironmentKeys.join(","),
+        }),
         name: "xterm-256color",
         rows: CANONICAL_TERMINAL_ROWS,
       });
@@ -196,6 +209,19 @@ export class PtyShellExecutor implements ShellExecutor {
     });
   }
 
+  public checkpoint(): Readonly<{
+    cwd: string;
+    filteredEnvironment: Readonly<Record<string, string>>;
+  }> {
+    if (this.#latestCheckpoint === undefined) {
+      throw new Error("Shell has not emitted a READY checkpoint");
+    }
+    return {
+      cwd: this.#latestCheckpoint.cwd,
+      filteredEnvironment: { ...this.#latestCheckpoint.filteredEnvironment },
+    };
+  }
+
   public writeInput(data: string): void {
     this.#assertInteractive();
     this.#pty.write(data);
@@ -264,6 +290,12 @@ export class PtyShellExecutor implements ShellExecutor {
 
   #handleControl(event: ControlEvent): void {
     this.#events.push(event);
+    if (event.type === "ready") {
+      this.#latestCheckpoint = {
+        cwd: event.cwd,
+        filteredEnvironment: { ...event.filteredEnvironment },
+      };
+    }
     const pending = this.#pending;
     if (event.type === "preexec" && pending !== undefined && !pending.started) {
       pending.started = true;
@@ -271,7 +303,11 @@ export class PtyShellExecutor implements ShellExecutor {
     } else if (event.type === "result" && pending !== undefined) {
       pending.resultExitCode = event.exitCode;
     } else if (event.type === "ready" && pending !== undefined && pending.started) {
-      pending.readyEvent = { cwd: event.cwd, exitCode: event.exitCode };
+      pending.readyEvent = {
+        cwd: event.cwd,
+        exitCode: event.exitCode,
+        filteredEnvironment: { ...event.filteredEnvironment },
+      };
       this.#tryFinishPending(pending);
     }
     const eventIndex = this.#events.length - 1;
@@ -365,6 +401,7 @@ export class PtyShellExecutor implements ShellExecutor {
     pending.resolve({
       cwd: pending.readyEvent.cwd,
       exitCode: pending.resultExitCode ?? pending.readyEvent.exitCode,
+      filteredEnvironment: { ...pending.readyEvent.filteredEnvironment },
       output: output.data,
       outputTruncated: output.truncated,
     });

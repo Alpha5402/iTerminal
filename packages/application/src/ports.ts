@@ -1,4 +1,5 @@
 import type {
+  Actor,
   ControlAction,
   ControlDelivery,
   EventPage,
@@ -10,6 +11,7 @@ import type {
   Session,
   SessionAction,
   SessionEvent,
+  ShellCheckpoint,
   ShellKind,
   TerminalScreenCellsResult,
   TerminalScreenSnapshot,
@@ -21,6 +23,7 @@ import type {
 export interface ShellExecutionResult {
   readonly exitCode: number;
   readonly cwd: string;
+  readonly filteredEnvironment: Readonly<Record<string, string>>;
   readonly output: string;
   readonly outputTruncated: boolean;
 }
@@ -32,6 +35,10 @@ export interface ShellExecuteCallbacks {
 export interface ShellExecutor {
   readonly shellPid: number;
   readonly shell: ShellKind;
+  checkpoint(): Readonly<{
+    cwd: string;
+    filteredEnvironment: Readonly<Record<string, string>>;
+  }>;
   execute(command: string, callbacks: ShellExecuteCallbacks): Promise<ShellExecutionResult>;
   writeInput(data: string): void;
   sendControl(delivery: ControlDelivery): void;
@@ -40,6 +47,9 @@ export interface ShellExecutor {
 }
 
 export interface CreateExecutorOptions {
+  readonly checkpointEnvironmentKeys: readonly string[];
+  readonly initialCwd?: string;
+  readonly initialEnvironment?: Readonly<Record<string, string>>;
   readonly shell: ShellKind;
   readonly workspaceRoot: string;
   readonly onOutput: (data: string) => void;
@@ -88,6 +98,7 @@ export interface TerminalScreenProjectionFactory {
 
 export interface RuntimeStore {
   createSession(session: Session): void;
+  deleteSession(sessionId: string, generation: number): void;
   getSession(sessionId: string): Session | undefined;
   listSessions(): readonly Session[];
   markSessionReady(sessionId: string, generation: number): Session;
@@ -135,9 +146,30 @@ export interface DurableExecuteAdmissionResult {
   readonly replayed: boolean;
 }
 
+export interface DurableForkAdmission {
+  readonly actor: Actor;
+  readonly checkpoint: ShellCheckpoint;
+  readonly child: Session;
+  readonly childEvents: readonly DurableSessionEvent[];
+  readonly expectedCheckpointHash: string;
+  readonly expectedCheckpointVersion: number;
+  readonly expectedParentStatus: Session["status"];
+  readonly idempotencyKey: string;
+  readonly parent: Session;
+  readonly parentEvent: DurableSessionEvent;
+  readonly requestHash: string;
+}
+
 export interface RuntimeDurability {
   createSession(session: Session, events: readonly DurableSessionEvent[]): Promise<void>;
-  markSessionReady(session: Session, shellPid: number, event: DurableSessionEvent): Promise<void>;
+  markSessionReady(
+    session: Session,
+    shellPid: number,
+    event: DurableSessionEvent,
+    checkpoint: ShellCheckpoint,
+    additionalEvents?: readonly DurableSessionEvent[],
+  ): Promise<void>;
+  createForkSession(input: DurableForkAdmission): Promise<void>;
   markSessionBroken(
     session: Session,
     events: readonly DurableSessionEvent[],
@@ -162,6 +194,7 @@ export interface RuntimeDurability {
     readonly action: ExecuteAction;
     readonly execution: Execution;
     readonly events: readonly DurableSessionEvent[];
+    readonly checkpoint?: ShellCheckpoint;
   }): Promise<void>;
   failExecution(input: {
     readonly session: Session;
@@ -211,6 +244,7 @@ export interface RuntimeDurability {
 }
 
 export interface RuntimeServiceOptions {
+  readonly checkpointEnvironmentKeys?: readonly string[];
   readonly durability?: RuntimeDurability;
   readonly executionDispatch?: "external" | "immediate";
   readonly hooks?: Readonly<{

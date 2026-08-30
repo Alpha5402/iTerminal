@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import { realpath, stat } from "node:fs/promises";
+import { isAbsolute, relative } from "node:path";
 
 import type {
   Actor,
@@ -15,6 +17,10 @@ import type {
   Session,
   SessionAction,
   SessionEvent,
+  SessionForkLimitation,
+  SessionForkResult,
+  ShellCheckpoint,
+  ShellCheckpointView,
   ShellKind,
   TerminalScreenCellsResult,
   TerminalScreenDiffResult,
@@ -38,6 +44,7 @@ import {
 
 import type {
   DurableSessionEvent,
+  DurableForkAdmission,
   RuntimeDurability,
   RuntimeServiceOptions,
   RuntimeStore,
@@ -59,10 +66,34 @@ const MAX_SCREEN_SEARCH_MATCHES = 100;
 const MAX_SCREEN_WAIT_TIMEOUT_MS = 5 * 60 * 1_000;
 const MAX_SCREEN_STABLE_MS = 30_000;
 const MIN_SCREEN_STABLE_MS = 50;
+const DEFAULT_CHECKPOINT_ENVIRONMENT_KEYS = ["LANG", "LC_ALL", "LC_CTYPE"] as const;
+const MAX_CHECKPOINT_ENVIRONMENT_KEYS = 32;
+const MAX_CHECKPOINT_ENVIRONMENT_VALUE_BYTES = 4_096;
+const CHECKPOINT_ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/u;
+const SENSITIVE_CHECKPOINT_ENVIRONMENT_NAME =
+  /(?:^|_)(?:APIKEY|AUTH|COOKIE|CREDENTIALS?|KEY|PASS|PASSWORD|SECRET|TOKEN)(?:_|$)/iu;
+const RUNTIME_UNSAFE_CHECKPOINT_ENVIRONMENT_NAME =
+  /^(?:BASHOPTS|BASH_ENV|ENV|IFS|PROMPT_COMMAND|SHELLOPTS|ZDOTDIR|LD_.+|DYLD_.+|ITERMINAL_.+)$/u;
+const FORK_LIMITATIONS: readonly SessionForkLimitation[] = [
+  "process_state_not_copied",
+  "repl_editor_state_not_copied",
+  "shell_implicit_state_not_copied",
+  "workspace_filesystem_shared",
+  "filtered_environment_only",
+];
 
 export interface CreateSessionRequest {
   readonly shell: ShellKind;
   readonly workspaceRoot: string;
+}
+
+export interface ForkSessionRequest {
+  readonly actor: Actor;
+  readonly allowStale: boolean;
+  readonly expectedCheckpointVersion: number;
+  readonly idempotencyKey: string;
+  readonly sessionGeneration: number;
+  readonly sessionId: string;
 }
 
 export interface ExecuteRequest {
@@ -217,6 +248,11 @@ interface Deferred<T> {
   readonly resolve: (value: T | PromiseLike<T>) => void;
 }
 
+interface ForkReplay {
+  readonly requestHash: string;
+  readonly result: SessionForkResult;
+}
+
 export class RuntimeService {
   readonly #executors = new Map<string, ShellExecutor>();
   readonly #screens = new Map<string, TerminalScreenProjection>();
@@ -225,6 +261,10 @@ export class RuntimeService {
   readonly #durableQueues = new Map<string, DurableQueueState>();
   readonly #mutationTails = new Map<string, Promise<void>>();
   readonly #interactionStates = new Map<string, InteractionState>();
+  readonly #checkpoints = new Map<string, ShellCheckpoint>();
+  readonly #checkpointInvalid = new Set<string>();
+  readonly #forkReplays = new Map<string, ForkReplay>();
+  readonly #checkpointEnvironmentKeys: readonly string[];
   readonly #durability: RuntimeDurability | undefined;
   #ownerDurabilityFailure: RuntimeError | undefined;
   readonly #dispatchStates = new Map<string, ExecutionDispatchState>();
@@ -240,6 +280,9 @@ export class RuntimeService {
     options: RuntimeServiceOptions = {},
   ) {
     this.#durability = options.durability;
+    this.#checkpointEnvironmentKeys = validateCheckpointEnvironmentKeys(
+      options.checkpointEnvironmentKeys ?? DEFAULT_CHECKPOINT_ENVIRONMENT_KEYS,
+    );
     this.#executionDispatch = options.executionDispatch ?? "immediate";
     this.#hooks = options.hooks ?? {};
     this.#now = options.now ?? (() => new Date());
@@ -249,6 +292,7 @@ export class RuntimeService {
 
   public async createSession(request: CreateSessionRequest): Promise<Session> {
     this.#requireOwnerDurability();
+    const workspaceRoot = await canonicalWorkspace(request.workspaceRoot);
     const sessionId = `ses_${randomUUID()}`;
     const generation = 1;
     const createdAt = this.#timestamp();
@@ -262,7 +306,7 @@ export class RuntimeService {
       screenVersion: 0,
       shell: request.shell,
       status: "STARTING",
-      workspaceRoot: request.workspaceRoot,
+      workspaceRoot,
     };
     this.#interactionStates.set(sessionId, {
       policy: "human_guarded",
@@ -292,51 +336,222 @@ export class RuntimeService {
       throw durabilityError(error);
     }
 
-    try {
-      const screen = this.#screenProjectionFactory?.create({
-        sessionGeneration: generation,
-        sessionId,
-      });
-      if (screen !== undefined) this.#screens.set(sessionId, screen);
-      const executor = await this.executorFactory.create({
-        onOutput: (data) => this.#recordOutput(sessionId, generation, data),
-        shell: request.shell,
-        workspaceRoot: request.workspaceRoot,
-      });
-      this.#executors.set(sessionId, executor);
-      const ready = this.store.markSessionReady(sessionId, generation);
-      const readyEvent = this.#event(
-        ready,
-        "session.shell_ready",
-        { shellPid: executor.shellPid },
-        { persist: false },
+    return this.#launchSession(session);
+  }
+
+  public getSessionCheckpoint(sessionId: string, generation: number): ShellCheckpointView {
+    const session = this.#requireExactGeneration(sessionId, generation);
+    if (session.status === "READY" && this.#checkpointInvalid.has(sessionId)) {
+      throw new RuntimeError(
+        "CHECKPOINT_INVALID",
+        "The current READY Shell cwd cannot be reconstructed inside its workspace",
+        { generation, sessionId },
       );
-      try {
-        await this.#enqueueDurable(session.id, 0, () =>
-          this.#durability?.markSessionReady(ready, executor.shellPid, readyEvent),
+    }
+    const checkpoint = this.#checkpoints.get(sessionId);
+    if (checkpoint === undefined || checkpoint.sourceGeneration !== generation) {
+      throw new RuntimeError(
+        "CHECKPOINT_NOT_FOUND",
+        "No valid Shell checkpoint exists for this Session generation",
+        { generation, sessionId },
+      );
+    }
+    return checkpointView(checkpoint, session.status, this.#now());
+  }
+
+  public forkSession(request: ForkSessionRequest): Promise<SessionForkResult> {
+    return this.#withMutationLock(request.sessionId, async () => {
+      this.#requireOwnerDurability();
+      validateIdempotencyKey(request.idempotencyKey);
+      const requestHash = hashRequest({
+        actor: request.actor,
+        allowStale: request.allowStale,
+        expectedCheckpointVersion: request.expectedCheckpointVersion,
+        sessionGeneration: request.sessionGeneration,
+        sessionId: request.sessionId,
+      });
+      const replayScope = forkReplayScope(request);
+      const replay = this.#forkReplays.get(replayScope);
+      if (replay !== undefined) {
+        if (replay.requestHash !== requestHash) {
+          throw new RuntimeError(
+            "IDEMPOTENCY_KEY_REUSED",
+            "Fork idempotency key was already used with a different request",
+            { childSessionId: replay.result.session.id },
+          );
+        }
+        return { ...replay.result, replayed: true };
+      }
+
+      const parent = this.#requireExactGeneration(request.sessionId, request.sessionGeneration);
+      if (parent.status === "CLOSED" || parent.status === "STARTING") {
+        throw new RuntimeError("SESSION_NOT_READY", `Cannot fork a Session in ${parent.status}`, {
+          sessionId: parent.id,
+          status: parent.status,
+        });
+      }
+      let checkpoint = this.#checkpoints.get(parent.id);
+      if (checkpoint === undefined || checkpoint.sourceGeneration !== parent.generation) {
+        throw new RuntimeError(
+          "CHECKPOINT_NOT_FOUND",
+          "No completed READY checkpoint exists for this Session generation",
+          { generation: parent.generation, sessionId: parent.id },
         );
+      }
+      if (checkpoint.version !== request.expectedCheckpointVersion) {
+        throw new RuntimeError(
+          "CHECKPOINT_CHANGED",
+          "The selected Shell checkpoint version is stale",
+          {
+            currentCheckpointVersion: checkpoint.version,
+            expectedCheckpointVersion: request.expectedCheckpointVersion,
+            sessionId: parent.id,
+          },
+          true,
+        );
+      }
+      const selectedCheckpoint = checkpoint;
+      const sourceStatus = parent.status;
+      const stale = sourceStatus !== "READY";
+      if (stale && !request.allowStale) {
+        throw new RuntimeError(
+          "CHECKPOINT_STALE",
+          "Parent is not READY; explicitly acknowledge the last completed checkpoint",
+          {
+            checkpointVersion: checkpoint.version,
+            observedAt: checkpoint.observedAt,
+            sessionId: parent.id,
+            status: parent.status,
+          },
+        );
+      }
+      if (!stale) {
+        const observation = this.#requireExecutor(parent.id).checkpoint();
+        checkpoint = await this.#buildCheckpoint(parent, observation, checkpoint.version + 1);
+      } else {
+        await validateCheckpointPath(checkpoint);
+      }
+
+      const createdAt = this.#timestamp();
+      const child: Session = {
+        actionSequence: 0,
+        createdAt,
+        eventSequence: 0,
+        generation: 1,
+        id: `ses_${randomUUID()}`,
+        lineage: {
+          checkpointHash: checkpoint.contentHash,
+          checkpointVersion: checkpoint.version,
+          forkedAt: createdAt,
+          parentGeneration: parent.generation,
+          parentSessionId: parent.id,
+        },
+        ownerId: this.#ownerId,
+        screenVersion: 0,
+        shell: checkpoint.shell,
+        status: "STARTING",
+        workspaceRoot: checkpoint.workspaceRoot,
+      };
+      this.#interactionStates.set(child.id, {
+        policy: "human_guarded",
+        sessionGeneration: child.generation,
+        sessionId: child.id,
+        version: 1,
+      });
+      this.store.createSession(child);
+      const requestedEvent = this.#eventDraft(
+        parent,
+        "session.fork_requested",
+        {
+          checkpointHash: checkpoint.contentHash,
+          checkpointVersion: checkpoint.version,
+          childSessionId: child.id,
+          stale,
+        },
+        undefined,
+        undefined,
+        request.actor,
+      );
+      const createdEvent = this.#eventDraft(
+        child,
+        "session.created",
+        {
+          parentGeneration: parent.generation,
+          parentSessionId: parent.id,
+          shell: child.shell,
+        },
+        undefined,
+        undefined,
+        request.actor,
+      );
+      const startingEvent = this.#eventDraft(child, "session.shell_starting", {
+        checkpointVersion: checkpoint.version,
+      });
+      const admission: DurableForkAdmission = {
+        actor: request.actor,
+        checkpoint,
+        child,
+        childEvents: [createdEvent, startingEvent],
+        expectedCheckpointHash: selectedCheckpoint.contentHash,
+        expectedCheckpointVersion: selectedCheckpoint.version,
+        expectedParentStatus: sourceStatus,
+        idempotencyKey: request.idempotencyKey,
+        parent,
+        parentEvent: requestedEvent,
+        requestHash,
+      };
+      let admitted = false;
+      try {
+        await this.#enqueueDurable(parent.id, 0, () =>
+          this.#durability?.createForkSession(admission),
+        );
+        admitted = true;
+        this.#checkpoints.set(parent.id, checkpoint);
+        this.#checkpointInvalid.delete(parent.id);
+        this.store.appendEvent(parent.id, parent.generation, requestedEvent);
+        this.store.appendEvent(child.id, child.generation, createdEvent);
+        this.store.appendEvent(child.id, child.generation, startingEvent);
+        const forkedEvent = this.#eventDraft(
+          parent,
+          "session.forked",
+          {
+            checkpointHash: checkpoint.contentHash,
+            checkpointVersion: checkpoint.version,
+            childSessionId: child.id,
+            stale,
+          },
+          undefined,
+          undefined,
+          request.actor,
+        );
+        const ready = await this.#launchSession(child, {
+          additionalReadyEvents: [forkedEvent],
+          initialCwd: checkpoint.cwd,
+          initialEnvironment: checkpoint.filteredEnvironment,
+        });
+        this.store.appendEvent(parent.id, parent.generation, forkedEvent);
+        const result: SessionForkResult = {
+          checkpoint: checkpointView(checkpoint, sourceStatus, this.#now()),
+          limitations: FORK_LIMITATIONS,
+          replayed: false,
+          session: ready,
+        };
+        this.#forkReplays.set(replayScope, { requestHash, result });
+        return result;
       } catch (error) {
-        if (isDurabilityFatal(error)) this.#tripDurability(sessionId, error);
+        if (!admitted) {
+          this.#interactionStates.delete(child.id);
+          this.store.deleteSession(child.id, child.generation);
+        }
+        this.#event(
+          parent,
+          "session.fork_failed",
+          { childSessionId: child.id, reason: errorMessage(error) },
+          { actor: request.actor },
+        );
         throw error;
       }
-      return ready;
-    } catch (error) {
-      this.#executors.get(sessionId)?.close();
-      this.#executors.delete(sessionId);
-      this.#screens.get(sessionId)?.dispose();
-      this.#screens.delete(sessionId);
-      const broken = this.store.breakSession(sessionId, generation);
-      const brokenEvent = this.#event(
-        broken,
-        "session.broken",
-        { reason: errorMessage(error) },
-        { persist: false },
-      );
-      await this.#enqueueDurable(session.id, 0, () =>
-        this.#durability?.markSessionBroken(broken, [brokenEvent], errorMessage(error)),
-      ).catch((durableError: unknown) => this.#tripDurability(session.id, durableError));
-      throw error;
-    }
+    });
   }
 
   public getSession(sessionId: string): Session {
@@ -820,6 +1035,23 @@ export class RuntimeService {
     result: ShellExecutionResult,
   ): Promise<Execution> {
     const { action, execution } = state;
+    const previousCheckpoint = this.#checkpoints.get(execution.sessionId);
+    let checkpoint: ShellCheckpoint | undefined;
+    let checkpointRejectedEvent: SessionEvent | undefined;
+    try {
+      const checkpointSession = this.#requireExactGeneration(
+        execution.sessionId,
+        execution.sessionGeneration,
+      );
+      checkpoint = await this.#buildCheckpoint(
+        checkpointSession,
+        { cwd: result.cwd, filteredEnvironment: result.filteredEnvironment },
+        (previousCheckpoint?.version ?? 0) + 1,
+      );
+    } catch (error) {
+      if (!(error instanceof RuntimeError) || error.code !== "CHECKPOINT_INVALID") throw error;
+      this.#checkpointInvalid.add(execution.sessionId);
+    }
     execution.exitCode = result.exitCode;
     execution.cwd = result.cwd;
     execution.finishedAt = this.#timestamp();
@@ -845,12 +1077,24 @@ export class RuntimeService {
       { cwd: result.cwd },
       { persist: false },
     );
+    if (checkpoint === undefined) {
+      checkpointRejectedEvent = this.#event(
+        ready,
+        "session.checkpoint_rejected",
+        { reason: "cwd_outside_workspace" },
+        { persist: false },
+      );
+    }
     this.#hooks.beforeExecutionFinishPersist?.(execution);
     try {
       await this.#enqueueDurable(execution.sessionId, 0, () =>
         this.#durability?.finishExecution({
           action,
-          events: [completedEvent, readyEvent],
+          ...(checkpoint === undefined ? {} : { checkpoint }),
+          events:
+            checkpointRejectedEvent === undefined
+              ? [completedEvent, readyEvent]
+              : [completedEvent, readyEvent, checkpointRejectedEvent],
           execution,
           session: ready,
         }),
@@ -860,6 +1104,10 @@ export class RuntimeService {
       action.status = "UNKNOWN";
       this.#tripDurability(execution.sessionId, error);
       throw durabilityError(error);
+    }
+    if (checkpoint !== undefined) {
+      this.#checkpoints.set(execution.sessionId, checkpoint);
+      this.#checkpointInvalid.delete(execution.sessionId);
     }
     return execution;
   }
@@ -1594,6 +1842,136 @@ export class RuntimeService {
         ...(execution === undefined ? {} : { execution }),
       },
     );
+  }
+
+  async #launchSession(
+    session: Session,
+    options: Readonly<{
+      additionalReadyEvents?: readonly DurableSessionEvent[];
+      initialCwd?: string;
+      initialEnvironment?: Readonly<Record<string, string>>;
+    }> = {},
+  ): Promise<Session> {
+    const { generation, id: sessionId } = session;
+    try {
+      const screen = this.#screenProjectionFactory?.create({
+        sessionGeneration: generation,
+        sessionId,
+      });
+      if (screen !== undefined) this.#screens.set(sessionId, screen);
+      const executor = await this.executorFactory.create({
+        checkpointEnvironmentKeys: this.#checkpointEnvironmentKeys,
+        ...(options.initialCwd === undefined ? {} : { initialCwd: options.initialCwd }),
+        ...(options.initialEnvironment === undefined
+          ? {}
+          : { initialEnvironment: options.initialEnvironment }),
+        onOutput: (data) => this.#recordOutput(sessionId, generation, data),
+        shell: session.shell,
+        workspaceRoot: session.workspaceRoot,
+      });
+      this.#executors.set(sessionId, executor);
+      const checkpoint = await this.#buildCheckpoint(session, executor.checkpoint(), 1);
+      this.#checkpoints.set(sessionId, checkpoint);
+      this.#checkpointInvalid.delete(sessionId);
+      const ready = this.store.markSessionReady(sessionId, generation);
+      const readyEvent = this.#event(
+        ready,
+        "session.shell_ready",
+        {
+          checkpointHash: checkpoint.contentHash,
+          checkpointVersion: checkpoint.version,
+          shellPid: executor.shellPid,
+        },
+        { persist: false },
+      );
+      try {
+        await this.#enqueueDurable(session.id, 0, () =>
+          this.#durability?.markSessionReady(
+            ready,
+            executor.shellPid,
+            readyEvent,
+            checkpoint,
+            options.additionalReadyEvents,
+          ),
+        );
+      } catch (error) {
+        if (isDurabilityFatal(error)) this.#tripDurability(sessionId, error);
+        throw error;
+      }
+      return ready;
+    } catch (error) {
+      this.#executors.get(sessionId)?.close();
+      this.#executors.delete(sessionId);
+      this.#screens.get(sessionId)?.dispose();
+      this.#screens.delete(sessionId);
+      this.#checkpoints.delete(sessionId);
+      this.#checkpointInvalid.delete(sessionId);
+      const broken = this.store.breakSession(sessionId, generation);
+      const brokenEvent = this.#event(
+        broken,
+        "session.broken",
+        { reason: errorMessage(error) },
+        { persist: false },
+      );
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.markSessionBroken(broken, [brokenEvent], errorMessage(error)),
+      ).catch((durableError: unknown) => this.#tripDurability(session.id, durableError));
+      throw error;
+    }
+  }
+
+  async #buildCheckpoint(
+    session: Session,
+    observation: Readonly<{
+      cwd: string;
+      filteredEnvironment: Readonly<Record<string, string>>;
+    }>,
+    version: number,
+  ): Promise<ShellCheckpoint> {
+    const workspaceRoot = await canonicalWorkspace(session.workspaceRoot).catch(
+      (error: unknown) => {
+        throw new RuntimeError(
+          "CHECKPOINT_INVALID",
+          "Checkpoint workspace no longer resolves to a directory",
+          { reason: errorMessage(error), sessionId: session.id },
+        );
+      },
+    );
+    const cwd = await canonicalCheckpointCwd(workspaceRoot, observation.cwd);
+    const filteredEnvironment: Record<string, string> = {};
+    for (const key of this.#checkpointEnvironmentKeys) {
+      const value = observation.filteredEnvironment[key];
+      if (value === undefined) continue;
+      if (
+        value.includes("\0") ||
+        value.includes("\n") ||
+        Buffer.byteLength(value) > MAX_CHECKPOINT_ENVIRONMENT_VALUE_BYTES
+      ) {
+        throw new RuntimeError(
+          "CHECKPOINT_INVALID",
+          `Checkpoint environment value for ${key} is outside the bounded policy`,
+          { environmentKey: key, sessionId: session.id },
+        );
+      }
+      filteredEnvironment[key] = value;
+    }
+    const contentHash = hashRequest({
+      cwd,
+      filteredEnvironment,
+      shell: session.shell,
+      workspaceRoot,
+    });
+    return {
+      contentHash,
+      cwd,
+      filteredEnvironment,
+      observedAt: this.#timestamp(),
+      sessionId: session.id,
+      shell: session.shell,
+      sourceGeneration: session.generation,
+      version,
+      workspaceRoot,
+    };
   }
 
   #requireSession(sessionId: string): Session {
@@ -2356,6 +2734,123 @@ function abortError(): Error {
   const error = new Error("Screen wait aborted");
   error.name = "AbortError";
   return error;
+}
+
+function validateCheckpointEnvironmentKeys(keys: readonly string[]): readonly string[] {
+  const unique = [...new Set(keys)];
+  if (unique.length > MAX_CHECKPOINT_ENVIRONMENT_KEYS) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      `Checkpoint environment allowlist cannot exceed ${MAX_CHECKPOINT_ENVIRONMENT_KEYS.toString()} keys`,
+    );
+  }
+  for (const key of unique) {
+    if (
+      !CHECKPOINT_ENVIRONMENT_NAME.test(key) ||
+      SENSITIVE_CHECKPOINT_ENVIRONMENT_NAME.test(key) ||
+      RUNTIME_UNSAFE_CHECKPOINT_ENVIRONMENT_NAME.test(key)
+    ) {
+      throw new RuntimeError(
+        "INVALID_REQUEST",
+        `Checkpoint environment key is invalid, credential-like, or Runtime-reserved: ${key}`,
+        { environmentKey: key },
+      );
+    }
+  }
+  return unique.sort((left, right) => left.localeCompare(right));
+}
+
+function validateIdempotencyKey(value: string): void {
+  if (value.length < 1 || value.length > 256 || value.includes("\0")) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      "Idempotency key must contain 1 to 256 non-NUL characters",
+    );
+  }
+}
+
+async function canonicalWorkspace(workspaceRoot: string): Promise<string> {
+  try {
+    const canonical = await realpath(workspaceRoot);
+    const metadata = await stat(canonical);
+    if (!metadata.isDirectory()) throw new Error("not a directory");
+    return canonical;
+  } catch (error) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      "Workspace root must resolve to an existing directory",
+      { reason: errorMessage(error), workspaceRoot },
+    );
+  }
+}
+
+async function canonicalCheckpointCwd(workspaceRoot: string, cwd: string): Promise<string> {
+  try {
+    const canonical = await realpath(cwd);
+    const metadata = await stat(canonical);
+    if (!metadata.isDirectory()) throw new Error("not a directory");
+    const childPath = relative(workspaceRoot, canonical);
+    if (
+      childPath !== "" &&
+      (childPath === ".." || childPath.startsWith("../") || isAbsolute(childPath))
+    ) {
+      throw new Error("outside workspace root");
+    }
+    return canonical;
+  } catch (error) {
+    throw new RuntimeError(
+      "CHECKPOINT_INVALID",
+      "Checkpoint cwd must resolve to a directory inside its workspace",
+      { reason: errorMessage(error), workspaceRoot },
+    );
+  }
+}
+
+async function validateCheckpointPath(checkpoint: ShellCheckpoint): Promise<void> {
+  const workspaceRoot = await canonicalWorkspace(checkpoint.workspaceRoot).catch(
+    (error: unknown) => {
+      throw new RuntimeError(
+        "CHECKPOINT_INVALID",
+        "Checkpoint workspace no longer resolves to a directory",
+        { reason: errorMessage(error), sessionId: checkpoint.sessionId },
+      );
+    },
+  );
+  const cwd = await canonicalCheckpointCwd(workspaceRoot, checkpoint.cwd);
+  if (workspaceRoot !== checkpoint.workspaceRoot || cwd !== checkpoint.cwd) {
+    throw new RuntimeError(
+      "CHECKPOINT_INVALID",
+      "Checkpoint canonical paths changed after observation",
+      { sessionId: checkpoint.sessionId },
+    );
+  }
+}
+
+function checkpointView(
+  checkpoint: ShellCheckpoint,
+  sourceStatus: Session["status"],
+  now: Date,
+): ShellCheckpointView {
+  return {
+    ageMilliseconds: Math.max(0, now.getTime() - new Date(checkpoint.observedAt).getTime()),
+    contentHash: checkpoint.contentHash,
+    cwd: checkpoint.cwd,
+    environmentKeys: Object.keys(checkpoint.filteredEnvironment).sort((left, right) =>
+      left.localeCompare(right),
+    ),
+    observedAt: checkpoint.observedAt,
+    sessionId: checkpoint.sessionId,
+    shell: checkpoint.shell,
+    sourceGeneration: checkpoint.sourceGeneration,
+    sourceStatus,
+    stale: sourceStatus !== "READY",
+    version: checkpoint.version,
+    workspaceRoot: checkpoint.workspaceRoot,
+  };
+}
+
+function forkReplayScope(request: ForkSessionRequest): string {
+  return `${request.sessionId}\0${request.actor.id}\0${request.idempotencyKey}`;
 }
 
 function hashRequest(value: unknown): string {

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type {
   DurableExecuteAdmission,
   DurableExecuteAdmissionResult,
+  DurableForkAdmission,
   DurableSessionEvent,
   RuntimeDurability,
 } from "@iterminal/application";
@@ -19,6 +20,7 @@ import type {
   Session,
   SessionAction,
   SessionStatus,
+  ShellCheckpoint,
 } from "@iterminal/domain";
 import { RuntimeError } from "@iterminal/domain";
 import { Pool, type PoolClient } from "pg";
@@ -110,6 +112,8 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
     session: Session,
     shellPid: number,
     event: DurableSessionEvent,
+    checkpoint: ShellCheckpoint,
+    additionalEvents: readonly DurableSessionEvent[] = [],
   ): Promise<void> {
     await this.#transaction(async (client) => {
       await expectOne(
@@ -127,7 +131,146 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
         [session.id, session.generation, session.ownerId, shellPid],
         "Session generation did not transition STARTING -> READY",
       );
-      await insertEvents(client, [event]);
+      await upsertCheckpoint(client, checkpoint);
+      await client.query(
+        `UPDATE session_forks SET status = 'READY', updated_at = now()
+          WHERE child_session_id = $1 AND status = 'STARTING'`,
+        [session.id],
+      );
+      await insertEvents(client, [event, ...additionalEvents]);
+    });
+  }
+
+  public async createForkSession(input: DurableForkAdmission): Promise<void> {
+    await this.#transaction(async (client) => {
+      await upsertActor(client, input.actor);
+      const parent = await client.query<{ status: SessionStatus }>(
+        `SELECT status
+           FROM sessions
+          WHERE id = $1 AND current_generation = $2
+          FOR UPDATE`,
+        [input.parent.id, input.parent.generation],
+      );
+      const existing = await client.query<{
+        child_session_id: string;
+        request_hash: string;
+      }>(
+        `SELECT child_session_id, request_hash
+           FROM session_forks
+          WHERE parent_session_id = $1 AND actor_id = $2 AND idempotency_key = $3
+          FOR UPDATE`,
+        [input.parent.id, input.actor.id, input.idempotencyKey],
+      );
+      const replay = existing.rows[0];
+      if (replay !== undefined) {
+        if (replay.request_hash !== input.requestHash) {
+          throw new RuntimeError(
+            "IDEMPOTENCY_KEY_REUSED",
+            "Fork idempotency key was already used with a different request",
+            { childSessionId: replay.child_session_id },
+          );
+        }
+        if (replay.child_session_id !== input.child.id) {
+          throw new RuntimeError(
+            "DELIVERY_UNKNOWN",
+            "Durable fork already exists but is not live in this Runtime owner",
+            { childSessionId: replay.child_session_id },
+          );
+        }
+        return;
+      }
+      const parentStatus = parent.rows[0]?.status;
+      if (parentStatus === undefined || parentStatus !== input.expectedParentStatus) {
+        throw new RuntimeError(
+          "CHECKPOINT_CHANGED",
+          "Parent Session changed before durable fork admission",
+          { currentStatus: parentStatus, expectedStatus: input.expectedParentStatus },
+          true,
+        );
+      }
+      const sourceCheckpoint = await client.query<{
+        checkpoint_version: number;
+        content_hash: string;
+      }>(
+        `SELECT checkpoint_version, content_hash
+           FROM shell_checkpoints
+          WHERE session_id = $1 AND source_generation = $2
+          FOR UPDATE`,
+        [input.parent.id, input.parent.generation],
+      );
+      const durableCheckpoint = sourceCheckpoint.rows[0];
+      if (
+        durableCheckpoint === undefined ||
+        durableCheckpoint.checkpoint_version !== input.expectedCheckpointVersion ||
+        durableCheckpoint.content_hash !== input.expectedCheckpointHash
+      ) {
+        throw new RuntimeError(
+          "CHECKPOINT_CHANGED",
+          "Durable Shell checkpoint changed before fork admission",
+          {
+            currentCheckpointHash: durableCheckpoint?.content_hash,
+            currentCheckpointVersion: durableCheckpoint?.checkpoint_version,
+            expectedCheckpointHash: input.expectedCheckpointHash,
+            expectedCheckpointVersion: input.expectedCheckpointVersion,
+          },
+          true,
+        );
+      }
+      await upsertCheckpoint(client, input.checkpoint);
+      await client.query(
+        `INSERT INTO sessions
+          (id, current_generation, status, shell, workspace_root, owner_id,
+           next_action_sequence, screen_version, terminal_columns, terminal_rows,
+           geometry_version, created_at, parent_session_id, parent_generation,
+           source_checkpoint_version, source_checkpoint_hash, forked_at)
+         VALUES ($1, 1, 'STARTING', $2, $3, $4, 0, 0, 120, 40, 1, $5,
+                 $6, $7, $8, $9, $10)`,
+        [
+          input.child.id,
+          input.child.shell,
+          input.child.workspaceRoot,
+          input.child.ownerId,
+          input.child.createdAt,
+          input.parent.id,
+          input.parent.generation,
+          input.checkpoint.version,
+          input.checkpoint.contentHash,
+          input.child.lineage?.forkedAt,
+        ],
+      );
+      await client.query(
+        `INSERT INTO session_generations
+          (session_id, generation, owner_id, integration_version, status, started_at)
+         VALUES ($1, 1, $2, 'runtime-v1', 'STARTING', $3)`,
+        [input.child.id, input.child.ownerId, input.child.createdAt],
+      );
+      await client.query(
+        `INSERT INTO interaction_guards
+          (session_id, session_generation, input_policy, state_version)
+         VALUES ($1, 1, 'human_guarded', 1)`,
+        [input.child.id],
+      );
+      await client.query(
+        `INSERT INTO session_forks
+          (id, parent_session_id, parent_generation, actor_id, idempotency_key,
+           request_hash, child_session_id, checkpoint_version, checkpoint_hash,
+           stale, status, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'STARTING', $11)`,
+        [
+          `fork_${randomUUID()}`,
+          input.parent.id,
+          input.parent.generation,
+          input.actor.id,
+          input.idempotencyKey,
+          input.requestHash,
+          input.child.id,
+          input.checkpoint.version,
+          input.checkpoint.contentHash,
+          input.expectedParentStatus !== "READY",
+          input.child.createdAt,
+        ],
+      );
+      await insertEvents(client, [input.parentEvent, ...input.childEvents]);
     });
   }
 
@@ -161,6 +304,11 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
             SET status = 'BROKEN', broken_at = now(), broken_reason = $3
           WHERE session_id = $1 AND generation = $2 AND status <> 'CLOSED'`,
         [session.id, session.generation, reason],
+      );
+      await client.query(
+        `UPDATE session_forks SET status = 'FAILED', updated_at = now()
+          WHERE child_session_id = $1 AND status = 'STARTING'`,
+        [session.id],
       );
       await insertEvents(client, events);
     });
@@ -298,6 +446,7 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
     readonly action: Extract<SessionAction, { type: "execute" }>;
     readonly execution: Execution;
     readonly events: readonly DurableSessionEvent[];
+    readonly checkpoint?: ShellCheckpoint;
   }): Promise<void> {
     await this.#transaction(async (client) => {
       if (input.execution.status !== "COMPLETED" && input.execution.status !== "INTERRUPTED") {
@@ -346,6 +495,7 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
       );
       await insertEvents(client, input.events);
       await upsertSnapshot(client, input.session, input.execution);
+      if (input.checkpoint !== undefined) await upsertCheckpoint(client, input.checkpoint);
     });
   }
 
@@ -1134,6 +1284,38 @@ async function upsertSnapshot(
       session.screenVersion,
       execution.finishedAt,
       JSON.stringify({ exitCode: execution.exitCode }),
+    ],
+  );
+}
+
+async function upsertCheckpoint(client: PoolClient, checkpoint: ShellCheckpoint): Promise<void> {
+  await client.query(
+    `INSERT INTO shell_checkpoints
+      (session_id, source_generation, checkpoint_version, cwd, shell,
+       filtered_env, content_hash, observed_at, workspace_root)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     ON CONFLICT (session_id, source_generation) DO UPDATE
+       SET checkpoint_version = EXCLUDED.checkpoint_version,
+           cwd = EXCLUDED.cwd,
+           shell = EXCLUDED.shell,
+           filtered_env = EXCLUDED.filtered_env,
+           content_hash = EXCLUDED.content_hash,
+           observed_at = EXCLUDED.observed_at,
+           workspace_root = EXCLUDED.workspace_root
+     WHERE shell_checkpoints.checkpoint_version < EXCLUDED.checkpoint_version
+        OR (shell_checkpoints.checkpoint_version = EXCLUDED.checkpoint_version
+            AND shell_checkpoints.content_hash = EXCLUDED.content_hash
+            AND shell_checkpoints.observed_at <= EXCLUDED.observed_at)`,
+    [
+      checkpoint.sessionId,
+      checkpoint.sourceGeneration,
+      checkpoint.version,
+      checkpoint.cwd,
+      checkpoint.shell,
+      JSON.stringify(checkpoint.filteredEnvironment),
+      checkpoint.contentHash,
+      checkpoint.observedAt,
+      checkpoint.workspaceRoot,
     ],
   );
 }

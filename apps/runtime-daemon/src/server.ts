@@ -32,6 +32,7 @@ export interface RuntimeDaemonHandle extends RuntimeRpcServerHandle {
 }
 
 export async function startRuntimeDaemon(options: {
+  readonly checkpointEnvironmentKeys?: readonly string[];
   readonly databaseHealthCheckMilliseconds?: number;
   readonly databaseUrl?: string;
   readonly executionDispatch?: "external" | "immediate";
@@ -62,6 +63,7 @@ export async function startRuntimeDaemon(options: {
     (options.databaseUrl !== undefined ||
       options.databaseHealthCheckMilliseconds !== undefined ||
       options.databaseStatementTimeoutMilliseconds !== undefined ||
+      options.checkpointEnvironmentKeys !== undefined ||
       options.databaseReconnectInitialMilliseconds !== undefined ||
       options.databaseReconnectJitterRatio !== undefined ||
       options.databaseReconnectMaxMilliseconds !== undefined ||
@@ -91,6 +93,9 @@ export async function startRuntimeDaemon(options: {
     options.runtime ??
     new RuntimeService(new MemoryRuntimeStore(), new PtyShellExecutorFactory(), {
       ...(durability === undefined ? {} : { durability }),
+      ...(options.checkpointEnvironmentKeys === undefined
+        ? {}
+        : { checkpointEnvironmentKeys: options.checkpointEnvironmentKeys }),
       ...(options.executionDispatch === undefined
         ? {}
         : { executionDispatch: options.executionDispatch }),

@@ -42,7 +42,7 @@ const screenRectangle = z.strictObject({
 
 export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServer {
   const server = new McpServer(
-    { name: "iterminal", version: "0.6.7" },
+    { name: "iterminal", version: "0.7.1" },
     {
       instructions:
         "Create or select one shared Session, then pass its exact generation to every operation. " +
@@ -52,6 +52,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
         "Before interactive input, inspect interaction_get; INPUT_GUARDED is retryable only after the Guard expires or changes, while POLICY_DENIED requires a Human policy decision. " +
         "Resize is an explicit shared Action: read geometryVersion from screen_get and handle GEOMETRY_CHANGED by re-observing instead of overwriting another Actor's decision. " +
         "terminal_state is bounded advisory evidence only; never use its heuristic label as readiness, completion, authorization, approval, or permission to send input. " +
+        "session_fork rebuilds a new PTY from an exact checkpoint; inspect session_checkpoint first and explicitly acknowledge stale context when the parent is not READY. It never copies process, REPL, editor, or implicit Shell state. " +
         "Never retry a mutating call after DELIVERY_UNKNOWN without first inspecting the idempotency key or durable events.",
     },
   );
@@ -81,6 +82,47 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
       title: "Get terminal Session",
     },
     async ({ sessionId: requestedSessionId }) => call(() => gateway.getSession(requestedSessionId)),
+  );
+
+  server.registerTool(
+    "session_checkpoint",
+    {
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      description:
+        "Read bounded metadata for the latest exact-generation Shell checkpoint. Environment values are never returned. stale means the parent is not READY and only the last completed boundary is available; a checkpoint never contains process, REPL, editor, descriptor, alias/function, or trap state.",
+      inputSchema: z.strictObject({ generation, sessionId }),
+      title: "Inspect Session checkpoint",
+    },
+    async ({ generation: requestedGeneration, sessionId: requestedSessionId }) =>
+      call(() => gateway.getSessionCheckpoint(requestedSessionId, requestedGeneration)),
+  );
+
+  server.registerTool(
+    "session_fork",
+    {
+      annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      description:
+        "Create a new independent Session/PTY/Shell from an exact versioned checkpoint. The child restores only canonical workspace/cwd, Shell kind, and operator-allowlisted environment; it shares workspace files and does not copy processes, REPL/editor state, job control, aliases, functions, or traps. Read session_checkpoint first. Set allowStale only after explicitly accepting a RUNNING/RESERVED/BROKEN parent's last completed boundary. Retry transport uncertainty only with the identical idempotency key.",
+      inputSchema: z.strictObject({
+        allowStale: z.boolean().default(false),
+        expectedCheckpointVersion: z.number().int().positive(),
+        generation,
+        idempotencyKey,
+        sessionId,
+      }),
+      title: "Fork Session from checkpoint",
+    },
+    async (input) =>
+      call(() =>
+        gateway.forkSession({
+          actor,
+          allowStale: input.allowStale,
+          expectedCheckpointVersion: input.expectedCheckpointVersion,
+          idempotencyKey: input.idempotencyKey,
+          sessionGeneration: input.generation,
+          sessionId: input.sessionId,
+        }),
+      ),
   );
 
   server.registerTool(

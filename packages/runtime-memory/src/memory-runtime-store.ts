@@ -17,6 +17,19 @@ export class MemoryRuntimeStore implements RuntimeStore {
     this.#events.set(eventScope(session.id, session.generation), []);
   }
 
+  public deleteSession(sessionId: string, generation: number): void {
+    const session = this.#generation(sessionId, generation);
+    if (session.status !== "STARTING") {
+      throw new RuntimeError(
+        "INVALID_REQUEST",
+        "Only an unadmitted STARTING Session can be removed from live memory",
+        { sessionId, status: session.status },
+      );
+    }
+    this.#sessions.delete(sessionId);
+    this.#events.delete(eventScope(sessionId, generation));
+  }
+
   public getSession(sessionId: string): Session | undefined {
     return this.#sessions.get(sessionId);
   }

@@ -30,6 +30,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0024](./0024-human-console-transport.md)               | Keep Human HTTP/WS as a loopback Runtime adapter         | Accepted for M5          |
 | [0025](./0025-controlled-terminal-geometry.md)          | Make resize an explicit Runtime-owned versioned Action   | Accepted for M6.6        |
 | [0026](./0026-bounded-terminal-state-evidence.md)       | Expose bounded advisory terminal-state evidence          | Accepted for M6.7        |
+| [0027](./0027-versioned-shell-checkpoint-fork.md)       | Rebuild a child from a versioned filtered checkpoint     | Accepted for M7.1        |
 
 Statuses:
 

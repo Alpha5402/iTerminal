@@ -78,6 +78,7 @@ export interface CheckpointUpdate {
   readonly filteredEnv: Readonly<Record<string, string>>;
   readonly contentHash: string;
   readonly observedAt: Date;
+  readonly workspaceRoot: string;
 }
 
 export class PostgresRuntimeRepository {
@@ -385,15 +386,16 @@ export class PostgresRuntimeRepository {
     const result = await this.#pool.query(
       `INSERT INTO shell_checkpoints
         (session_id, source_generation, checkpoint_version, cwd, shell,
-         filtered_env, content_hash, observed_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         filtered_env, content_hash, observed_at, workspace_root)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (session_id, source_generation) DO UPDATE
          SET checkpoint_version = EXCLUDED.checkpoint_version,
              cwd = EXCLUDED.cwd,
              shell = EXCLUDED.shell,
              filtered_env = EXCLUDED.filtered_env,
              content_hash = EXCLUDED.content_hash,
-             observed_at = EXCLUDED.observed_at
+             observed_at = EXCLUDED.observed_at,
+             workspace_root = EXCLUDED.workspace_root
        WHERE shell_checkpoints.observed_at <= EXCLUDED.observed_at`,
       [
         input.sessionId,
@@ -404,6 +406,7 @@ export class PostgresRuntimeRepository {
         JSON.stringify(input.filteredEnv),
         input.contentHash,
         input.observedAt,
+        input.workspaceRoot,
       ],
     );
     return (result.rowCount ?? 0) > 0;

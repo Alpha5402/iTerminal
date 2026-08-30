@@ -187,6 +187,47 @@ describe("Runtime durable write-ahead boundary", () => {
     expect(factory.executors[1]?.closed).toBe(false);
     await runtime.closeSession(healthy.id, healthy.generation);
   });
+
+  it("does not publish a recertified checkpoint before durable fork admission", async () => {
+    const durability = new ControlledDurability();
+    const store = new MemoryRuntimeStore();
+    const runtime = new RuntimeService(store, new RecordingFactory(new RecordingExecutor()), {
+      durability,
+      ownerId: "owner-fork-admission-test",
+    });
+    const session = await runtime.createSession({ shell: "zsh", workspaceRoot: "/tmp" });
+    const checkpoint = runtime.getSessionCheckpoint(session.id, session.generation);
+    durability.forkError = new RuntimeError(
+      "CHECKPOINT_CHANGED",
+      "injected durable fork conflict",
+      {},
+      true,
+    );
+
+    await expect(
+      runtime.forkSession({
+        actor,
+        allowStale: false,
+        expectedCheckpointVersion: checkpoint.version,
+        idempotencyKey: "fork-before-admission",
+        sessionGeneration: session.generation,
+        sessionId: session.id,
+      }),
+    ).rejects.toMatchObject({ code: "CHECKPOINT_CHANGED" });
+
+    expect(runtime.getSessionCheckpoint(session.id, session.generation).version).toBe(
+      checkpoint.version,
+    );
+    expect(runtime.listSessions()).toHaveLength(1);
+    expect(runtime.getSession(session.id).status).toBe("READY");
+    expect(
+      store.queryEvents(session.id, session.generation, 0, 100).map((event) => event.type),
+    ).toEqual(expect.arrayContaining(["session.fork_failed"]));
+    expect(
+      store.queryEvents(session.id, session.generation, 0, 100).map((event) => event.type),
+    ).not.toEqual(expect.arrayContaining(["session.fork_requested"]));
+    await runtime.closeSession(session.id, session.generation);
+  });
 });
 
 class RecordingFactory implements ShellExecutorFactory {
@@ -214,6 +255,13 @@ class RecordingExecutor implements ShellExecutor {
   public readonly inputs: string[] = [];
   public closed = false;
 
+  public checkpoint(): Readonly<{
+    cwd: string;
+    filteredEnvironment: Readonly<Record<string, string>>;
+  }> {
+    return { cwd: "/tmp", filteredEnvironment: {} };
+  }
+
   public execute(command: string, callbacks: ShellExecuteCallbacks): Promise<ShellExecutionResult> {
     this.commands.push(command);
     callbacks.onStarted(command);
@@ -235,6 +283,7 @@ class RecordingExecutor implements ShellExecutor {
 
 class ControlledDurability implements RuntimeDurability {
   public executeError: RuntimeError | undefined;
+  public forkError: RuntimeError | undefined;
   public failExecute = false;
   public failInteraction = false;
   public writeAttempts = 0;
@@ -242,6 +291,10 @@ class ControlledDurability implements RuntimeDurability {
 
   public createSession(): Promise<void> {
     return Promise.resolve();
+  }
+
+  public createForkSession(): Promise<void> {
+    return this.forkError === undefined ? Promise.resolve() : Promise.reject(this.forkError);
   }
 
   public markSessionReady(): Promise<void> {

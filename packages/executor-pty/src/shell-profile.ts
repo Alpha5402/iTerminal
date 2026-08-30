@@ -40,7 +40,23 @@ PS2='iterminal:bash> '
 __IT_PREEXEC_EMITTED=0
 
 __it_control() {
-  builtin printf '%s\000%s\000%s\000' "$1" "$2" "$3" > "$ITERMINAL_CONTROL_FIFO"
+  builtin printf '%s\000%s\000%s\000%s\000' "$1" "$2" "$3" "$4" > "$ITERMINAL_CONTROL_FIFO"
+}
+
+__it_checkpoint_env() {
+  local __it_key __it_value __it_encoded
+  local __it_old_ifs="$IFS"
+  IFS=','
+  for __it_key in $ITERMINAL_CHECKPOINT_ENV_KEYS; do
+    command /usr/bin/printenv "$__it_key" >/dev/null 2>&1 || continue
+    __it_value="${"$"}{!__it_key}"
+    [[ "$__it_value" == *$'\n'* ]] && continue
+    __it_encoded="$(builtin printf '%s' "$__it_value" | command /usr/bin/base64 | command /usr/bin/tr -d '\n')"
+    [[ "${"$"}{#__it_encoded}" -gt 5464 ]] && continue
+    [[ "${"$"}{#__it_encoded}" -eq 5464 && "$__it_encoded" != *== ]] && continue
+    builtin printf '%s=%s\n' "$__it_key" "$__it_encoded"
+  done
+  IFS="$__it_old_ifs"
 }
 
 __it_execute() {
@@ -75,8 +91,10 @@ __it_debug() {
 
 __it_precmd() {
   local __it_status="$1"
+  local __it_checkpoint
   __IT_PREEXEC_EMITTED=0
-  __it_control 'READY' "$__it_status" "$PWD"
+  __it_checkpoint="$(__it_checkpoint_env)"
+  __it_control 'READY' "$__it_status" "$PWD" "$__it_checkpoint"
 }
 
 __it_control 'HELLO' 'bash' "$$"
@@ -92,7 +110,20 @@ PS2='iterminal:zsh> '
 autoload -Uz add-zsh-hook
 
 __it_control() {
-  builtin printf '%s\000%s\000%s\000' "$1" "$2" "$3" > "$ITERMINAL_CONTROL_FIFO"
+  builtin printf '%s\000%s\000%s\000%s\000' "$1" "$2" "$3" "$4" > "$ITERMINAL_CONTROL_FIFO"
+}
+
+__it_checkpoint_env() {
+  local __it_key __it_value __it_encoded
+  for __it_key in ${"$"}{(s:,:)ITERMINAL_CHECKPOINT_ENV_KEYS}; do
+    command /usr/bin/printenv "$__it_key" >/dev/null 2>&1 || continue
+    __it_value="${"$"}{(P)__it_key}"
+    [[ "$__it_value" == *$'\n'* ]] && continue
+    __it_encoded="$(builtin printf '%s' "$__it_value" | command /usr/bin/base64 | command /usr/bin/tr -d '\n')"
+    [[ "${"$"}{#__it_encoded}" -gt 5464 ]] && continue
+    [[ "${"$"}{#__it_encoded}" -eq 5464 && "$__it_encoded" != *== ]] && continue
+    builtin printf '%s=%s\n' "$__it_key" "$__it_encoded"
+  done
 }
 
 __it_execute() {
@@ -109,7 +140,8 @@ __it_preexec() {
 
 __it_precmd() {
   local __it_status=$?
-  __it_control 'READY' "$__it_status" "$PWD"
+  local __it_checkpoint="$(__it_checkpoint_env)"
+  __it_control 'READY' "$__it_status" "$PWD" "$__it_checkpoint"
 }
 
 __it_control 'HELLO' 'zsh' "$$"

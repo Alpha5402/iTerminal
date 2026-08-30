@@ -1,10 +1,10 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
-> 状态：Implementation Baseline v5.8 — M5 shared path 与 M6.6 controlled geometry 已通过 Browser Human + official MCP Agent L3；M6.7 bounded TerminalState 已通过 real PTY/official MCP L2；M0–M4.1、M6.5 与 M8.9 后端路径保持 L2，M4 autonomous-model L3 仍待显式授权
+> 状态：Implementation Baseline v5.9 — M5 shared path 与 M6.6 controlled geometry 已通过 Browser Human + official MCP Agent L3；M6.7 bounded TerminalState 与 M7.1 versioned checkpoint fork 已通过 real PTY/official MCP L2；M0–M4.1、M6.5 与 M8.9 后端路径保持 L2，M4 autonomous-model L3 仍待显式授权
 >
 > 基线日期：2026-08-30
 >
-> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live Runtime 已接入 PostgreSQL write-ahead journal、bounded ingest loop、versioned dynamic ANSI/VT Virtual Screen，以及 generation-scoped Input Policy/Interaction Guard。M5/M6.6 增加 loopback Human Console 与受控 ResizeAction：真实无头 Chrome Human 和 official MCP SDK Agent 已在同一 PostgreSQL/zsh Session 中共享 cwd/env/Python REPL，并分别驱动同一 PTY 的 SIGWINCH；`geometryVersion` CAS、跨几何 full resync、browser/headless 文本一致、Action 归属与 UNKNOWN/BROKEN 均有证据。M6.7 增加 exact-generation 只读 `terminal_state`：Runtime/Execution 事实与有界 command/screen signal 分层，不把 password/confirm/editor/pager/REPL heuristic 当作授权、READY、完成、Approval 或 secret-channel 事实。Viewer 布局不拥有 geometry。M8.9 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放、DB/AMQP 恢复与真实三节点 RabbitMQ quorum leader failover。Autonomous model 授权、更广 TUI/跨浏览器/style parity、daemon restart 后 durable wait、Approval/secret、非对称分区、long soak、M9 fencing、多 Worker 与完整 MVP/L4 仍未完成。
+> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live Runtime 已接入 PostgreSQL write-ahead journal、bounded ingest loop、versioned dynamic ANSI/VT Virtual Screen，以及 generation-scoped Input Policy/Interaction Guard。M5/M6.6 增加 loopback Human Console 与受控 ResizeAction：真实无头 Chrome Human 和 official MCP SDK Agent 已在同一 PostgreSQL/zsh Session 中共享 cwd/env/Python REPL，并分别驱动同一 PTY 的 SIGWINCH。M6.7 增加不可作为安全事实的 exact-generation `terminal_state`。M7.1 增加 Shell READY control-channel checkpoint、运维 exact allowlist env、version/hash/CAS/staleness、cwd containment、PostgreSQL `session_forks`/child lineage/idempotency 与 `session_checkpoint|session_fork` MCP；真实 bash/zsh 中 READY/RUNNING/BROKEN parent 可重建独立 child，不复制 process/REPL/editor/alias/function/trap，也不隔离共享 workspace 文件。M8.9 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放、DB/AMQP 恢复与真实三节点 RabbitMQ quorum leader failover。Browser fork UX、新 daemon hydrate 历史 BROKEN parent、Autonomous model 授权、更广 TUI/跨浏览器/style parity、daemon restart 后 durable wait、Approval/secret、非对称分区、long soak、M9 fencing、多 Worker 与完整 MVP/L4 仍未完成。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -477,11 +477,11 @@ PTY bytes -> ANSI/VT parser -> versioned screen buffer -> full/diff/region/searc
 
 规则：
 
-- [ ] parent `READY` 时优先生成 fresh checkpoint 后 fork。
-- [ ] parent `RUNNING/BROKEN` 时只能使用最近一次有效 checkpoint，并在结果中返回 staleness。
-- [ ] checkpoint 缺失或 cwd 不存在时返回结构化错误，不默默 fallback 到 workspace root。
-- [ ] fork 创建事件、lineage 与新 generation；失败不修改 parent。
-- [ ] 同一 workspace 的文件系统仍然共享；fork 不是 git checkout/worktree 隔离。
+- [x] parent `READY` 时重新 certify Shell observation、checkpoint version +1 后 fork（M7.1 L2）。
+- [x] parent `RUNNING/BROKEN` 时只能使用最近一次 READY checkpoint，必须 `allowStale` 明示确认，结果返回 age/status/staleness（同 owner L2）。
+- [x] checkpoint 缺失、version 变更、cwd 不存在/逃逸时返回结构化错误，不默默 fallback 到 workspace root。
+- [x] fork 创建 attributed request/ready/failure Events、immutable child lineage 与新 Session generation；durable admission 失败不推进 parent checkpoint/不留 child，child 启动失败只留下已 admission 的 checkpoint/audit，不改变 parent PTY/Execution。
+- [x] 同一 workspace 的文件系统仍然共享；fork 不是 git checkout/worktree 隔离。
 
 ---
 
@@ -492,11 +492,11 @@ PTY bytes -> ANSI/VT parser -> versioned screen buffer -> full/diff/region/searc
 - [x] `sessions`：status、current generation、workspace root、shell profile、active execution、next action sequence。
 - [x] `session_generations`：owner、PTY/Shell metadata、integration version、started/broken/closed reason。
 - [ ] `actors` / `session_actors`：identity、type、capability、display metadata。
-- [ ] `actions`：kind、immutable payload、actor、sequence、idempotency key、request hash、status 已完成；lineage 待 M7。
+- [x] `actions`：kind、immutable payload、actor、sequence、idempotency key、request hash、status；fork 另由 actor-scoped `session_forks` 记录 idempotency 与 child lineage。
 - [ ] `executions`：execute action、generation、owner、write/start/end state、exit/outcome/unknown reason 已完成；fencing 待 M9。
 - [x] `session_events`：generation、event sequence、action/execution/actor、type、payload/ref、created time。
 - [x] `session_snapshots`：cwd、foreground observation、last exit、screen version、confidence、observed time。
-- [ ] `shell_checkpoints`：基础表与 newest-observation 更新已完成；filtered context/staleness 生成待 M7。
+- [x] `shell_checkpoints`：versioned workspace/cwd/shell/operator-allowlisted env/hash/observed time；READY 更新与 stale 选择已完成 M7.1。
 - [ ] `screen_snapshots`：geometry/cursor/content or artifact ref、screen version。
 - [x] `interaction_guards`：generation-scoped policy、guard actor/reason/TTL/renewal、state version。
 - [ ] `approvals`：exact action hash、actor/approver、expiry、one-time use。
@@ -581,10 +581,11 @@ M9 spike/ADR 选型；不能让任意 Worker 消费后新建第二个“同 Sess
 - Action/Execution：`execute`、`execution_get`、`execution_wait`、`input`、`control`、`terminal_resize`。
 - Event：`events_query`。
 - Screen：`screen_get`、`screen_region`、`screen_cells`、`screen_diff`、`screen_search`、`screen_wait`、`terminal_state`。
+- Checkpoint/Fork：`session_checkpoint`、`session_fork`。
 
 后续按能力分阶段增加：
 
-- M7：`session_fork`；完成 checkpoint/fork 语义前不注册空壳。
+- M7.2：新 daemon 从 durable checkpoint hydrate 历史 BROKEN parent 并接入 Browser Human rebuild/fork UX。
 - Event exact-get/全文 search 只有在 bounded schema、权限与分页契约冻结后才注册；底层 repository 已有能力不等于 MCP 工具已交付。
 
 调整稿使用的 `terminal_*` 名称仅视为产品草案。当前实现已使用上述稳定短名称；如发布前需要统一前缀，必须单独做命名 ADR、兼容别名与弃用周期，不能只改 TODO。
@@ -681,8 +682,8 @@ MVP 假设单机受信用户；Agent 可能犯错或受提示注入影响，但 
 
 - [x] Human Console HTTP 仅监听 loopback并拒绝 `0.0.0.0`；MCP 当前为 stdio、无网络监听。
 - [x] Console 校验 Origin/Host/WebSocket upgrade；HttpOnly SameSite cookie 不进入 URL query。
-- [ ] workspace root 与 fork cwd 使用 realpath/containment 校验。
-- [ ] 明确声明：workspace containment 不阻止 Shell command 访问 root 外路径。
+- [x] workspace root 与 fork cwd 使用 realpath/containment 校验（M7.1 reconstruction boundary）。
+- [x] 明确声明：workspace containment 只校验重建起点，不阻止后续 Shell command 访问 root 外路径。
 - [x] 不继承完整宿主 env；Runtime env、Shell env、checkpoint env 分开定义。
 - [ ] Secret 不进入 Action payload、Event、Snapshot、Checkpoint、MCP result、普通 log/recording。
 - [ ] Human-only secret channel 直接写 PTY，只记录完成/取消 metadata；敏感期间暂停/脱敏 screen/event recording。
@@ -953,14 +954,15 @@ Exit Gate：M0–M6 的 L3 证据齐全；到此才能称为 MVP。
 
 ### M7 — fork_session 与 Rebuild（目标：L3）
 
-- [ ] checkpoint schema、filter/redaction、hash/staleness。
-- [ ] fork from READY fresh checkpoint。
-- [ ] fork from RUNNING/BROKEN last valid checkpoint + staleness warning。
-- [ ] cwd/env/workspace/shell profile 恢复。
-- [ ] parent/child lineage、fork/rebuild events。
-- [ ] 缺失 cwd/checkpoint 结构化失败。
-- [ ] UI/MCP 明确“不复制 process/REPL/vim state”。
-- [ ] 注册 MCP Fork 工具并提供 Human Console fork/rebuild 操作。
+- [x] M7.1 checkpoint schema、operator exact allowlist/filter、bounded value、hash/version/age/staleness。
+- [x] M7.1 fork from READY re-certified checkpoint + exact version CAS。
+- [x] M7.1 fork from RUNNING/BROKEN last valid checkpoint + explicit `allowStale` warning（同 live owner）。
+- [x] M7.1 cwd/env/workspace/shell profile 恢复；cwd realpath/containment，只注入 filtered env。
+- [x] M7.1 PostgreSQL parent/child lineage、actor-scoped fork idempotency、fork/rebuild events。
+- [x] M7.1 缺失/变更/stale-unacknowledged/invalid cwd checkpoint 结构化失败。
+- [ ] M7.2 UI 明确“不复制 process/REPL/vim state”；MCP Tool description 已完成。
+- [ ] M7.2 Human Console fork/rebuild 操作；MCP `session_checkpoint|session_fork` 已注册。
+- [ ] M7.2 daemon/owner restart 后从 PostgreSQL hydrate 历史 BROKEN parent checkpoint，而不伪恢复旧 PTY。
 
 Exit Gate：parent busy 时 fork 后可独立 `git status`；child 继承可复现 context，不影响 parent PTY。
 
@@ -1163,6 +1165,6 @@ v1.0 还必须满足 M7–M10、fork 语义、故障矩阵、owner routing、mul
 10. [x] `feat(console): add shared human terminal path`：完成 M5 最小 HTTP/WS、composer、interactive focus、actor/timeline 与 policy/guard UI，形成首条 L3 Browser Human + official MCP Agent 路径。
 11. [x] `feat(screen): add controlled resize and geometry ownership`：完成 canonical geometry owner、resize/reflow、CAS/UNKNOWN 与 Human/headless L3 fixture 对照。
 12. [x] `feat(screen): classify bounded terminal state evidence`：完成有 confidence/evidence/limitations 的 heuristic 与 real shell/REPL/TUI fixtures，不把 heuristic 当权限事实。
-13. `feat(session): fork from versioned shell checkpoint`：进入 M7；只复制明确列出的可重建 context。
+13. [ ] `feat(session): fork from versioned shell checkpoint`：M7.1 backend/PostgreSQL/RPC/MCP L2 已完成；M7.2 仍需 Browser Human UX 与 cross-daemon durable rebuild 才闭合。
 
 M5 shared path 已闭合，但 M6 完整 L3 与其余 MVP Gate 未闭合前，不因为 M8 已有故障证据就宣称 MVP。

@@ -34,7 +34,17 @@ describeDatabase("PostgreSQL controlled terminal geometry", () => {
     const starting = sessionFixture();
     await durability.createSession(starting, [eventFixture(starting, "session.created")]);
     const ready: Session = { ...starting, status: "READY" };
-    await durability.markSessionReady(ready, process.pid, eventFixture(ready, "session.ready"));
+    await durability.markSessionReady(ready, process.pid, eventFixture(ready, "session.ready"), {
+      contentHash: "0".repeat(64),
+      cwd: ready.workspaceRoot,
+      filteredEnvironment: {},
+      observedAt: ready.createdAt,
+      sessionId: ready.id,
+      shell: ready.shell,
+      sourceGeneration: ready.generation,
+      version: 1,
+      workspaceRoot: ready.workspaceRoot,
+    });
     const left = resizeFixture(ready, actorFixture("left"), 96, 30);
     const right = resizeFixture(ready, actorFixture("right"), 100, 32);
 

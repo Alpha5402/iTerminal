@@ -179,7 +179,7 @@ describeFixtures("M6.7 bounded terminal-state evidence", () => {
 
     const password = await start(activeClient, session, {
       command:
-        "printf 'Password: '; stty -echo; IFS= read -r secret; stty echo; printf '\\r\\nsecret-bytes=%s\\r\\n' \"${#secret}\"",
+        "stty -echo; printf 'Password: '; IFS= read -r secret; stty echo; printf '\\r\\nsecret-bytes=%s\\r\\n' \"${#secret}\"",
       key: "state-password",
     });
     await waitForText(activeClient, session, "Password:");
@@ -327,10 +327,22 @@ async function expectState(
     readonly requiredEvidence: readonly string[];
   },
 ): Promise<TerminalStateResult> {
-  const state = await callTool<TerminalStateResult>(activeClient, "terminal_state", {
-    generation: session.generation,
-    sessionId: session.id,
-  });
+  let state: TerminalStateResult | undefined;
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    state = await callTool<TerminalStateResult>(activeClient, "terminal_state", {
+      generation: session.generation,
+      sessionId: session.id,
+    });
+    if (
+      state.confidence === expected.confidence &&
+      state.kind === expected.kind &&
+      (expected.executionId === undefined || state.executionId === expected.executionId)
+    ) {
+      break;
+    }
+    await delay(5);
+  }
+  if (state === undefined) throw new Error("Terminal state fixture produced no observation");
   expect(state).toMatchObject({
     advisory: true,
     confidence: expected.confidence,
