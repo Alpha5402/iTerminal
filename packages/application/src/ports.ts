@@ -9,6 +9,7 @@ import type {
   SessionAction,
   SessionEvent,
   ShellKind,
+  TerminalScreenCellsResult,
   TerminalScreenSnapshot,
   TerminalScreenDiffResult,
   TerminalScreenRegionResult,
@@ -46,6 +47,12 @@ export interface ShellExecutorFactory {
 }
 
 export interface TerminalScreenProjection {
+  cells(input: {
+    readonly columnCount: number;
+    readonly rowCount: number;
+    readonly startColumn: number;
+    readonly startRow: number;
+  }): Promise<TerminalScreenCellsResult>;
   diff(afterVersion: number): Promise<TerminalScreenDiffResult>;
   dispose(): void;
   region(input: {

@@ -1,6 +1,6 @@
 # M4 MCP stdio protocol
 
-M6.1–M6.3 extend this protocol with bounded read-only screen observation and synchronization while preserving the M4 Action and Event contracts.
+M6.1–M6.4 extend this protocol with bounded read-only screen observation, synchronization, and stable styled-cell metadata while preserving the M4 Action and Event contracts.
 
 iTerminal uses the official Model Context Protocol TypeScript SDK v2 and `serveStdio`. The bridge logs only to stderr because stdout is the MCP framing channel. A separate Runtime daemon owns all live state; set `ITERM_RUNTIME_SOCKET` to its absolute Unix socket path before starting the bridge.
 
@@ -39,6 +39,7 @@ The Actor type is always `agent` in M4. Tool arguments cannot claim to be Human 
 | `events_query`   | Returns at most 500 Events after a generation-scoped sequence                         |
 | `screen_get`     | Returns the bounded live ANSI/VT viewport, cursor, buffer, and screen version         |
 | `screen_region`  | Reads a bounded rectangle using zero-based terminal-cell coordinates                  |
+| `screen_cells`   | Reads sparse material cells with palette/RGB colors and standard SGR attributes       |
 | `screen_diff`    | Returns retained row replacements or an explicit full-snapshot resync                 |
 | `screen_search`  | Searches literal text in the current viewport with bounded terminal-cell coordinates  |
 | `screen_wait`    | Reactively waits for text, version, stability, or an exact Execution's terminal state |
@@ -66,6 +67,8 @@ Every successful tool result contains a JSON text block and `structuredContent: 
 `screen_search` and `screen_wait` observe only the live current viewport; neither scans scrollback nor durable Events. A wait timeout is bounded to 1–300,000 ms and returns `matched: false`, `reason: "timeout"`, and the latest snapshot instead of raising a transport error. A stable condition means only that no `screenVersion` was applied during its interval—it does not prove prompt readiness or command completion. If an RPC client disconnects, the daemon aborts that client's server-side wait.
 
 `screen_region` validates that the requested row/column rectangle fits the canonical 120×40 viewport. Coordinates and widths are terminal cells, not JavaScript string offsets; a wide glyph clipped by either region edge is represented as blank space. `screen_diff` retains 64 process-local revisions and returns at most 40 complete row replacements plus current frame metadata. A future or evicted `afterVersion` returns `resyncRequired: true` with the current full snapshot. The ring is not durable and cannot resume a lost PTY generation.
+
+`screen_cells` uses the same bounded rectangle and returns row-major material cells tied to one exact current frame. Default blank cells and wide-character continuations are omitted; styled blanks remain present. Default colors are omitted, while non-default colors use explicit palette indexes or RGB channels. Enabled bold, italic, dim, underline, blink, inverse, invisible, strikethrough, and overline attributes appear as `true`. An invisible cell retains width/style but returns empty visual text; concealed characters are also excluded from snapshots, regions, search, and plain-text diffs. Hyperlink targets, underline variants/colors, images/sixel, pixel metrics, and style diffs are not exposed by this contract.
 
 ## Run locally
 

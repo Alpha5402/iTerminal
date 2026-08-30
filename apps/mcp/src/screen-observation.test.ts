@@ -208,6 +208,70 @@ describe("M6 live screen observation and synchronization", () => {
       sessionId: session.id,
     });
   }, 20_000);
+
+  it("exposes stable sparse SGR cell metadata through the official MCP path", async () => {
+    const activeClient = required(client, "MCP Client");
+    const session = await callTool<SessionResult>(activeClient, "session_create", {
+      shell: "zsh",
+      workspaceRoot,
+    });
+    const started = await callTool<StartedResult>(activeClient, "execute", {
+      command:
+        "printf '\\033[2J\\033[H\\033[1;2;3;4;5;7;9;53;38;5;196;48;2;1;2;3mA界 \\033[8mX\\033[0mZ'",
+      generation: session.generation,
+      idempotencyKey: "m6-styled-cells",
+      sessionId: session.id,
+    });
+    await callTool<WaitResult>(activeClient, "screen_wait", {
+      condition: { executionId: started.execution.id, type: "execution_exit" },
+      generation: session.generation,
+      sessionId: session.id,
+      timeoutMilliseconds: 2_000,
+    });
+
+    const result = await callTool<CellsResult>(activeClient, "screen_cells", {
+      columnCount: 6,
+      generation: session.generation,
+      rowCount: 1,
+      sessionId: session.id,
+      startColumn: 0,
+      startRow: 0,
+    });
+    expect(result.frame.screenVersion).toBeGreaterThan(0);
+    expect(result.cells).toHaveLength(5);
+    expect(result.cells[0]).toEqual({
+      column: 0,
+      row: 0,
+      style: {
+        background: { blue: 3, green: 2, mode: "rgb", red: 1 },
+        blink: true,
+        bold: true,
+        dim: true,
+        foreground: { index: 196, mode: "palette" },
+        inverse: true,
+        italic: true,
+        overline: true,
+        strikethrough: true,
+        underline: true,
+      },
+      text: "A",
+      width: 1,
+    });
+    expect(result.cells[1]).toMatchObject({ column: 1, text: "界", width: 2 });
+    expect(result.cells[2]).toMatchObject({ column: 3, text: " ", width: 1 });
+    expect(result.cells[3]).toMatchObject({
+      column: 4,
+      style: { invisible: true },
+      text: "",
+      width: 1,
+    });
+    expect(result.cells[4]).toEqual({ column: 5, row: 0, style: {}, text: "Z", width: 1 });
+
+    await callTool(activeClient, "session_close", {
+      generation: session.generation,
+      sessionId: session.id,
+    });
+  }, 20_000);
 });
 
 async function connectClient(socketPath: string): Promise<Client> {
@@ -304,6 +368,17 @@ type DiffResult =
       readonly resyncRequired: true;
       readonly snapshot: ScreenResult;
     }>;
+
+interface CellsResult {
+  readonly cells: readonly {
+    readonly column: number;
+    readonly row: number;
+    readonly style: Readonly<Record<string, unknown>>;
+    readonly text: string;
+    readonly width: number;
+  }[];
+  readonly frame: ScreenFrame;
+}
 
 interface WaitResult {
   readonly execution?: { readonly id: string; readonly status: string };

@@ -41,6 +41,7 @@ describe("M4 stdio MCP bridge", () => {
       "execution_get",
       "execution_wait",
       "input",
+      "screen_cells",
       "screen_diff",
       "screen_get",
       "screen_region",

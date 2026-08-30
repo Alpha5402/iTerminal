@@ -129,6 +129,7 @@ function stubGateway(): RuntimeGateway {
     dispatchExecution: unsupported,
     getExecution: unsupported,
     getScreen: unsupported,
+    getScreenCells: unsupported,
     getScreenDiff: unsupported,
     getScreenRegion: unsupported,
     getSession: unsupported,

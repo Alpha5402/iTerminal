@@ -184,6 +184,76 @@ describe("XtermScreenProjection", () => {
       screen.dispose();
     }
   });
+
+  it("maps styled material cells into stable palette/RGB and SGR metadata", async () => {
+    const screen = createScreen();
+    try {
+      screen.write("\u001B[1;2;3;4;5;7;9;53;38;5;196;48;2;1;2;3mA界 \u001B[8mX\u001B[0mZ", 1);
+
+      const result = await screen.cells({
+        columnCount: 6,
+        rowCount: 1,
+        startColumn: 0,
+        startRow: 0,
+      });
+      const styled = {
+        background: { blue: 3, green: 2, mode: "rgb", red: 1 },
+        blink: true,
+        bold: true,
+        dim: true,
+        foreground: { index: 196, mode: "palette" },
+        inverse: true,
+        italic: true,
+        overline: true,
+        strikethrough: true,
+        underline: true,
+      };
+      expect(result).toMatchObject({
+        columnCount: 6,
+        frame: { screenVersion: 1 },
+        rowCount: 1,
+        startColumn: 0,
+        startRow: 0,
+      });
+      expect(result.cells).toEqual([
+        { column: 0, row: 0, style: styled, text: "A", width: 1 },
+        { column: 1, row: 0, style: styled, text: "界", width: 2 },
+        { column: 3, row: 0, style: styled, text: " ", width: 1 },
+        {
+          column: 4,
+          row: 0,
+          style: { ...styled, invisible: true },
+          text: "",
+          width: 1,
+        },
+        { column: 5, row: 0, style: {}, text: "Z", width: 1 },
+      ]);
+
+      expect((await screen.snapshot()).lines[0]).toBe("A界  Z");
+      await expect(
+        screen.region({ columnCount: 6, rowCount: 1, startColumn: 0, startRow: 0 }),
+      ).resolves.toMatchObject({ lines: ["A界  Z"] });
+      await expect(screen.diff(0)).resolves.toMatchObject({
+        changedRows: [{ row: 0, text: "A界  Z" }],
+        resyncRequired: false,
+      });
+      await expect(
+        screen.search({ caseSensitive: true, maxMatches: 5, query: "X" }),
+      ).resolves.toMatchObject({ matches: [] });
+
+      await expect(
+        screen.cells({ columnCount: 4, rowCount: 1, startColumn: 2, startRow: 0 }),
+      ).resolves.toMatchObject({
+        cells: [
+          { column: 3, text: " ", width: 1 },
+          { column: 4, style: { invisible: true }, text: "", width: 1 },
+          { column: 5, style: {}, text: "Z", width: 1 },
+        ],
+      });
+    } finally {
+      screen.dispose();
+    }
+  });
 });
 
 function createScreen(): XtermScreenProjection {

@@ -17,10 +17,18 @@ const idempotencyKey = z
   .min(1)
   .max(256)
   .describe("Caller-generated retry key; reuse only for the identical request");
+const screenRectangle = z.strictObject({
+  columnCount: z.number().int().min(1).max(120),
+  generation,
+  rowCount: z.number().int().min(1).max(40),
+  sessionId,
+  startColumn: z.number().int().min(0).max(119),
+  startRow: z.number().int().min(0).max(39),
+});
 
 export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServer {
   const server = new McpServer(
-    { name: "iterminal", version: "0.6.3" },
+    { name: "iterminal", version: "0.6.4" },
     {
       instructions:
         "Create or select one shared Session, then pass its exact generation to every operation. " +
@@ -241,17 +249,22 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
       annotations: { readOnlyHint: true, openWorldHint: false },
       description:
         "Read one rectangular slice of the current active 120x40 viewport using zero-based terminal-cell coordinates. Wide glyphs clipped by a boundary are returned as blank cells. This does not read scrollback.",
-      inputSchema: z.strictObject({
-        columnCount: z.number().int().min(1).max(120),
-        generation,
-        rowCount: z.number().int().min(1).max(40),
-        sessionId,
-        startColumn: z.number().int().min(0).max(119),
-        startRow: z.number().int().min(0).max(39),
-      }),
+      inputSchema: screenRectangle,
       title: "Read live terminal screen region",
     },
     async (input) => call(() => gateway.getScreenRegion(input)),
+  );
+
+  server.registerTool(
+    "screen_cells",
+    {
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      description:
+        "Read row-major material cells and sparse standard SGR styles from one bounded current-viewport rectangle. Default blank and wide-continuation cells are omitted. Colors are explicit palette indexes or RGB channels; request the smallest useful region.",
+      inputSchema: screenRectangle,
+      title: "Read styled live terminal cells",
+    },
+    async (input) => call(() => gateway.getScreenCells(input)),
   );
 
   server.registerTool(

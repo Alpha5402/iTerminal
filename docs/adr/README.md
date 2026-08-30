@@ -25,6 +25,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0019](./0019-live-virtual-screen-projection.md)        | Keep one bounded live ANSI/VT screen projection          | Accepted for M6.1        |
 | [0020](./0020-reactive-screen-observation.md)           | Wait and search one bounded live screen reactively       | Accepted for M6.2        |
 | [0021](./0021-bounded-screen-region-diff.md)            | Bound viewport regions, row diffs, and resync            | Accepted for M6.3        |
+| [0022](./0022-stable-screen-cell-style-dto.md)          | Map live styled cells into a stable bounded DTO          | Accepted for M6.4        |
 
 Statuses:
 

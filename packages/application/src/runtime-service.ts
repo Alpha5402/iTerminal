@@ -12,6 +12,7 @@ import type {
   SessionAction,
   SessionEvent,
   ShellKind,
+  TerminalScreenCellsResult,
   TerminalScreenDiffResult,
   TerminalScreenRegionResult,
   TerminalScreenSnapshot,
@@ -91,6 +92,15 @@ export interface ScreenDiffRequest {
   readonly afterVersion: number;
   readonly generation: number;
   readonly sessionId: string;
+}
+
+export interface ScreenCellsRequest {
+  readonly columnCount: number;
+  readonly generation: number;
+  readonly rowCount: number;
+  readonly sessionId: string;
+  readonly startColumn: number;
+  readonly startRow: number;
 }
 
 export interface ScreenRegionRequest {
@@ -333,6 +343,23 @@ export class RuntimeService {
     const screen = this.#requireScreen(request.sessionId, request.generation);
     try {
       const result = await screen.diff(request.afterVersion);
+      this.#requireGeneration(request.sessionId, request.generation);
+      return result;
+    } catch (error) {
+      throw this.#screenFailure(request.sessionId, request.generation, error);
+    }
+  }
+
+  public async getScreenCells(request: ScreenCellsRequest): Promise<TerminalScreenCellsResult> {
+    validateScreenRegion(request);
+    const screen = this.#requireScreen(request.sessionId, request.generation);
+    try {
+      const result = await screen.cells({
+        columnCount: request.columnCount,
+        rowCount: request.rowCount,
+        startColumn: request.startColumn,
+        startRow: request.startRow,
+      });
       this.#requireGeneration(request.sessionId, request.generation);
       return result;
     } catch (error) {

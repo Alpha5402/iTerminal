@@ -46,6 +46,41 @@ export interface TerminalScreenRegionResult {
   readonly startRow: number;
 }
 
+export type TerminalScreenColor =
+  | Readonly<{ mode: "palette"; index: number }>
+  | Readonly<{ mode: "rgb"; blue: number; green: number; red: number }>;
+
+export interface TerminalScreenCellStyle {
+  readonly background?: TerminalScreenColor;
+  readonly blink?: true;
+  readonly bold?: true;
+  readonly dim?: true;
+  readonly foreground?: TerminalScreenColor;
+  readonly invisible?: true;
+  readonly inverse?: true;
+  readonly italic?: true;
+  readonly overline?: true;
+  readonly strikethrough?: true;
+  readonly underline?: true;
+}
+
+export interface TerminalScreenCell {
+  readonly column: number;
+  readonly row: number;
+  readonly style: TerminalScreenCellStyle;
+  readonly text: string;
+  readonly width: number;
+}
+
+export interface TerminalScreenCellsResult {
+  readonly cells: readonly TerminalScreenCell[];
+  readonly columnCount: number;
+  readonly frame: TerminalScreenFrame;
+  readonly rowCount: number;
+  readonly startColumn: number;
+  readonly startRow: number;
+}
+
 export interface TerminalScreenChangedRow {
   readonly row: number;
   readonly text: string;

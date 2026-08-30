@@ -7,6 +7,7 @@ import type {
   CreateSessionRequest,
   ExecuteRequest,
   InputRequest,
+  ScreenCellsRequest,
   ScreenDiffRequest,
   ScreenRegionRequest,
   ScreenSearchRequest,
@@ -20,6 +21,7 @@ import type {
   Execution,
   InputAction,
   Session,
+  TerminalScreenCellsResult,
   TerminalScreenDiffResult,
   TerminalScreenRegionResult,
   TerminalScreenSearchResult,
@@ -62,6 +64,13 @@ const sessionIdentitySchema = z.strictObject({
   sessionId: z.string().min(1).max(256),
 });
 
+const screenRectangleSchema = sessionIdentitySchema.extend({
+  columnCount: z.number().int().min(1).max(120),
+  rowCount: z.number().int().min(1).max(40),
+  startColumn: z.number().int().min(0).max(119),
+  startRow: z.number().int().min(0).max(39),
+});
+
 const operationSchemas = {
   "control.send": sessionIdentitySchema.extend({
     actor: actorSchema,
@@ -97,16 +106,12 @@ const operationSchemas = {
     idempotencyKey: z.string().min(1).max(256),
     targetExecutionId: z.string().min(1).max(256),
   }),
+  "screen.cells": screenRectangleSchema,
   "screen.diff": sessionIdentitySchema.extend({
     afterVersion: z.number().int().nonnegative(),
   }),
   "screen.get": sessionIdentitySchema,
-  "screen.region": sessionIdentitySchema.extend({
-    columnCount: z.number().int().min(1).max(120),
-    rowCount: z.number().int().min(1).max(40),
-    startColumn: z.number().int().min(0).max(119),
-    startRow: z.number().int().min(0).max(39),
-  }),
+  "screen.region": screenRectangleSchema,
   "screen.search": sessionIdentitySchema.extend({
     caseSensitive: z.boolean().default(false),
     maxMatches: z.number().int().min(1).max(100).default(20),
@@ -155,6 +160,7 @@ export interface RuntimeGateway {
   getSession(sessionId: string): Promise<Session>;
   listSessions(): Promise<readonly Session[]>;
   getScreen(sessionId: string, generation: number): Promise<TerminalScreenSnapshot>;
+  getScreenCells(request: ScreenCellsRequest): Promise<TerminalScreenCellsResult>;
   getScreenDiff(request: ScreenDiffRequest): Promise<TerminalScreenDiffResult>;
   getScreenRegion(request: ScreenRegionRequest): Promise<TerminalScreenRegionResult>;
   searchScreen(request: ScreenSearchRequest): Promise<TerminalScreenSearchResult>;
@@ -194,6 +200,10 @@ export class LocalRuntimeGateway implements RuntimeGateway {
 
   public getScreen(sessionId: string, generation: number): Promise<TerminalScreenSnapshot> {
     return this.runtime.getScreen(sessionId, generation);
+  }
+
+  public getScreenCells(request: ScreenCellsRequest): Promise<TerminalScreenCellsResult> {
+    return this.runtime.getScreenCells(request);
   }
 
   public getScreenDiff(request: ScreenDiffRequest): Promise<TerminalScreenDiffResult> {
@@ -342,6 +352,10 @@ export class UnixRuntimeClient implements RuntimeGateway {
 
   public getScreen(sessionId: string, generation: number): Promise<TerminalScreenSnapshot> {
     return this.#request("screen.get", { generation, sessionId });
+  }
+
+  public getScreenCells(request: ScreenCellsRequest): Promise<TerminalScreenCellsResult> {
+    return this.#request("screen.cells", request);
   }
 
   public getScreenDiff(request: ScreenDiffRequest): Promise<TerminalScreenDiffResult> {
@@ -645,6 +659,10 @@ async function dispatch(
     case "screen.get": {
       const request = operationSchemas[operation].parse(input);
       return gateway.getScreen(request.sessionId, request.generation);
+    }
+    case "screen.cells": {
+      const request = operationSchemas[operation].parse(input);
+      return gateway.getScreenCells(request);
     }
     case "screen.diff": {
       const request = operationSchemas[operation].parse(input);

@@ -6,6 +6,10 @@ import {
   CANONICAL_TERMINAL_COLUMNS,
   CANONICAL_TERMINAL_ROWS,
   TERMINAL_SCREEN_HISTORY_ENTRIES,
+  type TerminalScreenCell,
+  type TerminalScreenCellStyle,
+  type TerminalScreenCellsResult,
+  type TerminalScreenColor,
   type TerminalScreenDiffResult,
   type TerminalScreenFrame,
   type TerminalScreenMatch,
@@ -13,7 +17,7 @@ import {
   type TerminalScreenSearchResult,
   type TerminalScreenSnapshot,
 } from "@iterminal/domain";
-import { Terminal } from "@xterm/headless";
+import { Terminal, type IBufferCell } from "@xterm/headless";
 
 export { CANONICAL_TERMINAL_COLUMNS, CANONICAL_TERMINAL_ROWS } from "@iterminal/domain";
 const DEFAULT_SCROLLBACK_LINES = 5_000;
@@ -118,6 +122,21 @@ export class XtermScreenProjection implements TerminalScreenProjection {
       return Promise.reject(new Error("Screen diff afterVersion must be a non-negative integer"));
     }
     return this.#read(() => this.#captureDiff(afterVersion));
+  }
+
+  public cells(input: {
+    readonly columnCount: number;
+    readonly rowCount: number;
+    readonly startColumn: number;
+    readonly startRow: number;
+  }): Promise<TerminalScreenCellsResult> {
+    if (!validRange(input.startRow, input.rowCount, this.#terminal.rows)) {
+      return Promise.reject(new Error("Screen cell row region is outside the active viewport"));
+    }
+    if (!validRange(input.startColumn, input.columnCount, this.#terminal.cols)) {
+      return Promise.reject(new Error("Screen cell column region is outside the active viewport"));
+    }
+    return this.#read(() => this.#captureCells(input));
   }
 
   public region(input: {
@@ -276,7 +295,7 @@ export class XtermScreenProjection implements TerminalScreenProjection {
     const lines: string[] = [];
     for (let row = 0; row < this.#terminal.rows; row += 1) {
       const line = active.getLine(active.viewportY + row);
-      lines.push(line?.translateToString(true) ?? "");
+      lines.push(sliceTerminalCells(line, 0, this.#terminal.cols));
     }
     return {
       buffer: active === this.#terminal.buffer.alternate ? "alternate" : "normal",
@@ -307,6 +326,42 @@ export class XtermScreenProjection implements TerminalScreenProjection {
       columnCount: input.columnCount,
       frame: snapshotFrame(this.#currentSnapshot()),
       lines,
+      rowCount: input.rowCount,
+      startColumn: input.startColumn,
+      startRow: input.startRow,
+    };
+  }
+
+  #captureCells(input: {
+    readonly columnCount: number;
+    readonly rowCount: number;
+    readonly startColumn: number;
+    readonly startRow: number;
+  }): TerminalScreenCellsResult {
+    const active = this.#terminal.buffer.active;
+    const endColumn = input.startColumn + input.columnCount;
+    const cells: TerminalScreenCell[] = [];
+    for (let row = input.startRow; row < input.startRow + input.rowCount; row += 1) {
+      const line = active.getLine(active.viewportY + row);
+      let column = input.startColumn;
+      while (column < endColumn) {
+        const cell = line?.getCell(column);
+        const width = cell?.getWidth() ?? 1;
+        if (cell === undefined || width === 0 || column + width > endColumn) {
+          column += Math.max(1, width);
+          continue;
+        }
+        const text = visibleCellText(cell);
+        if (!isDefaultBlankCell(cell, text)) {
+          cells.push({ column, row, style: screenCellStyle(cell), text, width });
+        }
+        column += width;
+      }
+    }
+    return {
+      cells,
+      columnCount: input.columnCount,
+      frame: snapshotFrame(this.#currentSnapshot()),
       rowCount: input.rowCount,
       startColumn: input.startColumn,
       startRow: input.startRow,
@@ -367,7 +422,7 @@ export class XtermScreenProjection implements TerminalScreenProjection {
         const cell = line.getCell(column);
         const width = cell?.getWidth() ?? 1;
         if (width === 0) continue;
-        const chars = cell?.getChars() || " ";
+        const chars = cell === undefined ? " " : visibleCellText(cell) || " ".repeat(width);
         const normalized = normalizeSearchText(chars, input.caseSensitive);
         const normalizedStart = searchable.length;
         searchable += normalized;
@@ -437,7 +492,7 @@ function sliceTerminalCells(
       text += " ".repeat(endColumn - column);
       break;
     }
-    text += cell?.getChars() || " ".repeat(width);
+    text += cell === undefined ? " ".repeat(width) : visibleCellText(cell) || " ".repeat(width);
     column += width;
   }
   return text.trimEnd();
@@ -453,6 +508,53 @@ function snapshotFrame(snapshot: TerminalScreenSnapshot): TerminalScreenFrame {
     sessionGeneration: snapshot.sessionGeneration,
     sessionId: snapshot.sessionId,
   };
+}
+
+function isDefaultBlankCell(cell: IBufferCell, text: string): boolean {
+  return (text === "" || text === " ") && cell.isAttributeDefault();
+}
+
+function visibleCellText(cell: IBufferCell): string {
+  return cell.isInvisible() === 0 ? cell.getChars() : "";
+}
+
+function screenCellStyle(cell: IBufferCell): TerminalScreenCellStyle {
+  const foreground = screenColor(cell, "foreground");
+  const background = screenColor(cell, "background");
+  return {
+    ...(foreground === undefined ? {} : { foreground }),
+    ...(background === undefined ? {} : { background }),
+    ...(cell.isBlink() === 0 ? {} : { blink: true as const }),
+    ...(cell.isBold() === 0 ? {} : { bold: true as const }),
+    ...(cell.isDim() === 0 ? {} : { dim: true as const }),
+    ...(cell.isInvisible() === 0 ? {} : { invisible: true as const }),
+    ...(cell.isInverse() === 0 ? {} : { inverse: true as const }),
+    ...(cell.isItalic() === 0 ? {} : { italic: true as const }),
+    ...(cell.isOverline() === 0 ? {} : { overline: true as const }),
+    ...(cell.isStrikethrough() === 0 ? {} : { strikethrough: true as const }),
+    ...(cell.isUnderline() === 0 ? {} : { underline: true as const }),
+  };
+}
+
+function screenColor(
+  cell: IBufferCell,
+  target: "foreground" | "background",
+): TerminalScreenColor | undefined {
+  const isDefault = target === "foreground" ? cell.isFgDefault() : cell.isBgDefault();
+  if (isDefault) return undefined;
+  const value = target === "foreground" ? cell.getFgColor() : cell.getBgColor();
+  const isPalette = target === "foreground" ? cell.isFgPalette() : cell.isBgPalette();
+  if (isPalette) return { index: value, mode: "palette" };
+  const isRgb = target === "foreground" ? cell.isFgRGB() : cell.isBgRGB();
+  if (isRgb) {
+    return {
+      blue: value & 0xff,
+      green: (value >> 8) & 0xff,
+      mode: "rgb",
+      red: (value >> 16) & 0xff,
+    };
+  }
+  throw new Error(`Unsupported terminal ${target} color mode`);
 }
 
 function cloneSnapshot(snapshot: TerminalScreenSnapshot): TerminalScreenSnapshot {
