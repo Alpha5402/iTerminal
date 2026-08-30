@@ -1,10 +1,16 @@
 import { ExecutionReadyProcessor, type ExecutionReadyMessage } from "@iterminal/messaging";
 import { PostgresMessagingRepository } from "@iterminal/persistence-postgres";
-import { RabbitMqExecutionReadyConsumer, runtimeQueueTopology } from "@iterminal/queue-rabbitmq";
+import {
+  runtimeQueueTopology,
+  SupervisedRabbitMqExecutionReadyConsumer,
+  type RabbitMqConnectionState,
+} from "@iterminal/queue-rabbitmq";
 import { runtimeOwnerIdForSocket, UnixRuntimeClient } from "@iterminal/runtime-rpc";
 
 export interface ExecutionWorkerHandle {
+  connectionState(): RabbitMqConnectionState;
   close(): Promise<void>;
+  waitUntilConnected(): Promise<void>;
 }
 
 export interface ExecutionWorkerOptions {
@@ -17,6 +23,9 @@ export interface ExecutionWorkerOptions {
   readonly prefetch?: number;
   readonly queuePrefix?: string;
   readonly rabbitMqUrl: string;
+  readonly rabbitMqReconnectInitialMilliseconds?: number;
+  readonly rabbitMqReconnectMaxMilliseconds?: number;
+  readonly onRabbitMqConnectionState?: (state: RabbitMqConnectionState) => void;
   readonly runtimeSocketPath: string;
 }
 
@@ -48,24 +57,39 @@ export async function startExecutionWorker(
       ...(options.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts }),
     },
   );
-  let consumer: RabbitMqExecutionReadyConsumer | undefined;
-  try {
-    consumer = await RabbitMqExecutionReadyConsumer.connect(options.rabbitMqUrl, processor, {
-      ...(options.prefetch === undefined ? {} : { prefetch: options.prefetch }),
-      topology: runtimeQueueTopology(options.queuePrefix ?? "iterminal"),
-    });
-  } catch (error) {
-    await repository.close().catch(() => undefined);
-    throw error;
-  }
-  const activeConsumer = consumer;
+  let connectionState: RabbitMqConnectionState = { attempt: 0, state: "DISCONNECTED" };
+  let resolveFirstConnection!: () => void;
+  let rejectFirstConnection!: (reason?: unknown) => void;
+  const firstConnection = new Promise<void>((resolve, reject) => {
+    resolveFirstConnection = resolve;
+    rejectFirstConnection = reject;
+  });
+  void firstConnection.catch(() => undefined);
+  const consumer = SupervisedRabbitMqExecutionReadyConsumer.start(options.rabbitMqUrl, processor, {
+    ...(options.prefetch === undefined ? {} : { prefetch: options.prefetch }),
+    ...(options.rabbitMqReconnectInitialMilliseconds === undefined
+      ? {}
+      : {
+          initialDelayMilliseconds: options.rabbitMqReconnectInitialMilliseconds,
+        }),
+    ...(options.rabbitMqReconnectMaxMilliseconds === undefined
+      ? {}
+      : { maxDelayMilliseconds: options.rabbitMqReconnectMaxMilliseconds }),
+    onConnectionState: (state) => {
+      connectionState = state;
+      if (state.state === "CONNECTED") resolveFirstConnection();
+      options.onRabbitMqConnectionState?.(state);
+    },
+    topology: runtimeQueueTopology(options.queuePrefix ?? "iterminal"),
+  });
   let closePromise: Promise<void> | undefined;
   return {
+    connectionState: () => connectionState,
     close: () => {
-      closePromise ??= Promise.all([activeConsumer.close(), repository.close()]).then(
-        () => undefined,
-      );
+      rejectFirstConnection(new Error("Execution Worker closed before connecting to RabbitMQ"));
+      closePromise ??= Promise.all([consumer.close(), repository.close()]).then(() => undefined);
       return closePromise;
     },
+    waitUntilConnected: () => firstConnection,
   };
 }

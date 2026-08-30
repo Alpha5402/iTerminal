@@ -29,6 +29,7 @@
     "test:m8:dispatch": "vitest run apps/execution-worker/src/execution-worker.test.ts",
     "test:m8:interactions": "vitest run apps/runtime-daemon/src/interaction-crash.test.ts",
     "test:m8:admission": "vitest run apps/runtime-daemon/src/admission-backpressure.test.ts",
+    "test:m8:reconnect": "vitest run apps/execution-worker/src/broker-reconnect.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm verify:docs && pnpm build",
     "verify:docs": "node scripts/check-verification.mjs"

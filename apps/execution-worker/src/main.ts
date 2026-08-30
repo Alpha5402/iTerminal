@@ -1,3 +1,5 @@
+import type { RabbitMqConnectionState } from "@iterminal/queue-rabbitmq";
+
 import { startExecutionWorker } from "./server.js";
 
 const worker = await startExecutionWorker({
@@ -16,6 +18,19 @@ const worker = await startExecutionWorker({
   ...(process.env.ITERM_RUNTIME_OWNER_ID === undefined
     ? {}
     : { ownerId: process.env.ITERM_RUNTIME_OWNER_ID }),
+  ...(process.env.ITERM_RABBITMQ_RECONNECT_INITIAL_MS === undefined
+    ? {}
+    : {
+        rabbitMqReconnectInitialMilliseconds: positiveInteger(
+          "ITERM_RABBITMQ_RECONNECT_INITIAL_MS",
+        ),
+      }),
+  ...(process.env.ITERM_RABBITMQ_RECONNECT_MAX_MS === undefined
+    ? {}
+    : {
+        rabbitMqReconnectMaxMilliseconds: positiveInteger("ITERM_RABBITMQ_RECONNECT_MAX_MS"),
+      }),
+  onRabbitMqConnectionState: reportRabbitMqState,
 });
 
 let closing = false;
@@ -40,4 +55,14 @@ function positiveInteger(name: string): number {
     throw new Error(`${name} must be a positive integer`);
   }
   return value;
+}
+
+function reportRabbitMqState(state: RabbitMqConnectionState): void {
+  process.stderr.write(
+    `iTerminal Execution worker RabbitMQ ${state.state.toLowerCase()} attempt=${state.attempt.toString()}${
+      state.retryInMilliseconds === undefined
+        ? ""
+        : ` retry_ms=${state.retryInMilliseconds.toString()}`
+    }${state.error === undefined ? "" : ` error=${JSON.stringify(state.error)}`}\n`,
+  );
 }

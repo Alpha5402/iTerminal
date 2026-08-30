@@ -227,6 +227,7 @@ describeDispatch("M8.2 owner-local Execution dispatch", () => {
       rabbitMqUrl: rabbitMqUrl ?? "",
       runtimeSocketPath: socketPath,
     });
+    await worker.waitUntilConnected();
     workers.push(worker);
     return worker;
   }

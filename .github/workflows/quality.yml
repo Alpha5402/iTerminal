@@ -73,3 +73,6 @@ jobs:
       - run: pnpm test:m8:dispatch
       - run: pnpm test:m8:interactions
       - run: pnpm test:m8:admission
+      - run: pnpm test:m8:reconnect
+        env:
+          ITERM_TEST_RABBITMQ_CONTAINER: ${{ job.services.rabbitmq.id }}

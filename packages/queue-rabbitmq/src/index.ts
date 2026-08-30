@@ -127,11 +127,33 @@ export interface RabbitMqConsumerOptions {
   readonly topology?: RabbitMqTopology;
 }
 
+export interface RabbitMqConnectionState {
+  readonly attempt: number;
+  readonly error?: string;
+  readonly retryInMilliseconds?: number;
+  readonly state: "CONNECTING" | "CONNECTED" | "DISCONNECTED";
+}
+
+export interface RabbitMqReconnectOptions {
+  readonly initialDelayMilliseconds?: number;
+  readonly jitterRatio?: number;
+  readonly maxDelayMilliseconds?: number;
+  readonly now?: () => number;
+  readonly onConnectionState?: (state: RabbitMqConnectionState) => void;
+  readonly random?: () => number;
+}
+
+export interface SupervisedRabbitMqConsumerOptions
+  extends RabbitMqConsumerOptions, RabbitMqReconnectOptions {}
+
 export class RabbitMqExecutionReadyConsumer {
+  readonly #closed: Promise<Error | undefined>;
   readonly #inFlight = new Set<Promise<void>>();
   readonly #topology: RabbitMqTopology;
   readonly #retryPublishFailureBackoffMilliseconds: number;
+  #closePromise: Promise<void> | undefined;
   #consumerTag: string | undefined;
+  #resolveClosed!: (error: Error | undefined) => void;
   #retryTail: Promise<void> = Promise.resolve();
 
   private constructor(
@@ -144,6 +166,20 @@ export class RabbitMqExecutionReadyConsumer {
   ) {
     this.#topology = topology;
     this.#retryPublishFailureBackoffMilliseconds = retryPublishFailureBackoffMilliseconds;
+    this.#closed = new Promise((resolve) => {
+      this.#resolveClosed = resolve;
+    });
+    let connectionError: Error | undefined;
+    const rememberError = (error: unknown): void => {
+      connectionError = asError(error);
+    };
+    const reportClosed = (): void => this.#resolveClosed(connectionError);
+    this.connection.on("error", rememberError);
+    this.channel.on("error", rememberError);
+    this.retryChannel.on("error", rememberError);
+    this.connection.once("close", reportClosed);
+    this.channel.once("close", reportClosed);
+    this.retryChannel.once("close", reportClosed);
   }
 
   public static async connect(
@@ -170,7 +206,12 @@ export class RabbitMqExecutionReadyConsumer {
     return consumer;
   }
 
-  public async close(): Promise<void> {
+  public close(): Promise<void> {
+    this.#closePromise ??= this.#close();
+    return this.#closePromise;
+  }
+
+  async #close(): Promise<void> {
     if (this.#consumerTag !== undefined) {
       await this.channel.cancel(this.#consumerTag).catch(() => undefined);
       this.#consumerTag = undefined;
@@ -179,6 +220,11 @@ export class RabbitMqExecutionReadyConsumer {
     await this.retryChannel.close().catch(() => undefined);
     await this.channel.close().catch(() => undefined);
     await this.connection.close().catch(() => undefined);
+    this.#resolveClosed(undefined);
+  }
+
+  public waitUntilClosed(): Promise<Error | undefined> {
+    return this.#closed;
   }
 
   async #start(): Promise<void> {
@@ -247,6 +293,194 @@ export class RabbitMqExecutionReadyConsumer {
   }
 }
 
+export class SupervisedRabbitMqPublisher implements DurableMessagePublisher {
+  readonly #reconnect: NormalizedReconnectOptions;
+  #attempt = 0;
+  #closePromise: Promise<void> | undefined;
+  #closed = false;
+  #lastError: Error | undefined;
+  #nextConnectAt = 0;
+  #publisher: RabbitMqPublisher | undefined;
+  #tail: Promise<void> = Promise.resolve();
+
+  public constructor(
+    private readonly url: string,
+    private readonly topology: RabbitMqTopology = runtimeQueueTopology(),
+    options: RabbitMqReconnectOptions = {},
+  ) {
+    this.#reconnect = normalizeReconnectOptions(options);
+  }
+
+  public async publish(message: ClaimedOutboxMessage): Promise<void> {
+    const operation = this.#tail.then(() => this.#publish(message));
+    this.#tail = operation.catch(() => undefined);
+    await operation;
+  }
+
+  public close(): Promise<void> {
+    this.#closePromise ??= this.#close();
+    return this.#closePromise;
+  }
+
+  async #close(): Promise<void> {
+    if (this.#closed) return;
+    this.#closed = true;
+    await this.#tail;
+    const publisher = this.#publisher;
+    this.#publisher = undefined;
+    await publisher?.close();
+  }
+
+  async #publish(message: ClaimedOutboxMessage): Promise<void> {
+    if (this.#closed) throw new Error("RabbitMQ publisher is closed");
+    const publisher = await this.#getPublisher();
+    try {
+      await publisher.publish(message);
+      this.#attempt = 0;
+      this.#lastError = undefined;
+      this.#nextConnectAt = 0;
+    } catch (error) {
+      await this.#invalidate(publisher, error);
+      throw error;
+    }
+  }
+
+  async #getPublisher(): Promise<RabbitMqPublisher> {
+    if (this.#publisher !== undefined) return this.#publisher;
+    const remaining = this.#nextConnectAt - this.#reconnect.now();
+    if (remaining > 0) {
+      throw new Error(
+        `RabbitMQ reconnect is cooling down for ${remaining.toString()}ms: ${
+          this.#lastError?.message ?? "connection unavailable"
+        }`,
+      );
+    }
+    const attempt = this.#attempt + 1;
+    notifyConnectionState(this.#reconnect, { attempt, state: "CONNECTING" });
+    try {
+      const publisher = await RabbitMqPublisher.connect(this.url, this.topology);
+      if (this.#closed) {
+        await publisher.close();
+        throw new Error("RabbitMQ publisher is closed");
+      }
+      this.#publisher = publisher;
+      notifyConnectionState(this.#reconnect, { attempt, state: "CONNECTED" });
+      return publisher;
+    } catch (error) {
+      this.#recordFailure(error, attempt);
+      throw error;
+    }
+  }
+
+  async #invalidate(publisher: RabbitMqPublisher, error: unknown): Promise<void> {
+    if (this.#publisher === publisher) this.#publisher = undefined;
+    this.#recordFailure(error, this.#attempt + 1);
+    await publisher.close().catch(() => undefined);
+  }
+
+  #recordFailure(error: unknown, attempt: number): void {
+    const failure = asError(error);
+    this.#attempt = attempt;
+    this.#lastError = failure;
+    const retryInMilliseconds = reconnectDelay(attempt, this.#reconnect);
+    this.#nextConnectAt = this.#reconnect.now() + retryInMilliseconds;
+    notifyConnectionState(this.#reconnect, {
+      attempt,
+      error: failure.message,
+      retryInMilliseconds,
+      state: "DISCONNECTED",
+    });
+  }
+}
+
+export class SupervisedRabbitMqExecutionReadyConsumer {
+  readonly #abortController = new AbortController();
+  readonly #reconnect: NormalizedReconnectOptions;
+  readonly #runPromise: Promise<void>;
+  #active: RabbitMqExecutionReadyConsumer | undefined;
+  #closePromise: Promise<void> | undefined;
+  #closed = false;
+
+  private constructor(
+    private readonly url: string,
+    private readonly processor: ExecutionReadyProcessor,
+    private readonly options: SupervisedRabbitMqConsumerOptions,
+  ) {
+    this.#reconnect = normalizeReconnectOptions(options);
+    this.#runPromise = this.#run();
+  }
+
+  public static start(
+    url: string,
+    processor: ExecutionReadyProcessor,
+    options: SupervisedRabbitMqConsumerOptions = {},
+  ): SupervisedRabbitMqExecutionReadyConsumer {
+    return new SupervisedRabbitMqExecutionReadyConsumer(url, processor, options);
+  }
+
+  public close(): Promise<void> {
+    this.#closePromise ??= this.#close();
+    return this.#closePromise;
+  }
+
+  async #close(): Promise<void> {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#abortController.abort();
+    await this.#active?.close().catch(() => undefined);
+    await this.#runPromise;
+  }
+
+  async #run(): Promise<void> {
+    let attempt = 0;
+    while (!this.#abortController.signal.aborted) {
+      attempt += 1;
+      notifyConnectionState(this.#reconnect, { attempt, state: "CONNECTING" });
+      try {
+        const consumer = await RabbitMqExecutionReadyConsumer.connect(this.url, this.processor, {
+          ...(this.options.prefetch === undefined ? {} : { prefetch: this.options.prefetch }),
+          ...(this.options.retryPublishFailureBackoffMilliseconds === undefined
+            ? {}
+            : {
+                retryPublishFailureBackoffMilliseconds:
+                  this.options.retryPublishFailureBackoffMilliseconds,
+              }),
+          ...(this.options.topology === undefined ? {} : { topology: this.options.topology }),
+        });
+        if (this.#abortController.signal.aborted) {
+          await consumer.close();
+          break;
+        }
+        this.#active = consumer;
+        notifyConnectionState(this.#reconnect, { attempt, state: "CONNECTED" });
+        attempt = 0;
+        const closeError = await consumer.waitUntilClosed();
+        this.#active = undefined;
+        await consumer.close().catch(() => undefined);
+        if (this.#abortController.signal.aborted) break;
+        const retryInMilliseconds = reconnectDelay(1, this.#reconnect);
+        notifyConnectionState(this.#reconnect, {
+          attempt: 1,
+          error: closeError?.message ?? "RabbitMQ consumer connection closed",
+          retryInMilliseconds,
+          state: "DISCONNECTED",
+        });
+        await abortableDelay(retryInMilliseconds, this.#abortController.signal);
+      } catch (error) {
+        if (this.#abortController.signal.aborted) break;
+        const retryInMilliseconds = reconnectDelay(attempt, this.#reconnect);
+        notifyConnectionState(this.#reconnect, {
+          attempt,
+          error: asError(error).message,
+          retryInMilliseconds,
+          state: "DISCONNECTED",
+        });
+        await abortableDelay(retryInMilliseconds, this.#abortController.signal);
+      }
+    }
+  }
+}
+
 export async function publishConfirmed(
   channel: ConfirmChannel,
   exchange: string,
@@ -296,6 +530,83 @@ function attachErrorSinks(...emitters: Array<Channel | ChannelModel>): void {
     emitter.on("error", () => undefined);
     emitter.on("handler-error", () => undefined);
   }
+}
+
+interface NormalizedReconnectOptions {
+  readonly initialDelayMilliseconds: number;
+  readonly jitterRatio: number;
+  readonly maxDelayMilliseconds: number;
+  readonly now: () => number;
+  readonly onConnectionState?: (state: RabbitMqConnectionState) => void;
+  readonly random: () => number;
+}
+
+function normalizeReconnectOptions(options: RabbitMqReconnectOptions): NormalizedReconnectOptions {
+  const initialDelayMilliseconds = options.initialDelayMilliseconds ?? 250;
+  const maxDelayMilliseconds =
+    options.maxDelayMilliseconds ?? Math.max(30_000, initialDelayMilliseconds);
+  const jitterRatio = options.jitterRatio ?? 0.2;
+  if (!Number.isSafeInteger(initialDelayMilliseconds) || initialDelayMilliseconds < 1) {
+    throw new Error("RabbitMQ reconnect initial delay must be a positive integer");
+  }
+  if (
+    !Number.isSafeInteger(maxDelayMilliseconds) ||
+    maxDelayMilliseconds < initialDelayMilliseconds
+  ) {
+    throw new Error(
+      "RabbitMQ reconnect maximum delay must be an integer not below the initial delay",
+    );
+  }
+  if (!Number.isFinite(jitterRatio) || jitterRatio < 0 || jitterRatio > 1) {
+    throw new Error("RabbitMQ reconnect jitter ratio must be between zero and one");
+  }
+  return {
+    initialDelayMilliseconds,
+    jitterRatio,
+    maxDelayMilliseconds,
+    now: options.now ?? Date.now,
+    ...(options.onConnectionState === undefined
+      ? {}
+      : { onConnectionState: options.onConnectionState }),
+    random: options.random ?? Math.random,
+  };
+}
+
+function reconnectDelay(attempt: number, options: NormalizedReconnectOptions): number {
+  const exponential = Math.min(
+    options.maxDelayMilliseconds,
+    options.initialDelayMilliseconds * 2 ** Math.max(0, Math.min(attempt - 1, 20)),
+  );
+  const jitter = exponential * options.jitterRatio * (options.random() * 2 - 1);
+  return Math.max(1, Math.round(exponential + jitter));
+}
+
+function notifyConnectionState(
+  options: NormalizedReconnectOptions,
+  state: RabbitMqConnectionState,
+): void {
+  try {
+    options.onConnectionState?.(state);
+  } catch {
+    // Diagnostics must not change transport behavior.
+  }
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolveDelay) => {
+    const finish = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolveDelay();
+    };
+    const timer = setTimeout(finish, milliseconds);
+    signal.addEventListener("abort", finish, { once: true });
+  });
 }
 
 function delay(milliseconds: number): Promise<void> {

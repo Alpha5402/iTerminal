@@ -1,6 +1,6 @@
 import { startExecutionWorker } from "../server.js";
 
-await startExecutionWorker({
+const worker = await startExecutionWorker({
   beforeDispatch: () => process.kill(process.pid, "SIGKILL"),
   consumerId: requiredEnvironment("ITERM_CONSUMER_ID"),
   databaseUrl: requiredEnvironment("ITERM_DATABASE_URL"),
@@ -10,6 +10,7 @@ await startExecutionWorker({
   rabbitMqUrl: requiredEnvironment("ITERM_RABBITMQ_URL"),
   runtimeSocketPath: requiredEnvironment("ITERM_RUNTIME_SOCKET"),
 });
+await worker.waitUntilConnected();
 process.stderr.write("crash-before-dispatch worker ready\n");
 
 function requiredEnvironment(name: string): string {
