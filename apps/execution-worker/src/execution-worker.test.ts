@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { access, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
@@ -353,6 +354,7 @@ const testActor = {
   client: "m8-dispatch-test",
   id: "agent-m8-dispatch",
   principal: "m8-dispatch-test",
+  capabilities: ACTOR_CAPABILITY_PROFILES.agent,
   type: "agent" as const,
 };
 

@@ -4,6 +4,7 @@ import { isAbsolute, relative } from "node:path";
 
 import type {
   Actor,
+  ActorCapability,
   ControlAction,
   ControlDelivery,
   EventPage,
@@ -31,6 +32,7 @@ import type {
   TerminalStateObservation,
 } from "@iterminal/domain";
 import {
+  actorHasCapability,
   DEFAULT_INTERACTION_GUARD_TTL_MS,
   MAX_INTERACTION_GUARD_RENEWALS,
   MAX_INTERACTION_GUARD_TTL_MS,
@@ -40,6 +42,7 @@ import {
   MIN_TERMINAL_COLUMNS,
   MIN_TERMINAL_ROWS,
   RuntimeError,
+  isCanonicalActorCapabilities,
 } from "@iterminal/domain";
 
 import type {
@@ -275,6 +278,7 @@ export class RuntimeService {
   readonly #completions = new Map<string, Promise<Execution>>();
   readonly #started = new Map<string, Promise<void>>();
   readonly #durableQueues = new Map<string, DurableQueueState>();
+  readonly #actors = new Map<string, Actor>();
   readonly #mutationTails = new Map<string, Promise<void>>();
   readonly #interactionStates = new Map<string, InteractionState>();
   readonly #sessionLeases = new Map<string, SessionLease>();
@@ -499,6 +503,7 @@ export class RuntimeService {
   public forkSession(request: ForkSessionRequest): Promise<SessionForkResult> {
     return this.#withMutationLock(request.sessionId, async () => {
       this.#requireOwnerDurability();
+      this.#requireActorCapability(request.actor, "session.fork");
       validateIdempotencyKey(request.idempotencyKey);
       const requestHash = hashRequest({
         actor: request.actor,
@@ -1038,6 +1043,7 @@ export class RuntimeService {
   }
 
   async #startExecuteLocked(request: ExecuteRequest): Promise<StartedExecution> {
+    this.#requireActorCapability(request.actor, "session.execute");
     if (request.command.includes("\0")) {
       throw new RuntimeError("INVALID_REQUEST", "Execute command cannot contain NUL bytes");
     }
@@ -1440,6 +1446,17 @@ export class RuntimeService {
       const session = this.#requireGeneration(request.sessionId, request.sessionGeneration);
       let current = await this.#reconcileExpiredGuard(session);
       this.#requireInteractionStateVersion(current, request.expectedVersion);
+      if (!this.#actorHasCapability(request.actor, "interaction.policy.manage")) {
+        await this.#rejectInteraction(
+          session,
+          current,
+          request.actor,
+          "interaction.policy_denied",
+          "Actor lacks interaction.policy.manage capability",
+          "policy_change",
+          { capability: "interaction.policy.manage" },
+        );
+      }
       if (request.actor.type !== "human" && request.actor.type !== "system") {
         await this.#rejectInteraction(
           session,
@@ -1488,6 +1505,17 @@ export class RuntimeService {
       }
       const current = await this.#reconcileExpiredGuard(session);
       this.#requireInteractionStateVersion(current, request.expectedVersion);
+      if (!this.#actorHasCapability(request.actor, "interaction.guard.manage")) {
+        await this.#rejectInteraction(
+          session,
+          current,
+          request.actor,
+          "interaction.policy_denied",
+          "Actor lacks interaction.guard.manage capability",
+          "guard_acquire",
+          { capability: "interaction.guard.manage" },
+        );
+      }
       if (request.actor.type !== "human" || current.policy !== "human_guarded") {
         await this.#rejectInteraction(
           session,
@@ -1550,6 +1578,7 @@ export class RuntimeService {
       const session = this.#requireGeneration(request.sessionId, request.sessionGeneration);
       const current = await this.#reconcileExpiredGuard(session);
       this.#requireInteractionStateVersion(current, request.expectedVersion);
+      this.#requireActorCapability(request.actor, "interaction.guard.manage");
       const guard = this.#requireCurrentGuard(current, request.guardId);
       this.#requireGuardActor(guard.actor, request.actor);
       if (guard.renewals >= guard.maxRenewals) {
@@ -1595,6 +1624,7 @@ export class RuntimeService {
       const session = this.#requireGeneration(request.sessionId, request.sessionGeneration);
       const current = await this.#reconcileExpiredGuard(session);
       this.#requireInteractionStateVersion(current, request.expectedVersion);
+      this.#requireActorCapability(request.actor, "interaction.guard.manage");
       const guard = this.#requireCurrentGuard(current, request.guardId);
       this.#requireGuardActor(guard.actor, request.actor);
       const next: InteractionState = {
@@ -2376,6 +2406,23 @@ export class RuntimeService {
     bypassGuard: boolean,
   ): Promise<void> {
     const state = await this.#reconcileExpiredGuard(session);
+    const capability: ActorCapability =
+      interactionType === "input"
+        ? "terminal.input"
+        : interactionType === "control"
+          ? "terminal.control"
+          : "terminal.resize";
+    if (!this.#actorHasCapability(actor, capability)) {
+      await this.#rejectInteraction(
+        session,
+        state,
+        actor,
+        "interaction.policy_denied",
+        `Actor lacks ${capability} capability`,
+        interactionType,
+        { capability },
+      );
+    }
     if (bypassGuard && actor.type !== "human") {
       await this.#rejectInteraction(
         session,
@@ -2416,6 +2463,39 @@ export class RuntimeService {
         interactionType,
       );
     }
+  }
+
+  #actorHasCapability(actor: Actor, capability: ActorCapability): boolean {
+    this.#validateActor(actor);
+    return actorHasCapability(actor, capability);
+  }
+
+  #requireActorCapability(actor: Actor, capability: ActorCapability): void {
+    if (!this.#actorHasCapability(actor, capability)) {
+      throw new RuntimeError("POLICY_DENIED", `Actor lacks ${capability} capability`, {
+        actorId: actor.id,
+        capability,
+      });
+    }
+  }
+
+  #validateActor(actor: Actor): void {
+    if (!isCanonicalActorCapabilities(actor.capabilities)) {
+      throw new RuntimeError(
+        "INVALID_REQUEST",
+        "Actor capabilities must be a non-empty canonical set",
+        { actorId: actor.id },
+      );
+    }
+    const existing = this.#actors.get(actor.id);
+    if (existing !== undefined && !sameActor(existing, actor)) {
+      throw new RuntimeError(
+        "ACTOR_IDENTITY_CONFLICT",
+        "Actor id is already bound to a different immutable identity",
+        { actorId: actor.id },
+      );
+    }
+    this.#actors.set(actor.id, { ...actor, capabilities: [...actor.capabilities] });
   }
 
   #requireInteractionStateVersion(state: InteractionState, expectedVersion: number): void {
@@ -2528,6 +2608,7 @@ export class RuntimeService {
     eventType: "interaction.input_guarded" | "interaction.policy_denied",
     message: string,
     interactionType: string,
+    details: Readonly<Record<string, unknown>> = {},
   ): Promise<never> {
     const event = this.#eventDraft(
       session,
@@ -2537,6 +2618,7 @@ export class RuntimeService {
         policy: state.policy,
         reason: message,
         stateVersion: state.version,
+        ...details,
         ...(state.guard === undefined
           ? {}
           : {
@@ -2575,7 +2657,7 @@ export class RuntimeService {
     throw new RuntimeError(
       "POLICY_DENIED",
       message,
-      { interactionStateVersion: state.version, policy: state.policy },
+      { interactionStateVersion: state.version, policy: state.policy, ...details },
       false,
     );
   }
@@ -2905,7 +2987,9 @@ function sameActor(left: Actor, right: Actor): boolean {
     left.id === right.id &&
     left.type === right.type &&
     left.principal === right.principal &&
-    left.client === right.client
+    left.client === right.client &&
+    left.capabilities.length === right.capabilities.length &&
+    left.capabilities.every((capability, index) => right.capabilities[index] === capability)
   );
 }
 
@@ -2914,7 +2998,12 @@ function cloneInteractionState(state: InteractionState): InteractionState {
     ...state,
     ...(state.guard === undefined
       ? {}
-      : { guard: { ...state.guard, actor: { ...state.guard.actor } } }),
+      : {
+          guard: {
+            ...state.guard,
+            actor: { ...state.guard.actor, capabilities: [...state.guard.actor.capabilities] },
+          },
+        }),
   };
 }
 

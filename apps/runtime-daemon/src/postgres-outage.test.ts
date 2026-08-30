@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { access, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
@@ -253,6 +254,7 @@ const actor = {
   client: "m8-postgres-outage-test",
   id: "agent-m8-postgres-outage",
   principal: "m8-postgres-outage-test",
+  capabilities: ACTOR_CAPABILITY_PROFILES.agent,
   type: "agent" as const,
 };
 

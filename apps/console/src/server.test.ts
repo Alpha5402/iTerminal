@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +15,7 @@ const agent: Actor = {
   client: "m5-console-test-agent",
   id: "agent-m5-console-test",
   principal: "local-m5-console-test",
+  capabilities: ACTOR_CAPABILITY_PROFILES.agent,
   type: "agent",
 };
 

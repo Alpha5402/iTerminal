@@ -49,6 +49,7 @@ const requiredReports = [
     level: "L4",
     path: "docs/verification/M9/2026-08-30-high-cardinality-rolling-soak.md",
   },
+  { level: "L2", path: "docs/verification/M10/2026-08-30-actor-capability-policy.md" },
 ];
 
 for (const report of requiredReports) {

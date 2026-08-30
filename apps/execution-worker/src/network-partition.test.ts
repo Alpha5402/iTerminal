@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -309,6 +310,7 @@ const actor = {
   client: "m8-network-partition-test",
   id: "agent-m8-network-partition",
   principal: "m8-network-partition-test",
+  capabilities: ACTOR_CAPABILITY_PROFILES.agent,
   type: "agent" as const,
 };
 

@@ -6,7 +6,15 @@
       "id": "agent_example",
       "type": "agent",
       "principal": "local-agent",
-      "client": "mcp"
+      "client": "mcp",
+      "capabilities": [
+        "approval.request",
+        "session.execute",
+        "session.fork",
+        "terminal.control",
+        "terminal.input",
+        "terminal.resize"
+      ]
     },
     "command": "cd packages/web && pwd",
     "idempotencyKey": "execute-001"
@@ -18,7 +26,19 @@
       "id": "human_example",
       "type": "human",
       "principal": "local-human",
-      "client": "console"
+      "client": "console",
+      "capabilities": [
+        "approval.decide",
+        "approval.request",
+        "interaction.guard.manage",
+        "interaction.policy.manage",
+        "secret.input",
+        "session.execute",
+        "session.fork",
+        "terminal.control",
+        "terminal.input",
+        "terminal.resize"
+      ]
     },
     "targetExecutionId": "exe_example",
     "data": "yes\n",
@@ -32,7 +52,19 @@
       "id": "human_example",
       "type": "human",
       "principal": "local-human",
-      "client": "console"
+      "client": "console",
+      "capabilities": [
+        "approval.decide",
+        "approval.request",
+        "interaction.guard.manage",
+        "interaction.policy.manage",
+        "secret.input",
+        "session.execute",
+        "session.fork",
+        "terminal.control",
+        "terminal.input",
+        "terminal.resize"
+      ]
     },
     "targetExecutionId": "exe_example",
     "delivery": {
@@ -48,7 +80,19 @@
       "id": "human_example",
       "type": "human",
       "principal": "local-human",
-      "client": "console"
+      "client": "console",
+      "capabilities": [
+        "approval.decide",
+        "approval.request",
+        "interaction.guard.manage",
+        "interaction.policy.manage",
+        "secret.input",
+        "session.execute",
+        "session.fork",
+        "terminal.control",
+        "terminal.input",
+        "terminal.resize"
+      ]
     },
     "columns": 100,
     "rows": 32,

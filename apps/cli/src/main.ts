@@ -1,8 +1,8 @@
 import { createInterface } from "node:readline";
 
 import { RuntimeService } from "@iterminal/application";
-import type { Actor, ControlDelivery, ShellKind } from "@iterminal/domain";
-import { RuntimeError } from "@iterminal/domain";
+import type { Actor, ActorCapability, ControlDelivery, ShellKind } from "@iterminal/domain";
+import { ACTOR_CAPABILITIES, RuntimeError, isCanonicalActorCapabilities } from "@iterminal/domain";
 import { PtyShellExecutorFactory } from "@iterminal/executor-pty";
 import { MemoryRuntimeStore } from "@iterminal/runtime-memory";
 
@@ -176,12 +176,32 @@ function actorField(record: Record<string, unknown>): Actor {
   if (type !== "human" && type !== "agent" && type !== "scheduler" && type !== "system") {
     throw new RuntimeError("INVALID_REQUEST", "actor.type is invalid");
   }
+  const capabilities = arrayField(actor, "capabilities");
+  if (
+    !capabilities.every(
+      (capability): capability is ActorCapability =>
+        typeof capability === "string" &&
+        ACTOR_CAPABILITIES.includes(capability as ActorCapability),
+    ) ||
+    !isCanonicalActorCapabilities(capabilities)
+  ) {
+    throw new RuntimeError("INVALID_REQUEST", "actor.capabilities must be canonical");
+  }
   return {
+    capabilities,
     client: stringField(actor, "client"),
     id: stringField(actor, "id"),
     principal: stringField(actor, "principal"),
     type,
   };
+}
+
+function arrayField(record: Record<string, unknown>, key: string): unknown[] {
+  const value = record[key];
+  if (!Array.isArray(value)) {
+    throw new RuntimeError("INVALID_REQUEST", `${key} must be an array`);
+  }
+  return value;
 }
 
 function controlField(record: Record<string, unknown>): ControlDelivery {

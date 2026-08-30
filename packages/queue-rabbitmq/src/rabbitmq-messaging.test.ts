@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { join, resolve } from "node:path";
@@ -378,6 +379,7 @@ function executeRequest(sessionId: string, suffix: string): AcceptExecuteTransac
       client: "m8-test",
       id: `actor_${suffix}`,
       principal: "m8-test",
+      capabilities: ACTOR_CAPABILITY_PROFILES.system,
       type: "system",
     },
     command: "true",

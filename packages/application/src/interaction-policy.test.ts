@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import type { Actor, ControlDelivery, ShellKind } from "@iterminal/domain";
 import { MemoryRuntimeStore } from "@iterminal/runtime-memory";
 import { describe, expect, it } from "vitest";
@@ -15,34 +16,117 @@ const human: Actor = {
   client: "console-a",
   id: "human-a",
   principal: "local-human-a",
+  capabilities: ACTOR_CAPABILITY_PROFILES.human,
   type: "human",
 };
 const otherHuman: Actor = {
   client: "console-b",
   id: "human-b",
   principal: "local-human-b",
+  capabilities: ACTOR_CAPABILITY_PROFILES.human,
   type: "human",
 };
 const agent: Actor = {
   client: "mcp-a",
   id: "agent-a",
   principal: "local-agent-a",
+  capabilities: ACTOR_CAPABILITY_PROFILES.agent,
   type: "agent",
 };
 const scheduler: Actor = {
   client: "scheduler-a",
   id: "scheduler-a",
   principal: "local-scheduler-a",
+  capabilities: ACTOR_CAPABILITY_PROFILES.scheduler,
   type: "scheduler",
 };
 const system: Actor = {
   client: "runtime-system",
   id: "system-a",
   principal: "local-system",
+  capabilities: ACTOR_CAPABILITY_PROFILES.system,
   type: "system",
 };
 
 describe("M6.5 interaction policy and short Guard", () => {
+  it("denies a missing capability before allocating an Action or touching the PTY", async () => {
+    const fixture = await createRunningFixture();
+    const inputlessAgent: Actor = {
+      ...agent,
+      capabilities: ["session.execute"],
+      id: "agent-without-input",
+    };
+    const policylessHuman: Actor = {
+      ...human,
+      capabilities: ["interaction.guard.manage"],
+      id: "human-without-policy",
+    };
+    const initialSession = fixture.runtime.getSession(fixture.session.id);
+    try {
+      await expect(
+        fixture.runtime.sendInput({
+          actor: inputlessAgent,
+          data: "must-not-reach-pty\n",
+          idempotencyKey: "missing-input-capability",
+          sessionGeneration: fixture.session.generation,
+          sessionId: fixture.session.id,
+          targetExecutionId: fixture.executionId,
+        }),
+      ).rejects.toMatchObject({
+        code: "POLICY_DENIED",
+        details: { capability: "terminal.input" },
+      });
+      await expect(
+        fixture.runtime.setInputPolicy({
+          actor: policylessHuman,
+          expectedVersion: 1,
+          mode: "common",
+          sessionGeneration: fixture.session.generation,
+          sessionId: fixture.session.id,
+        }),
+      ).rejects.toMatchObject({ code: "POLICY_DENIED" });
+
+      expect(fixture.executor.inputs).toEqual([]);
+      expect(fixture.runtime.getSession(fixture.session.id).actionSequence).toBe(
+        initialSession.actionSequence,
+      );
+      expect(
+        await fixture.runtime.getInteractionState(fixture.session.id, fixture.session.generation),
+      ).toMatchObject({ policy: "human_guarded", version: 1 });
+      const events = await fixture.runtime.queryEvents(
+        fixture.session.id,
+        fixture.session.generation,
+        0,
+        500,
+      );
+      expect(
+        events.events.filter((event) => event.type === "interaction.policy_denied"),
+      ).toHaveLength(2);
+      expect(JSON.stringify(events)).not.toContain("must-not-reach-pty");
+    } finally {
+      await fixture.runtime.closeSession(fixture.session.id, fixture.session.generation);
+    }
+  });
+
+  it("rejects process-local Actor identity drift", async () => {
+    const fixture = await createRunningFixture();
+    try {
+      await expect(
+        fixture.runtime.sendInput({
+          actor: { ...agent, client: "forged-client" },
+          data: "must-not-reach-pty\n",
+          idempotencyKey: "actor-identity-drift",
+          sessionGeneration: fixture.session.generation,
+          sessionId: fixture.session.id,
+          targetExecutionId: fixture.executionId,
+        }),
+      ).rejects.toMatchObject({ code: "ACTOR_IDENTITY_CONFLICT" });
+      expect(fixture.executor.inputs).toEqual([]);
+    } finally {
+      await fixture.runtime.closeSession(fixture.session.id, fixture.session.generation);
+    }
+  });
+
   it("enforces the complete four-policy by four-Actor interaction matrix", async () => {
     const fixture = await createRunningFixture();
     const modes = ["common", "human_guarded", "human_only", "agent_only"] as const;

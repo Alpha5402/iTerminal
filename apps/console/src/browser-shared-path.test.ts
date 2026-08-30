@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -346,6 +347,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
         client: "m7-browser-fixture",
         id: "agent-m7-browser-fixture",
         principal: "local-m7-browser-fixture",
+        capabilities: ACTOR_CAPABILITY_PROFILES.agent,
         type: "agent",
       },
       command: "git init -q && cd subdir && export ITERM_M7_SAFE=historical",

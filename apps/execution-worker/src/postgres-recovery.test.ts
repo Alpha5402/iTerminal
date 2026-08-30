@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -279,6 +280,7 @@ const actor = {
   client: "m8-loop-postgres-test",
   id: "agent-m8-loop-postgres",
   principal: "m8-loop-postgres-test",
+  capabilities: ACTOR_CAPABILITY_PROFILES.agent,
   type: "agent" as const,
 };
 

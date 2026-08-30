@@ -7,6 +7,7 @@ import type { Pool, PoolClient } from "pg";
 
 import { createPostgresEndpointPool, type PostgresConnectionTarget } from "./postgres-endpoints.js";
 import { assertSessionFence, throwSessionLeaseLost } from "./session-fencing.js";
+import { actorFromRow, persistActor } from "./actors.js";
 
 const MAX_EVENT_LIMIT = 500;
 const MAX_SEARCH_LIMIT = 50;
@@ -22,12 +23,7 @@ export interface EventObservation {
   readonly type: string;
   readonly actionId?: string;
   readonly executionId?: string;
-  readonly actor?: Readonly<{
-    id: string;
-    type: string;
-    principal: string;
-    client: string;
-  }>;
+  readonly actor?: Actor;
   readonly payload: Readonly<Record<string, unknown>>;
   readonly createdAt: string;
 }
@@ -81,6 +77,7 @@ interface EventRow {
   execution_id: string | null;
   actor_id: string | null;
   actor_type: string | null;
+  capabilities: string[] | null;
   principal: string | null;
   client: string | null;
   payload: Record<string, unknown>;
@@ -318,15 +315,7 @@ export class PostgresObservationRepository {
         await assertSessionFence(client, input.fence);
       }
       if (input.actor !== undefined) {
-        await client.query(
-          `INSERT INTO actors (id, actor_type, principal, client)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (id) DO UPDATE
-             SET actor_type = EXCLUDED.actor_type,
-                 principal = EXCLUDED.principal,
-                 client = EXCLUDED.client`,
-          [input.actor.id, input.actor.type, input.actor.principal, input.actor.client],
-        );
+        await persistActor(client, input.actor);
       }
       const content = Buffer.from(input.data, "utf8");
       const tailPreview = content
@@ -485,7 +474,7 @@ function eventSelect(): string {
   return `SELECT e.id, e.session_id, e.session_generation, e.event_sequence,
                  e.event_type, e.action_id, e.execution_id, e.actor_id,
                  e.payload, e.created_at,
-                 a.actor_type, a.principal, a.client
+                 a.actor_type, a.principal, a.client, a.capabilities
             FROM session_events e
             LEFT JOIN actors a ON a.id = e.actor_id`;
 }
@@ -504,14 +493,30 @@ function mapEvent(row: EventRow): EventObservation {
     ...(row.actor_id === null
       ? {}
       : {
-          actor: {
-            client: row.client ?? "unknown",
-            id: row.actor_id,
-            principal: row.principal ?? "unknown",
-            type: row.actor_type ?? "unknown",
-          },
+          actor: eventActor(row),
         }),
   };
+}
+
+function eventActor(row: EventRow): Actor {
+  if (
+    row.actor_id === null ||
+    row.actor_type === null ||
+    row.principal === null ||
+    row.client === null ||
+    row.capabilities === null
+  ) {
+    throw new RuntimeError("RUNTIME_UNAVAILABLE", "Durable Event Actor is incomplete", {
+      eventId: row.id,
+    });
+  }
+  return actorFromRow({
+    actor_id: row.actor_id,
+    actor_type: row.actor_type,
+    capabilities: row.capabilities,
+    client: row.client,
+    principal: row.principal,
+  });
 }
 
 async function allocateEventSequence(

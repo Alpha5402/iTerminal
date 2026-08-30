@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -19,6 +20,7 @@ const human: Actor = {
   client: "m6-human-console",
   id: "human-m6-interaction",
   principal: "local-m6-human",
+  capabilities: ACTOR_CAPABILITY_PROFILES.human,
   type: "human",
 };
 
@@ -85,6 +87,24 @@ describeDatabase("M6.5 durable Interaction Guard through Human RPC and Agent MCP
       sessionId: session.id,
     });
     expect(initial).toMatchObject({ policy: "human_guarded", version: 1 });
+    const inputlessHuman: Actor = {
+      ...human,
+      capabilities: ["interaction.guard.manage"],
+      id: "human-m10-inputless",
+    };
+    await expect(
+      humanRpc.sendInput({
+        actor: inputlessHuman,
+        data: "CAPABILITY_DENIED_SENTINEL\n",
+        idempotencyKey: "m10-missing-input-capability",
+        sessionGeneration: session.generation,
+        sessionId: session.id,
+        targetExecutionId: started.execution.id,
+      }),
+    ).rejects.toMatchObject({
+      code: "POLICY_DENIED",
+      details: { capability: "terminal.input" },
+    });
     const guarded = await humanRpc.acquireInteractionGuard({
       actor: human,
       expectedVersion: initial.version,
@@ -94,6 +114,15 @@ describeDatabase("M6.5 durable Interaction Guard through Human RPC and Agent MCP
       ttlMilliseconds: 150,
     });
     expect(guarded.guard).toMatchObject({ actor: human, renewals: 0 });
+    await expect(
+      humanRpc.renewInteractionGuard({
+        actor: { ...human, client: "forged-console" },
+        expectedVersion: guarded.version,
+        guardId: guarded.guard?.id ?? "missing",
+        sessionGeneration: session.generation,
+        sessionId: session.id,
+      }),
+    ).rejects.toMatchObject({ code: "ACTOR_IDENTITY_CONFLICT" });
 
     const blocked = await mcp.callTool({
       arguments: {
@@ -205,8 +234,9 @@ describeDatabase("M6.5 durable Interaction Guard through Human RPC and Agent MCP
       state_version: common.version.toString(),
     });
     const rejectedAction = await pool.query<{ count: string }>(
-      `SELECT count(*) FROM actions WHERE session_id = $1 AND idempotency_key = $2`,
-      [session.id, "m6-agent-blocked"],
+      `SELECT count(*) FROM actions
+        WHERE session_id = $1 AND idempotency_key = ANY($2::text[])`,
+      [session.id, ["m6-agent-blocked", "m10-missing-input-capability"]],
     );
     expect(rejectedAction.rows[0]?.count).toBe("0");
     const audit = await pool.query<{ event_type: string; payload: unknown }>(
@@ -219,6 +249,7 @@ describeDatabase("M6.5 durable Interaction Guard through Human RPC and Agent MCP
       1,
     );
     expect(JSON.stringify(audit.rows)).not.toContain("BLOCKED_SECRET");
+    expect(JSON.stringify(audit.rows)).not.toContain("CAPABILITY_DENIED_SENTINEL");
 
     await callTool(mcp, "session_close", {
       generation: session.generation,

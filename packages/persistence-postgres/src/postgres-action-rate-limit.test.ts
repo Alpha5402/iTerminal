@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { randomUUID } from "node:crypto";
 
 import { RuntimeError } from "@iterminal/domain";
@@ -140,6 +141,7 @@ function executeRequest(
       client: "m9-rate-limit-test",
       id: actorId,
       principal: actorId,
+      capabilities: ACTOR_CAPABILITY_PROFILES.agent,
       type: "agent",
     },
     command: "true",

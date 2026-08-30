@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -521,6 +522,7 @@ function actor(id: string) {
     client: "m9-postgres-quorum-test",
     id,
     principal: id,
+    capabilities: ACTOR_CAPABILITY_PROFILES.agent,
     type: "agent" as const,
   };
 }

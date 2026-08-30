@@ -1,4 +1,49 @@
 export type ActorType = "human" | "agent" | "scheduler" | "system";
+export const ACTOR_CAPABILITIES = Object.freeze([
+  "approval.decide",
+  "approval.request",
+  "interaction.guard.manage",
+  "interaction.policy.manage",
+  "secret.input",
+  "session.execute",
+  "session.fork",
+  "terminal.control",
+  "terminal.input",
+  "terminal.resize",
+] as const);
+export type ActorCapability = (typeof ACTOR_CAPABILITIES)[number];
+
+export const ACTOR_CAPABILITY_PROFILES: Readonly<Record<ActorType, readonly ActorCapability[]>> =
+  Object.freeze({
+    agent: Object.freeze([
+      "approval.request",
+      "session.execute",
+      "session.fork",
+      "terminal.control",
+      "terminal.input",
+      "terminal.resize",
+    ] as const),
+    human: Object.freeze([
+      "approval.decide",
+      "approval.request",
+      "interaction.guard.manage",
+      "interaction.policy.manage",
+      "secret.input",
+      "session.execute",
+      "session.fork",
+      "terminal.control",
+      "terminal.input",
+      "terminal.resize",
+    ] as const),
+    scheduler: Object.freeze(["session.execute"] as const),
+    system: Object.freeze([
+      "interaction.policy.manage",
+      "session.execute",
+      "session.fork",
+      "terminal.control",
+      "terminal.resize",
+    ] as const),
+  });
 export type ShellKind = "bash" | "zsh";
 export type SessionStatus = "STARTING" | "READY" | "RESERVED" | "RUNNING" | "BROKEN" | "CLOSED";
 export type ExecuteActionStatus =
@@ -182,10 +227,26 @@ export interface TerminalStateObservation {
 }
 
 export interface Actor {
+  readonly capabilities: readonly ActorCapability[];
   readonly id: string;
   readonly type: ActorType;
   readonly principal: string;
   readonly client: string;
+}
+
+export function actorHasCapability(actor: Actor, capability: ActorCapability): boolean {
+  return actor.capabilities.includes(capability);
+}
+
+export function isCanonicalActorCapabilities(capabilities: readonly ActorCapability[]): boolean {
+  return (
+    capabilities.length > 0 &&
+    capabilities.every(
+      (capability, index) =>
+        ACTOR_CAPABILITIES.includes(capability) &&
+        (index === 0 || capabilities[index - 1]! < capability),
+    )
+  );
 }
 
 export interface InteractionGuard {

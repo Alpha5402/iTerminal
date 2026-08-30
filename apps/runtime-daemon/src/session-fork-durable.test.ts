@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +17,7 @@ const actor: Actor = {
   client: "m7-durable-rpc",
   id: "agent-m7-durable",
   principal: "local-m7-agent",
+  capabilities: ACTOR_CAPABILITY_PROFILES.agent,
   type: "agent",
 };
 

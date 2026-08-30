@@ -4,7 +4,8 @@ These terms are protocol contracts. Avoid synonyms in code and public APIs unles
 
 | Term               | Meaning                                                                                           |
 | ------------------ | ------------------------------------------------------------------------------------------------- |
-| Actor              | Authenticated Human, Agent, Scheduler, or System identity that submits an Action.                 |
+| Actor              | Human, Agent, Scheduler, or System identity plus an explicit canonical capability set.            |
+| Capability         | Closed affirmative grant required in addition to role, Input Policy, and Guard admission.         |
 | Session            | Durable collaboration identity bound to a workspace and a sequence of generations.                |
 | Session generation | One live incarnation of a Session. It owns exactly one PTY, Shell, and Executor owner.            |
 | PTY                | The operating-system pseudo-terminal carrying one merged input/output terminal stream.            |
@@ -52,6 +53,7 @@ These terms are protocol contracts. Avoid synonyms in code and public APIs unles
 - Writable-primary detection != database consensus, promotion authority, or former-primary fencing.
 - Host-local Process Guardian != whole-host fencing, live PTY migration, or Session takeover.
 - `RATE_LIMITED` != `BACKPRESSURE`, `PTY_BUSY`, or an interaction-policy denial.
+- Actor identity != authenticated transport grant; M10.1 still has a trusted-local self-asserted RPC Actor.
 
 ## TerminalState evidence boundary
 

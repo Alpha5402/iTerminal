@@ -8,6 +8,7 @@ import type { Pool, PoolClient } from "pg";
 import { migrateDatabase } from "./migrate.js";
 import { createPostgresEndpointPool, type PostgresConnectionTarget } from "./postgres-endpoints.js";
 import { assertSessionFence, throwSessionLeaseLost } from "./session-fencing.js";
+import { persistActor } from "./actors.js";
 import {
   actionRateLimitPolicy,
   type ActionRateLimitOptions,
@@ -238,15 +239,7 @@ export class PostgresRuntimeRepository {
           liveActionSequence: input.expectedActionSequence,
         });
       }
-      await client.query(
-        `INSERT INTO actors (id, actor_type, principal, client)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (id) DO UPDATE
-           SET actor_type = EXCLUDED.actor_type,
-               principal = EXCLUDED.principal,
-               client = EXCLUDED.client`,
-        [input.actor.id, input.actor.type, input.actor.principal, input.actor.client],
-      );
+      await persistActor(client, input.actor);
       await consumeActionRateLimit(client, this.#actionRateLimits, input.actor.id, input.sessionId);
       await client.query(
         `INSERT INTO actions

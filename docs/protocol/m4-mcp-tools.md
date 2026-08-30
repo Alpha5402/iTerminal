@@ -68,7 +68,9 @@ One bridge process represents one Agent Actor:
 | `ITERM_ACTOR_PRINCIPAL` | `local-agent`                |
 | `ITERM_ACTOR_CLIENT`    | `mcp-stdio`                  |
 
-The Actor type is always `agent` in M4. Tool arguments cannot claim to be Human or another principal. Authentication and policy hardening remain later work.
+The Actor type is always `agent`, and the bridge supplies the canonical Agent capability profile: `approval.request`, `session.execute`, `session.fork`, `terminal.control`, `terminal.input`, and `terminal.resize`. Tool arguments cannot choose an Actor, claim to be Human, or add capabilities. Runtime RPC requires the exact canonical capability list and Application admission checks it independently from Input Policy and Guard state.
+
+M10.1 does not yet authenticate this assertion at the Runtime RPC socket. A raw trusted-local RPC client can still construct an Actor body; ADR-0048 owns scoped, unforgeable grants. This is an explicit remaining boundary, not remote or multi-user authorization.
 
 ## Tools
 

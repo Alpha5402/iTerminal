@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -559,6 +560,7 @@ function actor(id: string) {
     client: "m9-high-cardinality-rolling-test",
     id,
     principal: id,
+    capabilities: ACTOR_CAPABILITY_PROFILES.agent,
     type: "agent" as const,
   };
 }

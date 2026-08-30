@@ -7,6 +7,7 @@ import fastifyStatic from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
 import type { Actor, EventPage, InteractionState, Session } from "@iterminal/domain";
 import {
+  ACTOR_CAPABILITY_PROFILES,
   CANONICAL_TERMINAL_COLUMNS,
   CANONICAL_TERMINAL_ROWS,
   MAX_TERMINAL_COLUMNS,
@@ -733,6 +734,7 @@ function actorForRequest(
   }
   const id = randomUUID();
   const actor: Actor = {
+    capabilities: ACTOR_CAPABILITY_PROFILES.human,
     client: "human-console-web",
     id: `human_console_${id}`,
     principal: `local-console:${id}`,
@@ -967,7 +969,9 @@ function sameActor(left: Actor, right: Actor): boolean {
     left.id === right.id &&
     left.type === right.type &&
     left.principal === right.principal &&
-    left.client === right.client
+    left.client === right.client &&
+    left.capabilities.length === right.capabilities.length &&
+    left.capabilities.every((capability, index) => right.capabilities[index] === capability)
   );
 }
 

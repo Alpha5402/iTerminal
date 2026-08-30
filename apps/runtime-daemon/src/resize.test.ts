@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,12 +12,14 @@ const actor = {
   client: "resize-test",
   id: "agent-resize-test",
   principal: "resize-test",
+  capabilities: ACTOR_CAPABILITY_PROFILES.agent,
   type: "agent" as const,
 };
 const human = {
   client: "resize-console",
   id: "human-resize-test",
   principal: "resize-human",
+  capabilities: ACTOR_CAPABILITY_PROFILES.human,
   type: "human" as const,
 };
 

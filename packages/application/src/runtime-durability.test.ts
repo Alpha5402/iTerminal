@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import type {
   DurableExecuteAdmission,
   DurableExecuteAdmissionResult,
@@ -21,6 +22,7 @@ const actor = {
   client: "durability-test",
   id: "agent-durability",
   principal: "durability-test",
+  capabilities: ACTOR_CAPABILITY_PROFILES.agent,
   type: "agent" as const,
 };
 

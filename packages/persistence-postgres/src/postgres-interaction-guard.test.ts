@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { randomUUID } from "node:crypto";
 
 import type { Actor, InteractionState, RuntimeError, Session } from "@iterminal/domain";
@@ -14,6 +15,7 @@ const human: Actor = {
   client: "postgres-guard-test",
   id: "human-postgres-guard",
   principal: "local-postgres-human",
+  capabilities: ACTOR_CAPABILITY_PROFILES.human,
   type: "human",
 };
 

@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import type { Execution, Session, TerminalScreenSnapshot } from "@iterminal/domain";
 import { describe, expect, it } from "vitest";
 
@@ -137,6 +138,7 @@ function executionFixture(session: Session, command: string): Execution {
       client: "state-test",
       id: "agent-state",
       principal: "state-test",
+      capabilities: ACTOR_CAPABILITY_PROFILES.agent,
       type: "agent",
     },
     command,

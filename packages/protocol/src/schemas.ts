@@ -1,4 +1,23 @@
 const actorProperties = {
+  capabilities: {
+    items: {
+      enum: [
+        "approval.decide",
+        "approval.request",
+        "interaction.guard.manage",
+        "interaction.policy.manage",
+        "secret.input",
+        "session.execute",
+        "session.fork",
+        "terminal.control",
+        "terminal.input",
+        "terminal.resize",
+      ],
+    },
+    minItems: 1,
+    type: "array",
+    uniqueItems: true,
+  },
   client: { minLength: 1, type: "string" },
   id: { minLength: 1, type: "string" },
   principal: { minLength: 1, type: "string" },
@@ -11,7 +30,7 @@ export const executeRequestSchema = {
     actor: {
       additionalProperties: false,
       properties: actorProperties,
-      required: ["id", "type", "principal", "client"],
+      required: ["id", "type", "principal", "client", "capabilities"],
       type: "object",
     },
     command: { type: "string" },

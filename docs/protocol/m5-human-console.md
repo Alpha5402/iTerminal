@@ -1,6 +1,6 @@
 # M5 Human Console HTTP/WebSocket protocol
 
-The Human Console is a trusted-local adapter defined by ADR-0024. It never owns a PTY and never accepts an Actor from client JSON. One HttpOnly Console cookie maps to one server-created Human Actor; every write calls `RuntimeGateway`.
+The Human Console is a trusted-local adapter defined by ADR-0024. It never owns a PTY and never accepts an Actor from client JSON. One HttpOnly Console cookie maps to one server-created Human Actor with the canonical M10.1 Human capability profile; every write calls `RuntimeGateway`.
 
 ## Listener and browser boundary
 
@@ -12,7 +12,7 @@ The Human Console is a trusted-local adapter defined by ADR-0024. It never owns 
 - `GET /api/bootstrap` creates or resumes the opaque `iterminal_console` HttpOnly, SameSite=Strict cookie. No credential appears in a URL.
 - Request bodies cannot select `actor`, `session status`, or Runtime owner.
 
-This boundary prevents ambient web pages and DNS-rebinding hostnames from driving the local Console. It is not remote authentication or multi-user authorization.
+This boundary prevents ambient web pages and DNS-rebinding hostnames from driving the local Console. It is not remote authentication or multi-user authorization. The Console-to-Runtime RPC Actor remains self-asserted until ADR-0048 binds it to a scoped grant, so M10.1 capability checks alone are not an authentication claim.
 
 ## Response envelope
 

@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -279,6 +280,7 @@ describeDatabase("M9.1 Runtime daemon owner registry lifecycle", () => {
         client: "m93-fence-test",
         id: "agent-m93-fence-test",
         principal: "m93-fence-test",
+        capabilities: ACTOR_CAPABILITY_PROFILES.agent,
         type: "agent",
       },
       command: "sleep 30",

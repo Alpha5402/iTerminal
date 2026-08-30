@@ -50,6 +50,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0044](./0044-postgres-quorum-primary-failover.md)                | Follow an externally promoted PostgreSQL primary           | Accepted for M9.16       |
 | [0045](./0045-host-local-process-guardian.md)                     | Reclaim unreachable Runtime PTY process trees on-host      | Accepted for M9.17       |
 | [0046](./0046-bounded-postgres-pools-and-rolling-soak.md)         | Bound Runtime DB pools and scale rolling soak              | Accepted for M9.18       |
+| [0047](./0047-actor-capability-policy-and-immutable-identity.md)  | Make Actor capability explicit and durable identity fixed  | Accepted for M10.1       |
 
 Statuses:
 

@@ -1,5 +1,6 @@
 import { UnixRuntimeClient } from "@iterminal/runtime-rpc";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 
 import { createMcpServer } from "./server.js";
 
@@ -10,6 +11,7 @@ if (socketPath === undefined || socketPath.length === 0) {
 }
 
 const actor = {
+  capabilities: ACTOR_CAPABILITY_PROFILES.agent,
   client: process.env.ITERM_ACTOR_CLIENT ?? "mcp-stdio",
   id: process.env.ITERM_ACTOR_ID ?? `agent_${process.pid.toString()}`,
   principal: process.env.ITERM_ACTOR_PRINCIPAL ?? "local-agent",

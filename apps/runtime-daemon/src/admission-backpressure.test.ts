@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { access, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
@@ -309,6 +310,7 @@ const actor = {
   client: "m8-admission-test",
   id: "agent-m8-admission",
   principal: "m8-admission-test",
+  capabilities: ACTOR_CAPABILITY_PROFILES.agent,
   type: "agent" as const,
 };
 

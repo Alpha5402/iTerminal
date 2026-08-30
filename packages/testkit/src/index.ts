@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { RuntimeService, type RuntimeServiceOptions } from "@iterminal/application";
 import type { Actor } from "@iterminal/domain";
 import { PtyShellExecutorFactory } from "@iterminal/executor-pty";
@@ -9,6 +10,7 @@ export const humanActor: Actor = {
   client: "test-console",
   id: "human_test",
   principal: "local-human",
+  capabilities: ACTOR_CAPABILITY_PROFILES.human,
   type: "human",
 };
 
@@ -16,6 +18,7 @@ export const agentActor: Actor = {
   client: "test-mcp",
   id: "agent_test",
   principal: "local-agent",
+  capabilities: ACTOR_CAPABILITY_PROFILES.agent,
   type: "agent",
 };
 

@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { access, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -570,6 +571,7 @@ const actor = {
   client: "m9-router-test",
   id: "agent-m9-router",
   principal: "local-agent",
+  capabilities: ACTOR_CAPABILITY_PROFILES.agent,
   type: "agent" as const,
 };
 
@@ -598,6 +600,7 @@ function actorFixture(id: string) {
     client: "m9-rate-limit-test",
     id,
     principal: id,
+    capabilities: ACTOR_CAPABILITY_PROFILES.agent,
     type: "agent" as const,
   };
 }

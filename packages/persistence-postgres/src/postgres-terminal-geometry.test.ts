@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { randomUUID } from "node:crypto";
 
 import type { Actor, ResizeAction, RuntimeError, Session } from "@iterminal/domain";
@@ -131,6 +132,7 @@ function actorFixture(name: string): Actor {
     client: `geometry-${name}`,
     id: `agent-geometry-${name}`,
     principal: `geometry-${name}`,
+    capabilities: ACTOR_CAPABILITY_PROFILES.agent,
     type: "agent",
   };
 }

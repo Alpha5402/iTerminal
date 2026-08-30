@@ -15,7 +15,6 @@ import type {
 import type {
   Actor,
   ControlAction,
-  ActorType,
   EventPage,
   Execution,
   InputAction,
@@ -41,6 +40,7 @@ import {
   prepareSessionCreationAdmission,
 } from "./session-creation-retention.js";
 import { PostgresRuntimeRepository } from "./postgres-runtime-repository.js";
+import { persistActor } from "./actors.js";
 import {
   actionRateLimitPolicy,
   type ActionRateLimitOptions,
@@ -1410,9 +1410,7 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
       sessionId: event.sessionId,
       type: event.type,
       ...(event.actionId === undefined ? {} : { actionId: event.actionId }),
-      ...(event.actor === undefined
-        ? {}
-        : { actor: { ...event.actor, type: actorType(event.actor.type) } }),
+      ...(event.actor === undefined ? {} : { actor: event.actor }),
       ...(event.executionId === undefined ? {} : { executionId: event.executionId }),
     }));
     const last = events.at(-1);
@@ -1654,15 +1652,7 @@ async function insertEvents(
 ): Promise<void> {
   for (const event of events) {
     if (event.actor !== undefined) {
-      await client.query(
-        `INSERT INTO actors (id, actor_type, principal, client)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (id) DO UPDATE
-           SET actor_type = EXCLUDED.actor_type,
-               principal = EXCLUDED.principal,
-               client = EXCLUDED.client`,
-        [event.actor.id, event.actor.type, event.actor.principal, event.actor.client],
-      );
+      await persistActor(client, event.actor);
     }
     const sequence = await nextEventSequence(client, event.sessionId, event.sessionGeneration);
     await client.query(
@@ -1706,15 +1696,7 @@ async function nextEventSequence(
 }
 
 async function upsertActor(client: PoolClient, actor: Actor): Promise<void> {
-  await client.query(
-    `INSERT INTO actors (id, actor_type, principal, client)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (id) DO UPDATE
-       SET actor_type = EXCLUDED.actor_type,
-           principal = EXCLUDED.principal,
-           client = EXCLUDED.client`,
-    [actor.id, actor.type, actor.principal, actor.client],
-  );
+  await persistActor(client, actor);
 }
 
 function assertDurableInteractionAllowed(
@@ -1967,11 +1949,4 @@ function actionPayload(
 function eventSearchText(event: DurableSessionEvent): string {
   const data = typeof event.payload.data === "string" ? event.payload.data : "";
   return `${event.type} ${data}`;
-}
-
-function actorType(value: string): ActorType {
-  if (value === "human" || value === "agent" || value === "scheduler" || value === "system") {
-    return value;
-  }
-  throw new RuntimeError("RUNTIME_UNAVAILABLE", `Durable Event has invalid Actor type: ${value}`);
 }

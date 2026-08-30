@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { randomUUID } from "node:crypto";
 
 import { RuntimeError } from "@iterminal/domain";
@@ -79,6 +80,42 @@ describeDatabase("PostgresRuntimeRepository", () => {
     await expect(
       repository.acceptExecute({ ...request, requestHash: "different-hash" }),
     ).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
+  });
+
+  it("keeps durable Actor identity immutable across Sessions", async () => {
+    const firstSession = await createSession(repository);
+    const secondSession = await createSession(repository);
+    const actorId = "agent-immutable";
+    await repository.acceptExecute(executeRequest(firstSession.id, actorId));
+
+    const conflicting = executeRequest(secondSession.id, actorId);
+    await expect(
+      repository.acceptExecute({
+        ...conflicting,
+        actor: { ...conflicting.actor, principal: "changed-principal" },
+      }),
+    ).rejects.toMatchObject({ code: "ACTOR_IDENTITY_CONFLICT" });
+    expect(await repository.inspectSession(secondSession.id)).toMatchObject({
+      actionCount: 0,
+      activeExecutionId: null,
+      status: "READY",
+    });
+    const actor = await pool.query<{
+      capabilities: string[];
+      principal: string;
+    }>("SELECT principal, capabilities FROM actors WHERE id = $1", [actorId]);
+    expect(actor.rows[0]).toEqual({
+      capabilities: ACTOR_CAPABILITY_PROFILES.agent,
+      principal: actorId,
+    });
+    await expect(
+      pool.query(
+        `UPDATE actors
+            SET capabilities = ARRAY['terminal.input', 'session.execute']::text[]
+          WHERE id = $1`,
+        [actorId],
+      ),
+    ).rejects.toMatchObject({ code: "23514" });
   });
 
   it("coalesces concurrent matching idempotency before applying Outbox capacity", async () => {
@@ -259,6 +296,7 @@ function executeRequest(sessionId: string, actorId: string): AcceptExecuteTransa
       client: "m2-test",
       id: actorId,
       principal: actorId,
+      capabilities: ACTOR_CAPABILITY_PROFILES.agent,
       type: "agent",
     },
     command: "sleep 10",

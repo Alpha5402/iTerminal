@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -156,6 +157,7 @@ describe("M4 stdio MCP bridge", () => {
         client: "m6-human-rpc",
         id: "human-m6",
         principal: "m6-test-human",
+        capabilities: ACTOR_CAPABILITY_PROFILES.human,
         type: "human",
       },
       data: "human-change\n",
@@ -287,7 +289,7 @@ async function connectClient(name: string): Promise<Client> {
     cwd: repositoryRoot,
     env: {
       ...getDefaultEnvironment(),
-      ITERM_ACTOR_CLIENT: name,
+      ITERM_ACTOR_CLIENT: "m4-test-mcp",
       ITERM_ACTOR_ID: "agent-m4",
       ITERM_ACTOR_PRINCIPAL: "m4-test-agent",
       ITERM_RUNTIME_SOCKET: daemon.socketPath,

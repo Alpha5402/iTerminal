@@ -41,7 +41,13 @@ import type {
   TerminalScreenWaitResult,
   TerminalStateObservation,
 } from "@iterminal/domain";
-import { MAX_TERMINAL_COLUMNS, MAX_TERMINAL_ROWS, RuntimeError } from "@iterminal/domain";
+import {
+  ACTOR_CAPABILITIES,
+  MAX_TERMINAL_COLUMNS,
+  MAX_TERMINAL_ROWS,
+  RuntimeError,
+  isCanonicalActorCapabilities,
+} from "@iterminal/domain";
 import * as z from "zod/v4";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
@@ -64,6 +70,7 @@ const runtimeErrorCodes = new Set<RuntimeError["code"]>([
   "INPUT_GUARDED",
   "INTERACTION_GUARD_CHANGED",
   "POLICY_DENIED",
+  "ACTOR_IDENTITY_CONFLICT",
   "IDEMPOTENCY_KEY_REUSED",
   "DELIVERY_UNKNOWN",
   "BACKPRESSURE",
@@ -87,6 +94,11 @@ export function defaultRuntimeSocketPath(): string {
 }
 
 const actorSchema = z.strictObject({
+  capabilities: z
+    .array(z.enum(ACTOR_CAPABILITIES))
+    .min(1)
+    .max(ACTOR_CAPABILITIES.length)
+    .refine(isCanonicalActorCapabilities, "Actor capabilities must be canonical"),
   client: z.string().min(1).max(256),
   id: z.string().min(1).max(256),
   principal: z.string().min(1).max(256),

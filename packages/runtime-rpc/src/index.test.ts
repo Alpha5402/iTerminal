@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { createConnection } from "node:net";
 
 import type { RuntimeError } from "@iterminal/domain";
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { describe, expect, it } from "vitest";
 
 import { startRuntimeRpcServer, UnixRuntimeClient, type RuntimeGateway } from "./index.js";
@@ -23,7 +24,13 @@ describe("UnixRuntimeClient delivery classification", () => {
 
     await expect(
       client.startExecute({
-        actor: { client: "test", id: "agent-test", principal: "test", type: "agent" },
+        actor: {
+          capabilities: ACTOR_CAPABILITY_PROFILES.agent,
+          client: "test",
+          id: "agent-test",
+          principal: "test",
+          type: "agent",
+        },
         command: "true",
         idempotencyKey: "unknown-delivery",
         sessionGeneration: 1,
@@ -53,6 +60,43 @@ describe("UnixRuntimeClient delivery classification", () => {
       ready = true;
       await expect(client.listSessions()).resolves.toEqual([]);
     } finally {
+      await server.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects non-canonical or missing Actor capabilities at the RPC boundary", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-capability-schema-"));
+    const server = await startRuntimeRpcServer({
+      gateway: stubGateway(),
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    const socket = createConnection(server.socketPath);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.once("connect", resolve);
+        socket.once("error", reject);
+      });
+      socket.write(
+        `${JSON.stringify({
+          id: "invalid-actor-capabilities",
+          input: {
+            actor: { client: "raw", id: "raw-agent", principal: "raw", type: "agent" },
+            command: "true",
+            generation: 1,
+            idempotencyKey: "invalid-actor-capabilities",
+            sessionId: "session-test",
+          },
+          operation: "execution.start",
+        })}\n`,
+      );
+      await expect(readResponse(socket)).resolves.toMatchObject({
+        error: { code: "INVALID_REQUEST" },
+        id: "invalid-actor-capabilities",
+        ok: false,
+      });
+    } finally {
+      socket.destroy();
       await server.close();
       await rm(fixture, { force: true, recursive: true });
     }
@@ -252,6 +296,23 @@ describe("UnixRuntimeClient delivery classification", () => {
 
 function missingSocket(suffix: string): string {
   return join(tmpdir(), `iterminal-missing-${process.pid.toString()}-${suffix}.sock`);
+}
+
+function readResponse(socket: ReturnType<typeof createConnection>): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    let buffer = "";
+    socket.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString("utf8");
+      const newline = buffer.indexOf("\n");
+      if (newline < 0) return;
+      try {
+        resolve(JSON.parse(buffer.slice(0, newline)) as unknown);
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error("RPC response JSON is invalid"));
+      }
+    });
+    socket.once("error", reject);
+  });
 }
 
 function stubGateway(): RuntimeGateway {

@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { randomUUID } from "node:crypto";
 
 import type {
@@ -193,6 +194,7 @@ const actor: Actor = {
   client: "m93-fencing-test",
   id: "agent-m93-fencing",
   principal: "m93-fencing",
+  capabilities: ACTOR_CAPABILITY_PROFILES.agent,
   type: "agent",
 };
 

@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { randomUUID } from "node:crypto";
 
 import { Pool } from "pg";
@@ -45,6 +46,7 @@ describeDatabase("PostgresObservationRepository", () => {
         client: "mcp",
         id: "agent-observer",
         principal: "local-agent",
+        capabilities: ACTOR_CAPABILITY_PROFILES.agent,
         type: "agent",
       },
       command: "build",
