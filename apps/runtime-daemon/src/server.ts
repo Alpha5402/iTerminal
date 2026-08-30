@@ -6,6 +6,7 @@ import { RuntimeError } from "@iterminal/domain";
 import { PtyShellExecutorFactory } from "@iterminal/executor-pty";
 import { PostgresRuntimeDurability } from "@iterminal/persistence-postgres";
 import { MemoryRuntimeStore } from "@iterminal/runtime-memory";
+import { XtermScreenProjectionFactory } from "@iterminal/terminal-screen";
 import {
   LocalRuntimeGateway,
   runtimeOwnerIdForSocket,
@@ -93,6 +94,7 @@ export async function startRuntimeDaemon(options: {
         : { executionDispatch: options.executionDispatch }),
       ...(options.hooks === undefined ? {} : { hooks: options.hooks }),
       ownerId,
+      screenProjectionFactory: new XtermScreenProjectionFactory(),
     });
   let rpc: RuntimeRpcServerHandle | undefined;
   let durabilityState: RuntimeDaemonDurabilityState =

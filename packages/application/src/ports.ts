@@ -9,6 +9,7 @@ import type {
   SessionAction,
   SessionEvent,
   ShellKind,
+  TerminalScreenSnapshot,
 } from "@iterminal/domain";
 
 export interface ShellExecutionResult {
@@ -39,6 +40,19 @@ export interface CreateExecutorOptions {
 
 export interface ShellExecutorFactory {
   create(options: CreateExecutorOptions): Promise<ShellExecutor>;
+}
+
+export interface TerminalScreenProjection {
+  dispose(): void;
+  snapshot(): Promise<TerminalScreenSnapshot>;
+  write(data: string, screenVersion: number): void;
+}
+
+export interface TerminalScreenProjectionFactory {
+  create(input: {
+    readonly sessionGeneration: number;
+    readonly sessionId: string;
+  }): TerminalScreenProjection;
 }
 
 export interface RuntimeStore {
@@ -158,5 +172,6 @@ export interface RuntimeServiceOptions {
     readonly beforeExecutionFinishPersist?: (execution: Execution) => void;
   }>;
   readonly ownerId?: string;
+  readonly screenProjectionFactory?: TerminalScreenProjectionFactory;
   readonly now?: () => Date;
 }

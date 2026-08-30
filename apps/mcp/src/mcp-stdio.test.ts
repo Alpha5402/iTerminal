@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { startRuntimeDaemon, type RuntimeDaemonHandle } from "@iterminal/runtime-daemon";
+import { UnixRuntimeClient } from "@iterminal/runtime-rpc";
 import { Client } from "@modelcontextprotocol/client";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -40,6 +41,7 @@ describe("M4 stdio MCP bridge", () => {
       "execution_get",
       "execution_wait",
       "input",
+      "screen_get",
       "session_close",
       "session_create",
       "session_get",
@@ -98,6 +100,95 @@ describe("M4 stdio MCP bridge", () => {
     });
     expect(completed.output).toContain(`PWD=${join(workspaceRoot, "subdir")}`);
     expect(completed.output).toContain("ENV=shared");
+    const screen = await callTool<ScreenResult>(second, "screen_get", {
+      generation: session.generation,
+      sessionId: session.id,
+    });
+    expect(screen).toMatchObject({
+      buffer: "normal",
+      columns: 120,
+      rows: 40,
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+    });
+    expect(screen.lines.join("\n")).toContain("ENV=shared");
+    expect(screen.screenVersion).toBeGreaterThan(0);
+    const screenSession = await callTool<SessionResult>(second, "session_get", {
+      sessionId: session.id,
+    });
+    expect(screen.screenVersion).toBe(screenSession.screenVersion);
+    const staleScreen = await second.callTool({
+      arguments: { generation: session.generation + 1, sessionId: session.id },
+      name: "screen_get",
+    });
+    expect(staleScreen.isError).toBe(true);
+    expect(textContent(staleScreen)).toContain('"code":"SESSION_GENERATION_CHANGED"');
+
+    const alternate = await callTool<StartedResult>(second, "execute", {
+      command: `printf '\\033[?1049h\\033[2J\\033[Halternate-界'; read -r first; printf '\\r\\nhuman=%s\\r\\n' "$first"; read -r second; printf '\\033[?1049l'`,
+      generation: session.generation,
+      idempotencyKey: "m6-alternate-screen",
+      sessionId: session.id,
+    });
+    await waitUntilRunning(second, alternate.execution.id);
+    const alternateScreen = await waitForScreen(
+      second,
+      session.id,
+      session.generation,
+      (candidate) =>
+        candidate.buffer === "alternate" && candidate.lines.join("\n").includes("alternate-界"),
+    );
+    if (daemon === undefined) throw new Error("Runtime daemon was not started");
+    const human = new UnixRuntimeClient(daemon.socketPath);
+    await human.sendInput({
+      actor: {
+        client: "m6-human-rpc",
+        id: "human-m6",
+        principal: "m6-test-human",
+        type: "human",
+      },
+      data: "human-change\n",
+      expectedScreenVersion: alternateScreen.screenVersion,
+      idempotencyKey: "m6-human-change-screen",
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+      targetExecutionId: alternate.execution.id,
+    });
+    const humanChangedScreen = await waitForScreen(
+      second,
+      session.id,
+      session.generation,
+      (candidate) =>
+        candidate.screenVersion > alternateScreen.screenVersion &&
+        candidate.lines.join("\n").includes("human=human-change"),
+    );
+    const staleAgentInput = await second.callTool({
+      arguments: {
+        data: "stale-agent-input\n",
+        expectedScreenVersion: alternateScreen.screenVersion,
+        generation: session.generation,
+        idempotencyKey: "m6-stale-agent-input",
+        sessionId: session.id,
+        targetExecutionId: alternate.execution.id,
+      },
+      name: "input",
+    });
+    expect(staleAgentInput.isError).toBe(true);
+    expect(textContent(staleAgentInput)).toContain('"code":"SCREEN_CHANGED"');
+    await callTool(second, "input", {
+      data: "\n",
+      expectedScreenVersion: humanChangedScreen.screenVersion,
+      generation: session.generation,
+      idempotencyKey: "m6-leave-alternate-screen",
+      sessionId: session.id,
+      targetExecutionId: alternate.execution.id,
+    });
+    await callTool(second, "execution_wait", { executionId: alternate.execution.id });
+    const restoredScreen = await callTool<ScreenResult>(second, "screen_get", {
+      generation: session.generation,
+      sessionId: session.id,
+    });
+    expect(restoredScreen.buffer).toBe("normal");
 
     const python = await callTool<StartedResult>(second, "execute", {
       command: "python3 -q",
@@ -207,6 +298,23 @@ async function waitUntilRunning(client: Client, executionId: string): Promise<vo
   throw new Error(`Execution did not enter RUNNING: ${executionId}`);
 }
 
+async function waitForScreen(
+  client: Client,
+  requestedSessionId: string,
+  requestedGeneration: number,
+  predicate: (screen: ScreenResult) => boolean,
+): Promise<ScreenResult> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const screen = await callTool<ScreenResult>(client, "screen_get", {
+      generation: requestedGeneration,
+      sessionId: requestedSessionId,
+    });
+    if (predicate(screen)) return screen;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+  }
+  throw new Error(`Virtual Screen did not reach the expected state: ${requestedSessionId}`);
+}
+
 async function callTool<T>(
   client: Client,
   name: string,
@@ -235,6 +343,7 @@ function textContent(result: Awaited<ReturnType<Client["callTool"]>>): string {
 type SessionResult = {
   readonly id: string;
   readonly generation: number;
+  readonly screenVersion: number;
   readonly status: string;
 };
 
@@ -252,4 +361,14 @@ type EventPageResult = {
   readonly events: readonly { readonly type: string }[];
   readonly nextAfter?: number;
   readonly truncated: boolean;
+};
+
+type ScreenResult = {
+  readonly buffer: string;
+  readonly columns: number;
+  readonly lines: readonly string[];
+  readonly rows: number;
+  readonly screenVersion: number;
+  readonly sessionGeneration: number;
+  readonly sessionId: string;
 };

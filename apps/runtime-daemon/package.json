@@ -9,7 +9,8 @@
     "@iterminal/executor-pty": "workspace:*",
     "@iterminal/persistence-postgres": "workspace:*",
     "@iterminal/runtime-memory": "workspace:*",
-    "@iterminal/runtime-rpc": "workspace:*"
+    "@iterminal/runtime-rpc": "workspace:*",
+    "@iterminal/terminal-screen": "workspace:*"
   },
   "devDependencies": {
     "@iterminal/messaging": "workspace:*",

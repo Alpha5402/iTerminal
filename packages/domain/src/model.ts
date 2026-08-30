@@ -19,6 +19,20 @@ export type ControlDelivery =
   | Readonly<{ mode: "TTY_CONTROL"; control: TtyControl }>
   | Readonly<{ mode: "PROCESS_SIGNAL"; signal: ProcessSignal }>;
 
+export const CANONICAL_TERMINAL_COLUMNS = 120;
+export const CANONICAL_TERMINAL_ROWS = 40;
+
+export interface TerminalScreenSnapshot {
+  readonly buffer: "normal" | "alternate";
+  readonly columns: number;
+  readonly cursor: Readonly<{ column: number; row: number }>;
+  readonly lines: readonly string[];
+  readonly rows: number;
+  readonly screenVersion: number;
+  readonly sessionGeneration: number;
+  readonly sessionId: string;
+}
+
 export interface Actor {
   readonly id: string;
   readonly type: ActorType;

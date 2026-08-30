@@ -1,5 +1,7 @@
 # M4 MCP stdio protocol
 
+M6.1 extends this protocol with the read-only `screen_get` tool while preserving the M4 Action and Event contracts.
+
 iTerminal uses the official Model Context Protocol TypeScript SDK v2 and `serveStdio`. The bridge logs only to stderr because stdout is the MCP framing channel. A separate Runtime daemon owns all live state; set `ITERM_RUNTIME_SOCKET` to its absolute Unix socket path before starting the bridge.
 
 The daemon has two explicit storage modes:
@@ -35,6 +37,7 @@ The Actor type is always `agent` in M4. Tool arguments cannot claim to be Human 
 | `input`          | Writes one batch to an exact generation/Execution, optionally screen-version guarded |
 | `control`        | Delivers explicit TTY control bytes or process-group signal                          |
 | `events_query`   | Returns at most 500 Events after a generation-scoped sequence                        |
+| `screen_get`     | Returns the bounded live ANSI/VT viewport, cursor, buffer, and screen version        |
 
 Every successful tool result contains a JSON text block and `structuredContent: { result }`. Domain failures are tool-level errors with a JSON text envelope:
 

@@ -20,7 +20,12 @@ import type {
   ShellExecutor,
   ShellExecutorFactory,
 } from "@iterminal/application";
-import type { ControlDelivery, ShellKind } from "@iterminal/domain";
+import {
+  CANONICAL_TERMINAL_COLUMNS,
+  CANONICAL_TERMINAL_ROWS,
+  type ControlDelivery,
+  type ShellKind,
+} from "@iterminal/domain";
 import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 
@@ -104,11 +109,11 @@ export class PtyShellExecutor implements ShellExecutor {
         this.#controlFifo,
       );
       shellPty = pty.spawn(profile.executable, [...profile.args], {
-        cols: 120,
+        cols: CANONICAL_TERMINAL_COLUMNS,
         cwd: workspaceRoot,
         env: childEnvironment(profile.env),
         name: "xterm-256color",
-        rows: 40,
+        rows: CANONICAL_TERMINAL_ROWS,
       });
       this.#pty = shellPty;
       this.shellPid = shellPty.pid;

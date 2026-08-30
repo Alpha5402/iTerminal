@@ -12,6 +12,7 @@ import type {
   SessionAction,
   SessionEvent,
   ShellKind,
+  TerminalScreenSnapshot,
 } from "@iterminal/domain";
 import { RuntimeError } from "@iterminal/domain";
 
@@ -23,6 +24,8 @@ import type {
   ShellExecutionResult,
   ShellExecutor,
   ShellExecutorFactory,
+  TerminalScreenProjection,
+  TerminalScreenProjectionFactory,
 } from "./ports.js";
 
 const DEFAULT_EVENT_LIMIT = 100;
@@ -99,6 +102,7 @@ interface Deferred<T> {
 
 export class RuntimeService {
   readonly #executors = new Map<string, ShellExecutor>();
+  readonly #screens = new Map<string, TerminalScreenProjection>();
   readonly #completions = new Map<string, Promise<Execution>>();
   readonly #started = new Map<string, Promise<void>>();
   readonly #durableQueues = new Map<string, DurableQueueState>();
@@ -110,6 +114,7 @@ export class RuntimeService {
   readonly #hooks: NonNullable<RuntimeServiceOptions["hooks"]>;
   readonly #now: () => Date;
   readonly #ownerId: string;
+  readonly #screenProjectionFactory: TerminalScreenProjectionFactory | undefined;
 
   public constructor(
     private readonly store: RuntimeStore,
@@ -121,6 +126,7 @@ export class RuntimeService {
     this.#hooks = options.hooks ?? {};
     this.#now = options.now ?? (() => new Date());
     this.#ownerId = options.ownerId ?? `owner_${process.pid.toString()}`;
+    this.#screenProjectionFactory = options.screenProjectionFactory;
   }
 
   public async createSession(request: CreateSessionRequest): Promise<Session> {
@@ -162,6 +168,11 @@ export class RuntimeService {
     }
 
     try {
+      const screen = this.#screenProjectionFactory?.create({
+        sessionGeneration: generation,
+        sessionId,
+      });
+      if (screen !== undefined) this.#screens.set(sessionId, screen);
       const executor = await this.executorFactory.create({
         onOutput: (data) => this.#recordOutput(sessionId, generation, data),
         shell: request.shell,
@@ -187,6 +198,8 @@ export class RuntimeService {
     } catch (error) {
       this.#executors.get(sessionId)?.close();
       this.#executors.delete(sessionId);
+      this.#screens.get(sessionId)?.dispose();
+      this.#screens.delete(sessionId);
       const broken = this.store.breakSession(sessionId, generation);
       const brokenEvent = this.#event(
         broken,
@@ -207,6 +220,31 @@ export class RuntimeService {
 
   public listSessions(): readonly Session[] {
     return this.store.listSessions();
+  }
+
+  public async getScreen(sessionId: string, generation: number): Promise<TerminalScreenSnapshot> {
+    this.#requireGeneration(sessionId, generation);
+    const screen = this.#screens.get(sessionId);
+    if (screen === undefined) {
+      throw new RuntimeError(
+        "RUNTIME_UNAVAILABLE",
+        "This Runtime has no live Virtual Screen projection",
+        { generation, sessionId },
+      );
+    }
+    try {
+      const snapshot = await screen.snapshot();
+      this.#requireGeneration(sessionId, generation);
+      return snapshot;
+    } catch (error) {
+      if (error instanceof RuntimeError) throw error;
+      throw new RuntimeError(
+        "RUNTIME_UNAVAILABLE",
+        "Virtual Screen projection is unavailable",
+        { generation, reason: errorMessage(error), sessionId },
+        true,
+      );
+    }
   }
 
   public async recoverDurableOwner(reason: string): Promise<{
@@ -837,6 +875,8 @@ export class RuntimeService {
       this.#markActiveDispatchUnknown(session, "Session closed before Execution outcome");
       this.#executors.get(sessionId)?.close();
       this.#executors.delete(sessionId);
+      this.#screens.get(sessionId)?.dispose();
+      this.#screens.delete(sessionId);
       const closed = this.store.closeSession(sessionId, generation);
       const closedEvent = this.#event(
         closed,
@@ -863,6 +903,7 @@ export class RuntimeService {
       return;
     }
     const screenVersion = this.store.bumpScreenVersion(sessionId, generation);
+    this.#screens.get(sessionId)?.write(data, screenVersion);
     const execution =
       current.activeExecutionId === undefined
         ? undefined

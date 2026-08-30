@@ -22,6 +22,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0016](./0016-messaging-loop-postgres-supervision.md)   | Pause messaging loops and resume from durable leases     | Accepted for M8.7        |
 | [0017](./0017-network-blackhole-liveness.md)            | Bound liveness detection under silent transport loss     | Accepted for M8.8        |
 | [0018](./0018-rabbitmq-quorum-endpoint-failover.md)     | Pair quorum election with client endpoint failover       | Accepted for M8.9        |
+| [0019](./0019-live-virtual-screen-projection.md)        | Keep one bounded live ANSI/VT screen projection          | Accepted for M6.1        |
 
 Statuses:
 

@@ -9,6 +9,7 @@ const requiredReports = [
   "docs/verification/M3/2026-08-30-bounded-observation.md",
   "docs/verification/M4/2026-08-30-mcp-adapter.md",
   "docs/verification/M4/2026-08-30-durable-runtime.md",
+  "docs/verification/M6/2026-08-30-live-virtual-screen.md",
   "docs/verification/M8/2026-08-30-reliable-messaging.md",
   "docs/verification/M8/2026-08-30-owner-dispatch.md",
   "docs/verification/M8/2026-08-30-interaction-crash-retry-outage.md",

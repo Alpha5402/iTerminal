@@ -16,6 +16,7 @@ import type {
   Execution,
   InputAction,
   Session,
+  TerminalScreenSnapshot,
 } from "@iterminal/domain";
 import { RuntimeError } from "@iterminal/domain";
 import * as z from "zod/v4";
@@ -88,6 +89,7 @@ const operationSchemas = {
     idempotencyKey: z.string().min(1).max(256),
     targetExecutionId: z.string().min(1).max(256),
   }),
+  "screen.get": sessionIdentitySchema,
   "session.close": sessionIdentitySchema,
   "session.create": z.strictObject({
     shell: z.enum(["bash", "zsh"]),
@@ -108,6 +110,7 @@ export interface RuntimeGateway {
   createSession(request: CreateSessionRequest): Promise<Session>;
   getSession(sessionId: string): Promise<Session>;
   listSessions(): Promise<readonly Session[]>;
+  getScreen(sessionId: string, generation: number): Promise<TerminalScreenSnapshot>;
   startExecute(request: ExecuteRequest): Promise<StartedExecutionView>;
   dispatchExecution(executionId: string): Promise<StartedExecutionView>;
   getExecution(executionId: string): Promise<Execution>;
@@ -136,6 +139,10 @@ export class LocalRuntimeGateway implements RuntimeGateway {
 
   public listSessions(): Promise<readonly Session[]> {
     return Promise.resolve(this.runtime.listSessions());
+  }
+
+  public getScreen(sessionId: string, generation: number): Promise<TerminalScreenSnapshot> {
+    return this.runtime.getScreen(sessionId, generation);
   }
 
   public async startExecute(request: ExecuteRequest): Promise<StartedExecutionView> {
@@ -261,6 +268,10 @@ export class UnixRuntimeClient implements RuntimeGateway {
 
   public listSessions(): Promise<readonly Session[]> {
     return this.#request("session.list", {});
+  }
+
+  public getScreen(sessionId: string, generation: number): Promise<TerminalScreenSnapshot> {
+    return this.#request("screen.get", { generation, sessionId });
   }
 
   public startExecute(request: ExecuteRequest): Promise<StartedExecutionView> {
@@ -538,6 +549,10 @@ async function dispatch(
         request.after,
         request.limit,
       );
+    }
+    case "screen.get": {
+      const request = operationSchemas[operation].parse(input);
+      return gateway.getScreen(request.sessionId, request.generation);
     }
   }
 }

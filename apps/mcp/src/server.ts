@@ -20,7 +20,7 @@ const idempotencyKey = z
 
 export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServer {
   const server = new McpServer(
-    { name: "iterminal", version: "0.4.0" },
+    { name: "iterminal", version: "0.6.1" },
     {
       instructions:
         "Create or select one shared Session, then pass its exact generation to every operation. " +
@@ -220,6 +220,19 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
     },
     async (input) =>
       call(() => gateway.queryEvents(input.sessionId, input.generation, input.after, input.limit)),
+  );
+
+  server.registerTool(
+    "screen_get",
+    {
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      description:
+        "Read the exact live Session generation's bounded 120x40 Virtual Screen after ANSI/VT parsing. Returns active normal/alternate buffer, zero-based cursor, plain-text rows, and screenVersion for guarded input.",
+      inputSchema: z.strictObject({ generation, sessionId }),
+      title: "Get live terminal screen",
+    },
+    async ({ generation: requestedGeneration, sessionId: requestedSessionId }) =>
+      call(() => gateway.getScreen(requestedSessionId, requestedGeneration)),
   );
 
   return server;
