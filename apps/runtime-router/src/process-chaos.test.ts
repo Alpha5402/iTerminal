@@ -1216,6 +1216,132 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
     );
   }, 180_000);
 
+  it("fences a CPU-starved owner before same-process recovery", async () => {
+    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m914-starved-")));
+    fixtures.push(root);
+    const workspace = join(root, "workspace");
+    await mkdir(workspace, { recursive: true });
+    const ownerA = await startRuntimeChild(
+      root,
+      "owner-starved-a",
+      "instance-starved-a",
+      join(root, "a.sock"),
+    );
+    const ownerB = await startRuntimeChild(
+      root,
+      "owner-starved-b",
+      "instance-starved-b",
+      join(root, "b.sock"),
+    );
+    children.push(ownerA, ownerB);
+    const routerSocket = join(root, "router.sock");
+    const router = await startRouterChild(routerSocket);
+    children.push(router);
+    const client = new UnixRuntimeClient(routerSocket);
+
+    const victim = await client.createSession({
+      idempotencyKey: "m914-victim-create",
+      shell: "zsh",
+      workspaceRoot: workspace,
+    });
+    expect(victim.ownerId).toBe("owner-starved-a");
+    const sleeping = await client.startExecute({
+      actor: actor("starved-victim"),
+      command: "sleep 30",
+      idempotencyKey: "m914-victim-sleep",
+      sessionGeneration: victim.generation,
+      sessionId: victim.id,
+    });
+    await waitForExecutionStatus(client, sleeping.execution.id, "RUNNING");
+    const shell = await pool.query<{ shell_pid: number }>(
+      `SELECT shell_pid FROM session_generations
+        WHERE session_id = $1 AND generation = $2`,
+      [victim.id, victim.generation],
+    );
+    const shellPid = shell.rows[0]?.shell_pid;
+    if (shellPid === undefined) throw new Error("Starved owner Shell PID is missing");
+
+    expect(ownerA.process.kill("SIGSTOP")).toBe(true);
+    await waitForOwnerExpiry("owner-starved-a", 5_000);
+    const expired = await pool.query<{
+      registry_epoch: string;
+      status: string;
+      version: string;
+    }>(
+      `SELECT registry_epoch::text, status, version::text
+         FROM runtime_workers WHERE owner_id = 'owner-starved-a'`,
+    );
+    expect(expired.rows[0]).toMatchObject({ registry_epoch: "1", status: "ACTIVE" });
+
+    const healthy = await client.createSession({
+      idempotencyKey: "m914-healthy-create",
+      shell: "zsh",
+      workspaceRoot: workspace,
+    });
+    expect(healthy.ownerId).toBe("owner-starved-b");
+    const healthyExecution = await client.startExecute({
+      actor: actor("starved-healthy"),
+      command: "printf m914-starved-healthy",
+      idempotencyKey: "m914-healthy-execute",
+      sessionGeneration: healthy.generation,
+      sessionId: healthy.id,
+    });
+    expect((await client.waitExecution(healthyExecution.execution.id)).output).toContain(
+      "m914-starved-healthy",
+    );
+
+    expect(ownerA.process.kill("SIGCONT")).toBe(true);
+    await waitForOccurrence(ownerA, "Runtime PostgreSQL connecting", 2, 10_000);
+    await waitUntilProcessGone(shellPid);
+    await waitForOccurrence(ownerA, "Runtime PostgreSQL ready", 2, 15_000);
+    const broken = await waitForSessionStatus(client, victim.id, "BROKEN", 10_000);
+    expect(broken).toMatchObject({ generation: victim.generation, id: victim.id });
+    const recovered = await pool.query<{
+      instance_id: string;
+      lease_released_at: Date | null;
+      registry_epoch: string;
+      session_status: string;
+      status: string;
+    }>(
+      `SELECT worker.instance_id, worker.registry_epoch::text, worker.status,
+              session.status AS session_status, lease.released_at AS lease_released_at
+         FROM runtime_workers AS worker
+         JOIN sessions AS session ON session.owner_id = worker.owner_id
+         JOIN session_leases AS lease
+           ON lease.session_id = session.id
+          AND lease.session_generation = session.current_generation
+        WHERE worker.owner_id = 'owner-starved-a' AND session.id = $1`,
+      [victim.id],
+    );
+    expect(recovered.rows[0]).toMatchObject({
+      instance_id: "instance-starved-a",
+      registry_epoch: "1",
+      session_status: "BROKEN",
+      status: "ACTIVE",
+    });
+    expect(recovered.rows[0]?.lease_released_at).not.toBeNull();
+
+    expect(ownerA.process.exitCode).toBeNull();
+    const recoveredClient = new UnixRuntimeClient(join(root, "a.sock"));
+    const replacementSession = await recoveredClient.createSession({
+      idempotencyKey: "m914-recovered-create",
+      shell: "zsh",
+      workspaceRoot: workspace,
+    });
+    expect(replacementSession).toMatchObject({ generation: 1, ownerId: "owner-starved-a" });
+    expect(replacementSession.id).not.toBe(victim.id);
+    const replacementExecution = await recoveredClient.startExecute({
+      actor: actor("starved-recovered"),
+      command: "printf m914-starved-recovered",
+      idempotencyKey: "m914-recovered-execute",
+      sessionGeneration: replacementSession.generation,
+      sessionId: replacementSession.id,
+    });
+    expect(
+      (await recoveredClient.waitExecution(replacementExecution.execution.id)).output,
+    ).toContain("m914-starved-recovered");
+  }, 120_000);
+
   async function startRuntimeChild(
     root: string,
     ownerId: string,

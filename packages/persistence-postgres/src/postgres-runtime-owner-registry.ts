@@ -187,6 +187,7 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
               stopped_at = now(), version = version + 1
         WHERE owner_id = $1 AND instance_id = $2 AND registry_epoch = $3
           AND status IN ('ACTIVE', 'DRAINING')
+          AND lease_expires_at > now()
       RETURNING ${OWNER_RETURNING}`,
       [identity.ownerId, identity.instanceId, identity.epoch],
     );
@@ -369,6 +370,7 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
               version = version + 1
         WHERE owner_id = $1 AND instance_id = $2 AND registry_epoch = $3
           AND status IN ('ACTIVE', 'DRAINING')
+          AND lease_expires_at > now()
       RETURNING ${OWNER_RETURNING}`,
       [identity.ownerId, identity.instanceId, identity.epoch, duration, operation],
     );
@@ -381,12 +383,13 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
     const current = await this.#currentOwner(identity.ownerId);
     throw new RuntimeError(
       "OWNER_LEASE_LOST",
-      `Runtime owner cannot ${operation} after its registry identity changed`,
+      `Runtime owner cannot ${operation} after its registry identity changed or expired`,
       {
         attemptedEpoch: identity.epoch,
         attemptedInstanceId: identity.instanceId,
         currentEpoch: current?.epoch,
         currentInstanceId: current?.instanceId,
+        currentLeaseExpiresAt: current?.leaseExpiresAt,
         currentStatus: current?.status,
         ownerId: identity.ownerId,
       },

@@ -41,6 +41,7 @@ const requiredReports = [
   { level: "L2", path: "docs/verification/M9/2026-08-30-session-creation-retention.md" },
   { level: "L2", path: "docs/verification/M9/2026-08-30-runtime-drain-settlement.md" },
   { level: "L2", path: "docs/verification/M9/2026-08-30-repeated-rolling-drain.md" },
+  { level: "L2", path: "docs/verification/M9/2026-08-30-cpu-starved-owner.md" },
 ];
 
 for (const report of requiredReports) {

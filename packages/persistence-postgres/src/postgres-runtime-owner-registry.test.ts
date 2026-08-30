@@ -167,6 +167,55 @@ describeDatabase("M9.1 PostgreSQL Runtime owner registry", () => {
     });
   });
 
+  it("rejects expired lifecycle updates before controlled same-instance recovery", async () => {
+    const registry = createRegistry();
+    const first = await registry.registerOwner({
+      endpoint: "/tmp/iterminal-expired-lifecycle.sock",
+      instanceId: "expired-lifecycle-a",
+      leaseMilliseconds: 40,
+      ownerId: "owner-expired-lifecycle",
+    });
+    await delay(120);
+    const before = await pool.query<{ lease_expires_at: Date; status: string; version: string }>(
+      `SELECT lease_expires_at, status, version::text
+         FROM runtime_workers WHERE owner_id = $1`,
+      [first.ownerId],
+    );
+
+    await expect(registry.heartbeatOwner(first, 5_000)).rejects.toMatchObject({
+      code: "OWNER_LEASE_LOST",
+      retryable: false,
+    });
+    await expect(registry.beginOwnerDrain(first, 5_000)).rejects.toMatchObject({
+      code: "OWNER_LEASE_LOST",
+      retryable: false,
+    });
+    await expect(registry.stopOwner(first)).rejects.toMatchObject({
+      code: "OWNER_LEASE_LOST",
+      retryable: false,
+    });
+    const after = await pool.query<{ lease_expires_at: Date; status: string; version: string }>(
+      `SELECT lease_expires_at, status, version::text
+         FROM runtime_workers WHERE owner_id = $1`,
+      [first.ownerId],
+    );
+    expect(after.rows).toEqual(before.rows);
+
+    const recovered = await registry.registerOwner({
+      endpoint: first.endpoint,
+      instanceId: first.instanceId,
+      leaseMilliseconds: 5_000,
+      ownerId: first.ownerId,
+    });
+    expect(recovered).toMatchObject({
+      epoch: first.epoch,
+      instanceId: first.instanceId,
+      status: "ACTIVE",
+      version: first.version + 1,
+    });
+    await registry.stopOwner(recovered);
+  });
+
   it("atomically distributes concurrent placement claims and excludes draining owners", async () => {
     const registry = createRegistry();
     const claimers = [registry, createRegistry(), createRegistry(), createRegistry()];
