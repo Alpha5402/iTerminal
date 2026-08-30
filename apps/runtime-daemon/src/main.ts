@@ -4,9 +4,15 @@ import {
   type RuntimeDaemonDrainState,
   type RuntimeDaemonDurabilityState,
 } from "./server.js";
+import { configuredPostgresConnectionTarget } from "@iterminal/persistence-postgres";
 
 const socketPath = process.env.ITERM_RUNTIME_SOCKET ?? defaultRuntimeSocketPath();
-const databaseUrl = process.env.ITERM_DATABASE_URL;
+const databaseUrl = configuredPostgresConnectionTarget({
+  ...(process.env.ITERM_DATABASE_URL === undefined ? {} : { url: process.env.ITERM_DATABASE_URL }),
+  ...(process.env.ITERM_DATABASE_URLS === undefined
+    ? {}
+    : { urls: process.env.ITERM_DATABASE_URLS }),
+});
 const ownerId = process.env.ITERM_RUNTIME_OWNER_ID;
 const ownerInstanceId = process.env.ITERM_RUNTIME_OWNER_INSTANCE_ID;
 const capacityWeight = optionalPositiveInteger("ITERM_RUNTIME_CAPACITY_WEIGHT");
@@ -103,6 +109,8 @@ function reportDurabilityState(state: RuntimeDaemonDurabilityState): void {
   if (state.phase === "DISABLED") return;
   process.stderr.write(
     `iTerminal Runtime PostgreSQL ${state.phase.toLowerCase()} attempt=${state.attempt.toString()}${
+      state.endpointIndex === undefined ? "" : ` endpoint_index=${state.endpointIndex.toString()}`
+    }${
       state.retryInMilliseconds === undefined
         ? ""
         : ` retry_ms=${state.retryInMilliseconds.toString()}`

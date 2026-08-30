@@ -1,6 +1,7 @@
 export * from "./action-rate-limit.js";
 export * from "./postgres-observation-repository.js";
 export * from "./postgres-messaging-repository.js";
+export * from "./postgres-endpoints.js";
 export * from "./postgres-runtime-durability.js";
 export * from "./postgres-runtime-owner-registry.js";
 export * from "./postgres-runtime-repository.js";

@@ -31,7 +31,9 @@ const execFileAsync = promisify(execFile);
 
 describeQuorum("M8.9 RabbitMQ quorum leader failover", () => {
   const pool = new Pool({ connectionString: databaseUrl });
-  const messaging = new PostgresMessagingRepository(databaseUrl ?? "");
+  const messaging = new PostgresMessagingRepository(
+    databaseUrl ?? "postgresql://localhost/iterminal_test",
+  );
 
   beforeAll(async () => {
     const database = await pool.query<{ current_database: string }>("SELECT current_database()");

@@ -1,8 +1,19 @@
 import type { RuntimeRouterDatabaseState } from "./postgres-recovery-supervisor.js";
 import { defaultRuntimeRouterSocketPath, startRuntimeRouter } from "./server.js";
+import { configuredPostgresConnectionTarget } from "@iterminal/persistence-postgres";
+
+const databaseUrl = configuredPostgresConnectionTarget({
+  ...(process.env.ITERM_DATABASE_URL === undefined ? {} : { url: process.env.ITERM_DATABASE_URL }),
+  ...(process.env.ITERM_DATABASE_URLS === undefined
+    ? {}
+    : { urls: process.env.ITERM_DATABASE_URLS }),
+});
+if (databaseUrl === undefined) {
+  throw new Error("ITERM_DATABASE_URL or ITERM_DATABASE_URLS is required");
+}
 
 const router = await startRuntimeRouter({
-  databaseUrl: requiredEnvironment("ITERM_DATABASE_URL"),
+  databaseUrl,
   superviseDatabase: true,
   onDatabaseState: reportDatabaseState,
   socketPath: process.env.ITERM_ROUTER_SOCKET ?? defaultRuntimeRouterSocketPath(),
@@ -51,12 +62,14 @@ process.on("SIGTERM", () => {
 
 function reportDatabaseState(state: RuntimeRouterDatabaseState): void {
   if (state.phase === "READY") {
-    process.stderr.write("iTerminal Runtime Router PostgreSQL ready\n");
+    process.stderr.write(
+      `iTerminal Runtime Router PostgreSQL ready${state.endpointIndex === undefined ? "" : ` endpoint_index=${state.endpointIndex.toString()}`}\n`,
+    );
     return;
   }
   if (state.phase === "UNAVAILABLE") {
     process.stderr.write(
-      `iTerminal Runtime Router PostgreSQL unavailable; retrying in ${state.retryInMilliseconds?.toString() ?? "unknown"} ms\n`,
+      `iTerminal Runtime Router PostgreSQL unavailable${state.endpointIndex === undefined ? "" : ` endpoint_index=${state.endpointIndex.toString()}`}; retrying in ${state.retryInMilliseconds?.toString() ?? "unknown"} ms\n`,
     );
   }
 }

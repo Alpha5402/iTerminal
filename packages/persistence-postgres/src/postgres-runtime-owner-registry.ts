@@ -8,10 +8,14 @@ import type {
   SessionCreationClaim,
 } from "@iterminal/application";
 import { RuntimeError } from "@iterminal/domain";
-import { Pool, type PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
 
 import { migrateDatabase } from "./migrate.js";
-import { guardPostgresPool } from "./postgres-pool.js";
+import {
+  createPostgresEndpointPool,
+  type PostgresConnectionTarget,
+  type PostgresEndpointPool,
+} from "./postgres-endpoints.js";
 import {
   assertSessionCreationCapacity,
   lockSessionPlacement,
@@ -68,21 +72,23 @@ export interface PostgresRuntimeOwnerRegistryOptions {
 
 export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
   readonly #pool: Pool;
+  readonly #endpoints: PostgresEndpointPool;
 
-  public constructor(connectionString: string, options: PostgresRuntimeOwnerRegistryOptions = {}) {
+  public constructor(
+    connectionString: PostgresConnectionTarget,
+    options: PostgresRuntimeOwnerRegistryOptions = {},
+  ) {
     const statementTimeoutMilliseconds = positiveInteger(
       options.statementTimeoutMilliseconds ?? 30_000,
       "statementTimeoutMilliseconds",
     );
-    this.#pool = guardPostgresPool(
-      new Pool({
-        connectionString,
-        connectionTimeoutMillis: 5_000,
-        max: 5,
-        query_timeout: statementTimeoutMilliseconds,
-        statement_timeout: statementTimeoutMilliseconds,
-      }),
-    );
+    this.#endpoints = createPostgresEndpointPool(connectionString, {
+      connectionTimeoutMillis: 5_000,
+      max: 5,
+      query_timeout: statementTimeoutMilliseconds,
+      statement_timeout: statementTimeoutMilliseconds,
+    });
+    this.#pool = this.#endpoints.pool;
   }
 
   public async migrate(): Promise<void> {
@@ -91,6 +97,10 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
 
   public async healthCheck(): Promise<void> {
     await this.#pool.query("SELECT 1");
+  }
+
+  public databaseEndpointIndex(): number {
+    return this.#endpoints.endpointIndex();
   }
 
   public async close(): Promise<void> {

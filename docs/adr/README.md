@@ -47,6 +47,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0041](./0041-repeated-rolling-owner-drain.md)                    | Preserve creation progress across repeated owner drains    | Accepted for M9.13       |
 | [0042](./0042-expired-owner-heartbeat-recovery.md)                | Reject expired heartbeat before full Runtime recovery      | Accepted for M9.14       |
 | [0043](./0043-capacity-weighted-runtime-placement.md)             | Weight Runtime placement by declared relative capacity     | Accepted for M9.15       |
+| [0044](./0044-postgres-quorum-primary-failover.md)                | Follow an externally promoted PostgreSQL primary           | Accepted for M9.16       |
 
 Statuses:
 

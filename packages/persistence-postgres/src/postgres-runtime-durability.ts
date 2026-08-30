@@ -28,10 +28,14 @@ import type {
   ShellCheckpoint,
 } from "@iterminal/domain";
 import { RuntimeError } from "@iterminal/domain";
-import { Pool, type PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
 
 import { PostgresObservationRepository } from "./postgres-observation-repository.js";
-import { guardPostgresPool } from "./postgres-pool.js";
+import {
+  createPostgresEndpointPool,
+  type PostgresConnectionTarget,
+  type PostgresEndpointPool,
+} from "./postgres-endpoints.js";
 import {
   assertSessionCreationCapacity,
   prepareSessionCreationAdmission,
@@ -71,25 +75,27 @@ interface SessionCreationIntentRow {
 
 export class PostgresRuntimeDurability implements RuntimeDurability {
   readonly #pool: Pool;
+  readonly #endpoints: PostgresEndpointPool;
   readonly #actionRateLimits: ActionRateLimitPolicy;
   readonly #observation: PostgresObservationRepository;
   readonly #admission: PostgresRuntimeRepository;
 
-  public constructor(connectionString: string, options: PostgresRuntimeDurabilityOptions = {}) {
+  public constructor(
+    connectionString: PostgresConnectionTarget,
+    options: PostgresRuntimeDurabilityOptions = {},
+  ) {
     this.#actionRateLimits = actionRateLimitPolicy(options);
     const statementTimeoutMilliseconds = positiveInteger(
       options.statementTimeoutMilliseconds ?? 30_000,
       "statementTimeoutMilliseconds",
     );
-    this.#pool = guardPostgresPool(
-      new Pool({
-        connectionString,
-        connectionTimeoutMillis: 5_000,
-        max: 20,
-        query_timeout: statementTimeoutMilliseconds,
-        statement_timeout: statementTimeoutMilliseconds,
-      }),
-    );
+    this.#endpoints = createPostgresEndpointPool(connectionString, {
+      connectionTimeoutMillis: 5_000,
+      max: 20,
+      query_timeout: statementTimeoutMilliseconds,
+      statement_timeout: statementTimeoutMilliseconds,
+    });
+    this.#pool = this.#endpoints.pool;
     this.#observation = new PostgresObservationRepository(connectionString, {
       requireSessionFence: true,
     });
@@ -104,7 +110,15 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
   }
 
   public async healthCheck(): Promise<void> {
-    await this.#pool.query("SELECT 1");
+    await Promise.all([
+      this.#pool.query("SELECT 1"),
+      this.#observation.healthCheck(),
+      this.#admission.healthCheck(),
+    ]);
+  }
+
+  public databaseEndpointIndex(): number {
+    return this.#endpoints.endpointIndex();
   }
 
   public async close(): Promise<void> {

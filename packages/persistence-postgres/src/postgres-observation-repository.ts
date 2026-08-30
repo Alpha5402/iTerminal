@@ -3,9 +3,9 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Actor } from "@iterminal/domain";
 import type { SessionFence } from "@iterminal/application";
 import { RuntimeError } from "@iterminal/domain";
-import { Pool, type PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
 
-import { guardPostgresPool } from "./postgres-pool.js";
+import { createPostgresEndpointPool, type PostgresConnectionTarget } from "./postgres-endpoints.js";
 import { assertSessionFence, throwSessionLeaseLost } from "./session-fencing.js";
 
 const MAX_EVENT_LIMIT = 500;
@@ -95,21 +95,25 @@ export class PostgresObservationRepository {
   readonly #pool: Pool;
   readonly #requireSessionFence: boolean;
 
-  public constructor(connectionString: string, options: PostgresObservationRepositoryOptions = {}) {
+  public constructor(
+    connectionString: PostgresConnectionTarget,
+    options: PostgresObservationRepositoryOptions = {},
+  ) {
     this.#requireSessionFence = options.requireSessionFence ?? false;
-    this.#pool = guardPostgresPool(
-      new Pool({
-        connectionString,
-        connectionTimeoutMillis: 5_000,
-        max: 10,
-        query_timeout: 30_000,
-        statement_timeout: 30_000,
-      }),
-    );
+    this.#pool = createPostgresEndpointPool(connectionString, {
+      connectionTimeoutMillis: 5_000,
+      max: 10,
+      query_timeout: 30_000,
+      statement_timeout: 30_000,
+    }).pool;
   }
 
   public async close(): Promise<void> {
     await this.#pool.end();
+  }
+
+  public async healthCheck(): Promise<void> {
+    await this.#pool.query("SELECT 1");
   }
 
   public async getEvent(eventId: string): Promise<EventObservation | undefined> {

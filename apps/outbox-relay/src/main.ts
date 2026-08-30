@@ -1,9 +1,20 @@
-import type { PostgresConnectionState } from "@iterminal/persistence-postgres";
+import {
+  configuredPostgresConnectionTarget,
+  type PostgresConnectionState,
+} from "@iterminal/persistence-postgres";
 import type { RabbitMqConnectionState } from "@iterminal/queue-rabbitmq";
 
 import { startOutboxRelay } from "./server.js";
 
-const databaseUrl = requiredEnvironment("ITERM_DATABASE_URL");
+const databaseUrl = configuredPostgresConnectionTarget({
+  ...(process.env.ITERM_DATABASE_URL === undefined ? {} : { url: process.env.ITERM_DATABASE_URL }),
+  ...(process.env.ITERM_DATABASE_URLS === undefined
+    ? {}
+    : { urls: process.env.ITERM_DATABASE_URLS }),
+});
+if (databaseUrl === undefined) {
+  throw new Error("ITERM_DATABASE_URL or ITERM_DATABASE_URLS is required");
+}
 const rabbitMqUrl = rabbitMqEndpoints();
 const relay = await startOutboxRelay({
   databaseUrl,
@@ -121,6 +132,8 @@ function reportRabbitMqState(state: RabbitMqConnectionState): void {
 function reportPostgresState(state: PostgresConnectionState): void {
   process.stderr.write(
     `iTerminal Outbox relay PostgreSQL ${state.state.toLowerCase()} attempt=${state.attempt.toString()}${
+      state.endpointIndex === undefined ? "" : ` endpoint_index=${state.endpointIndex.toString()}`
+    }${
       state.retryInMilliseconds === undefined
         ? ""
         : ` retry_ms=${state.retryInMilliseconds.toString()}`

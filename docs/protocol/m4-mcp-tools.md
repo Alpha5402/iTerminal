@@ -6,8 +6,8 @@ iTerminal uses the official Model Context Protocol TypeScript SDK v2 and `serveS
 
 The daemon has two explicit storage modes:
 
-- Without `ITERM_DATABASE_URL`, it is a development-only in-memory live Runtime.
-- With `ITERM_DATABASE_URL`, Execute/Input/Control/Resize admission, interaction policy/Guard state, Shell Checkpoints, Session fork lineage/idempotency, and lifecycle facts are committed to PostgreSQL, PTY output enters a bounded per-Session ingest loop, and `events_query` reads the durable Event stream.
+- Without `ITERM_DATABASE_URL` or `ITERM_DATABASE_URLS`, it is a development-only in-memory live Runtime.
+- With exactly one of those settings, Execute/Input/Control/Resize admission, interaction policy/Guard state, Shell Checkpoints, Session fork lineage/idempotency, and lifecycle facts are committed to PostgreSQL, PTY output enters a bounded per-Session ingest loop, and `events_query` reads the durable Event stream.
 
 In both modes the PTY remains process-local live truth. Restart recovery marks the previous stable owner generation `BROKEN` and ambiguous work `UNKNOWN`; a PostgreSQL-backed daemon may expose a bounded same-owner `BROKEN` rebuild projection, but it has no Executor, screen, or fake READY state.
 
@@ -31,6 +31,8 @@ M9.7 makes two Router crash boundaries explicit. A placement claim committed bef
 
 M9.8 gives root `session.create` its own global idempotency key and durable placement intent. M9.9 keeps a database-partitioned Router fail closed without cached routing. M9.10 lets the production Router bind its local socket in `CONNECTING`, retry migration in the background, and expose route-phase `RUNTIME_UNAVAILABLE` until PostgreSQL is READY. A raw route-query failure returns the gate to `UNAVAILABLE`; healthy Routers and owners remain independent. M9.11 bounds caller-controlled root-creation keys with one PostgreSQL policy shared by every Router and trusted-local Runtime fallback. Active Sessions and work still owned by an exact live incarnation remain pinned; only retained terminal/stale work is cleaned. M9.12 makes graceful drain settle placement committed before `DRAINING`: the Runtime keeps RPC available while exact-owner unfinished root-create intents remain, then gracefully drains accepted responses before closing Sessions and persisting `STOPPED`. One deadline bounds both phases. Timeout does not move the intent to another owner or claim successful delivery. M9.13 repeats this lifecycle twice across three stable owners under concurrent root creation: each replacement uses a fresh boot instance and advances its registry epoch, while every round retains healthy-owner Shell progress and one durable Session binding per key. Sessions on a drained Runtime close; this remains rolling control-plane progress, not live PTY migration. M9.14 forbids ordinary heartbeat, drain, or stop from extending an owner row after database-time expiry. A resumed process drops local PTYs and returns through full register/reconcile recovery; if no new boot instance won, it may retain its registry epoch but old Sessions remain `BROKEN` and only a distinct Session gets a new PTY. M9.15 persists a bounded relative capacity weight per stable owner and applies it only to new root placement. Historical attempt debt and fencing identities remain unchanged across drain/replacement.
 
+M9.16 accepts an ordered PostgreSQL URL list but does not implement database election. A new pool connection is usable only when PostgreSQL reports that recovery has ended and transactions are read-write. An endpoint/timeout failure retires that exact connection and advances only the next supervisor attempt; the failed SQL or transaction is never replayed automatically. `endpoint_index` is diagnostic and contains no URL or credential. The external database control plane must fence the former primary before promotion.
+
 | Environment variable                  | Default                         |
 | ------------------------------------- | ------------------------------- |
 | `ITERM_RUNTIME_OWNER_ID`              | derived from the Runtime socket |
@@ -43,11 +45,12 @@ M9.8 gives root `session.create` its own global idempotency key and durable plac
 | `ITERM_DATABASE_RECONNECT_INITIAL_MS` | `250`                           |
 | `ITERM_DATABASE_RECONNECT_MAX_MS`     | `30000`                         |
 | `ITERM_DATABASE_STATEMENT_TIMEOUT_MS` | `30000`                         |
+| `ITERM_DATABASE_URLS`                 | unset; ordered URL list         |
 | `ITERM_ACTOR_ACTION_RATE_LIMIT`       | `120`                           |
 | `ITERM_SESSION_ACTION_RATE_LIMIT`     | `240`                           |
 | `ITERM_ACTION_RATE_LIMIT_WINDOW_MS`   | `1000`                          |
 
-Capacity weight is an integer from 1 through 1000 and expresses only the owner's relative share of new root Sessions. The owner and Session leases must each exceed two database health-check intervals. Session expiry is capped at the current owner lease expiry. The drain timeout is one shared budget for pending root-create settlement and accepted RPC response drain; expiry proceeds to Session closure without reassigning exact-owner work. The production Runtime Router uses the health/reconnect/statement-timeout values for degraded startup and recovery. These settings are valid only with `ITERM_DATABASE_URL`.
+Capacity weight is an integer from 1 through 1000 and expresses only the owner's relative share of new root Sessions. The owner and Session leases must each exceed two database health-check intervals. Session expiry is capped at the current owner lease expiry. The drain timeout is one shared budget for pending root-create settlement and accepted RPC response drain; expiry proceeds to Session closure without reassigning exact-owner work. The production Runtime Router uses the health/reconnect/statement-timeout values for degraded startup and recovery. These settings are valid only with exactly one of `ITERM_DATABASE_URL` or `ITERM_DATABASE_URLS`; the latter is comma-separated and ordered. Read-only standbys are rejected until an external control plane promotes one.
 
 ## Actor configuration
 

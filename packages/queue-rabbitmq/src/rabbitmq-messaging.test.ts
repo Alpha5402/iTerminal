@@ -32,8 +32,9 @@ const describeMessaging =
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
 
 describeMessaging("M8.1 reliable RabbitMQ notification", () => {
-  const runtimeRepository = new PostgresRuntimeRepository(databaseUrl ?? "");
-  const messagingRepository = new PostgresMessagingRepository(databaseUrl ?? "");
+  const databaseTarget = databaseUrl ?? "postgresql://localhost/iterminal_test";
+  const runtimeRepository = new PostgresRuntimeRepository(databaseTarget);
+  const messagingRepository = new PostgresMessagingRepository(databaseTarget);
   const pool = new Pool({ connectionString: databaseUrl });
   const publishers: RabbitMqPublisher[] = [];
   const consumers: RabbitMqExecutionReadyConsumer[] = [];

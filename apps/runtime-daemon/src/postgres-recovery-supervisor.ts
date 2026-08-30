@@ -8,6 +8,7 @@ import type { PostgresRuntimeDurability } from "@iterminal/persistence-postgres"
 
 export interface RuntimeDaemonDurabilityState {
   readonly attempt: number;
+  readonly endpointIndex?: number;
   readonly error?: string;
   readonly phase: "CONNECTING" | "DISABLED" | "READY" | "UNAVAILABLE";
   readonly retryInMilliseconds?: number;
@@ -89,13 +90,24 @@ export function startPostgresRecoverySupervisor(options: {
           }
         } catch (error) {
           options.runtime.reportDurabilityUnavailable(error);
+          options.updateState({
+            attempt: 0,
+            endpointIndex: options.durability.databaseEndpointIndex(),
+            error: errorMessage(error),
+            phase: "UNAVAILABLE",
+          });
         }
         continue;
       }
       attempt += 1;
-      options.updateState({ attempt, phase: "CONNECTING" });
+      options.updateState({
+        attempt,
+        endpointIndex: options.durability.databaseEndpointIndex(),
+        phase: "CONNECTING",
+      });
       try {
         await options.durability.migrate();
+        await options.durability.healthCheck();
         if (options.ownership !== undefined) {
           ownerRegistration = await options.ownership.registry.registerOwner({
             capacityWeight: options.ownership.capacityWeight,
@@ -113,7 +125,11 @@ export function startPostgresRecoverySupervisor(options: {
         );
         recoveredOnce = true;
         attempt = 0;
-        options.updateState({ attempt: 0, phase: "READY" });
+        options.updateState({
+          attempt: 0,
+          endpointIndex: options.durability.databaseEndpointIndex(),
+          phase: "READY",
+        });
       } catch (error) {
         const retryInMilliseconds = reconnectDelay(
           attempt,
@@ -123,6 +139,7 @@ export function startPostgresRecoverySupervisor(options: {
         );
         options.updateState({
           attempt,
+          endpointIndex: options.durability.databaseEndpointIndex(),
           error: errorMessage(error),
           phase: "UNAVAILABLE",
           retryInMilliseconds,

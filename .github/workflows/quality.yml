@@ -84,5 +84,8 @@ jobs:
           ITERM_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
       - run: pnpm test:m8:network
       - run: bash scripts/run-m8-quorum-test.sh
+      - run: bash scripts/run-m9-postgres-quorum-test.sh
       - if: always()
         run: docker compose -f infra/compose/m8-rabbitmq-cluster.yml down -v
+      - if: always()
+        run: docker compose -f infra/compose/m9-postgres-quorum.yml down -v

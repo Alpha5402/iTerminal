@@ -23,7 +23,9 @@ const repositoryRoot = resolve(import.meta.dirname, "../../..");
 
 describeDispatch("M8.2 owner-local Execution dispatch", () => {
   const pool = new Pool({ connectionString: databaseUrl });
-  const messaging = new PostgresMessagingRepository(databaseUrl ?? "");
+  const messaging = new PostgresMessagingRepository(
+    databaseUrl ?? "postgresql://localhost/iterminal_test",
+  );
   const daemons: RuntimeDaemonHandle[] = [];
   const workers: ExecutionWorkerHandle[] = [];
   const publishers: RabbitMqPublisher[] = [];

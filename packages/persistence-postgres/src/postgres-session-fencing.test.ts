@@ -17,8 +17,9 @@ const databaseUrl = process.env.ITERM_DATABASE_URL;
 const describeDatabase = databaseUrl === undefined ? describe.skip : describe;
 
 describeDatabase("M9.3 PostgreSQL Session fencing", () => {
-  const durability = new PostgresRuntimeDurability(databaseUrl ?? "");
-  const registry = new PostgresRuntimeOwnerRegistry(databaseUrl ?? "");
+  const databaseTarget = databaseUrl ?? "postgresql://localhost/iterminal_test";
+  const durability = new PostgresRuntimeDurability(databaseTarget);
+  const registry = new PostgresRuntimeOwnerRegistry(databaseTarget);
   const pool = new Pool({ connectionString: databaseUrl });
   let owner: RuntimeOwnerRecord;
 

@@ -4,6 +4,7 @@ import { OutboxRelay, type OutboxRelayOptions as RelayOptions } from "@iterminal
 import {
   isPostgresAvailabilityError,
   SupervisedPostgresMessagingRepository,
+  type PostgresConnectionTarget,
   type PostgresConnectionState,
 } from "@iterminal/persistence-postgres";
 import {
@@ -28,7 +29,7 @@ export interface StartOutboxRelayOptions extends RelayOptions {
   readonly databaseReconnectJitterRatio?: number;
   readonly databaseReconnectMaxMilliseconds?: number;
   readonly databaseOperationTimeoutMilliseconds?: number;
-  readonly databaseUrl: string;
+  readonly databaseUrl: PostgresConnectionTarget;
   readonly onPostgresConnectionState?: (state: PostgresConnectionState) => void;
   readonly onRabbitMqConnectionState?: (state: RabbitMqConnectionState) => void;
   readonly publisherId?: string;

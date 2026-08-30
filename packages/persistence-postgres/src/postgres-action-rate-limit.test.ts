@@ -13,11 +13,14 @@ const databaseUrl = process.env.ITERM_DATABASE_URL;
 const describeDatabase = databaseUrl === undefined ? describe.skip : describe;
 
 describeDatabase("M9.4 durable Action rate limits", () => {
-  const repository = new PostgresRuntimeRepository(databaseUrl ?? "", {
-    actionRateLimitWindowMilliseconds: 100,
-    actorActionRateLimit: 1,
-    sessionActionRateLimit: 10,
-  });
+  const repository = new PostgresRuntimeRepository(
+    databaseUrl ?? "postgresql://localhost/iterminal_test",
+    {
+      actionRateLimitWindowMilliseconds: 100,
+      actorActionRateLimit: 1,
+      sessionActionRateLimit: 10,
+    },
+  );
   const pool = new Pool({ connectionString: databaseUrl });
 
   beforeAll(async () => {

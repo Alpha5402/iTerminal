@@ -41,7 +41,10 @@ import type {
   TerminalStateObservation,
 } from "@iterminal/domain";
 import { RuntimeError } from "@iterminal/domain";
-import { PostgresRuntimeOwnerRegistry } from "@iterminal/persistence-postgres";
+import {
+  PostgresRuntimeOwnerRegistry,
+  type PostgresConnectionTarget,
+} from "@iterminal/persistence-postgres";
 import {
   startRuntimeRpcServer,
   UnixRuntimeClient,
@@ -429,7 +432,7 @@ export async function startRuntimeRouter(options: {
   readonly databaseReconnectInitialMilliseconds?: number;
   readonly databaseReconnectMaxMilliseconds?: number;
   readonly databaseStatementTimeoutMilliseconds?: number;
-  readonly databaseUrl: string;
+  readonly databaseUrl: PostgresConnectionTarget;
   readonly hooks?: RuntimeRouterHooks;
   readonly onDatabaseState?: (state: RuntimeRouterDatabaseState) => void;
   readonly socketPath: string;

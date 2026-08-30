@@ -10,8 +10,9 @@ const databaseUrl = process.env.ITERM_DATABASE_URL;
 const describeDatabase = databaseUrl === undefined ? describe.skip : describe;
 
 describeDatabase("PostgresObservationRepository", () => {
-  const runtime = new PostgresRuntimeRepository(databaseUrl ?? "");
-  const observation = new PostgresObservationRepository(databaseUrl ?? "");
+  const databaseTarget = databaseUrl ?? "postgresql://localhost/iterminal_test";
+  const runtime = new PostgresRuntimeRepository(databaseTarget);
+  const observation = new PostgresObservationRepository(databaseTarget);
   const pool = new Pool({ connectionString: databaseUrl });
 
   beforeAll(async () => {

@@ -10,10 +10,14 @@ import type {
   OutboxRepository,
 } from "@iterminal/messaging";
 import { RuntimeError } from "@iterminal/domain";
-import { Pool, type PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
 
 import { migrateDatabase } from "./migrate.js";
-import { guardPostgresPool } from "./postgres-pool.js";
+import {
+  createPostgresEndpointPool,
+  type PostgresConnectionTarget,
+  type PostgresEndpointPool,
+} from "./postgres-endpoints.js";
 
 export interface PostgresMessagingRepositoryOptions {
   readonly connectionTimeoutMilliseconds?: number;
@@ -24,8 +28,12 @@ export class PostgresMessagingRepository
   implements OutboxRepository, ConsumerInbox, ExecutionReadyInspector
 {
   readonly #pool: Pool;
+  readonly #endpoints: PostgresEndpointPool;
 
-  public constructor(connectionString: string, options: PostgresMessagingRepositoryOptions = {}) {
+  public constructor(
+    connectionString: PostgresConnectionTarget,
+    options: PostgresMessagingRepositoryOptions = {},
+  ) {
     const connectionTimeoutMilliseconds = positiveInteger(
       options.connectionTimeoutMilliseconds ?? 5_000,
       "connectionTimeoutMilliseconds",
@@ -34,15 +42,13 @@ export class PostgresMessagingRepository
       options.operationTimeoutMilliseconds ?? 30_000,
       "operationTimeoutMilliseconds",
     );
-    this.#pool = guardPostgresPool(
-      new Pool({
-        connectionString,
-        connectionTimeoutMillis: connectionTimeoutMilliseconds,
-        max: 20,
-        query_timeout: operationTimeoutMilliseconds,
-        statement_timeout: operationTimeoutMilliseconds,
-      }),
-    );
+    this.#endpoints = createPostgresEndpointPool(connectionString, {
+      connectionTimeoutMillis: connectionTimeoutMilliseconds,
+      max: 20,
+      query_timeout: operationTimeoutMilliseconds,
+      statement_timeout: operationTimeoutMilliseconds,
+    });
+    this.#pool = this.#endpoints.pool;
   }
 
   public async migrate(): Promise<void> {
@@ -51,6 +57,10 @@ export class PostgresMessagingRepository
 
   public async healthCheck(): Promise<void> {
     await this.#pool.query("SELECT 1");
+  }
+
+  public databaseEndpointIndex(): number {
+    return this.#endpoints.endpointIndex();
   }
 
   public async close(): Promise<void> {

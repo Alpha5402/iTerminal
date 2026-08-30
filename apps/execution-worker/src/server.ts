@@ -1,6 +1,7 @@
 import { ExecutionReadyProcessor, type ExecutionReadyMessage } from "@iterminal/messaging";
 import {
   SupervisedPostgresMessagingRepository,
+  type PostgresConnectionTarget,
   type PostgresConnectionState,
 } from "@iterminal/persistence-postgres";
 import {
@@ -29,7 +30,7 @@ export interface ExecutionWorkerOptions {
   readonly databaseReconnectJitterRatio?: number;
   readonly databaseReconnectMaxMilliseconds?: number;
   readonly databaseOperationTimeoutMilliseconds?: number;
-  readonly databaseUrl: string;
+  readonly databaseUrl: PostgresConnectionTarget;
   readonly inboxLeaseMilliseconds?: number;
   readonly maxAttempts?: number;
   readonly ownerId?: string;

@@ -31,7 +31,9 @@ const execFileAsync = promisify(execFile);
 
 describeOutage("M8.5 RabbitMQ process reconnect", () => {
   const pool = new Pool({ connectionString: databaseUrl });
-  const messaging = new PostgresMessagingRepository(databaseUrl ?? "");
+  const messaging = new PostgresMessagingRepository(
+    databaseUrl ?? "postgresql://localhost/iterminal_test",
+  );
 
   beforeAll(async () => {
     const database = await pool.query<{ current_database: string }>("SELECT current_database()");

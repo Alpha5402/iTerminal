@@ -3,10 +3,10 @@ import { randomUUID } from "node:crypto";
 import type { SessionFence } from "@iterminal/application";
 import type { Actor, SessionStatus, ShellKind } from "@iterminal/domain";
 import { RuntimeError } from "@iterminal/domain";
-import { Pool, type PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
 
 import { migrateDatabase } from "./migrate.js";
-import { guardPostgresPool } from "./postgres-pool.js";
+import { createPostgresEndpointPool, type PostgresConnectionTarget } from "./postgres-endpoints.js";
 import { assertSessionFence, throwSessionLeaseLost } from "./session-fencing.js";
 import {
   actionRateLimitPolicy,
@@ -98,7 +98,10 @@ export class PostgresRuntimeRepository {
   readonly #maxPendingOutbox: number;
   readonly #requireSessionFence: boolean;
 
-  public constructor(connectionString: string, options: PostgresRuntimeRepositoryOptions = {}) {
+  public constructor(
+    connectionString: PostgresConnectionTarget,
+    options: PostgresRuntimeRepositoryOptions = {},
+  ) {
     this.#actionRateLimits = actionRateLimitPolicy(options);
     this.#beforeAcceptExecuteCommit = options.beforeAcceptExecuteCommit;
     this.#requireSessionFence = options.requireSessionFence ?? false;
@@ -110,15 +113,12 @@ export class PostgresRuntimeRepository {
       options.statementTimeoutMilliseconds ?? DEFAULT_STATEMENT_TIMEOUT_MS,
       "statementTimeoutMilliseconds",
     );
-    this.#pool = guardPostgresPool(
-      new Pool({
-        connectionString,
-        connectionTimeoutMillis: 5_000,
-        max: 20,
-        query_timeout: statementTimeoutMilliseconds,
-        statement_timeout: statementTimeoutMilliseconds,
-      }),
-    );
+    this.#pool = createPostgresEndpointPool(connectionString, {
+      connectionTimeoutMillis: 5_000,
+      max: 20,
+      query_timeout: statementTimeoutMilliseconds,
+      statement_timeout: statementTimeoutMilliseconds,
+    }).pool;
   }
 
   public async migrate(): Promise<void> {
@@ -127,6 +127,10 @@ export class PostgresRuntimeRepository {
 
   public async close(): Promise<void> {
     await this.#pool.end();
+  }
+
+  public async healthCheck(): Promise<void> {
+    await this.#pool.query("SELECT 1");
   }
 
   public async createReadySession(input: CreateDurableSession): Promise<void> {

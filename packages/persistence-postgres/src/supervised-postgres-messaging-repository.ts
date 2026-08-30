@@ -9,9 +9,11 @@ import {
   PostgresMessagingRepository,
   type PostgresMessagingRepositoryOptions,
 } from "./postgres-messaging-repository.js";
+import { isPostgresEndpointFailure, type PostgresConnectionTarget } from "./postgres-endpoints.js";
 
 export interface PostgresConnectionState {
   readonly attempt: number;
+  readonly endpointIndex?: number;
   readonly error?: string;
   readonly retryInMilliseconds?: number;
   readonly state: "CONNECTING" | "CONNECTED" | "DISCONNECTED";
@@ -47,7 +49,10 @@ export class SupervisedPostgresMessagingRepository
   #state: PostgresConnectionState = { attempt: 0, state: "CONNECTING" };
   #wake = deferred<void>();
 
-  private constructor(connectionString: string, options: SupervisedPostgresMessagingOptions) {
+  private constructor(
+    connectionString: PostgresConnectionTarget,
+    options: SupervisedPostgresMessagingOptions,
+  ) {
     this.#options = normalizeReconnectOptions(options);
     this.#repository = new PostgresMessagingRepository(connectionString, {
       ...(options.connectionTimeoutMilliseconds === undefined
@@ -62,7 +67,7 @@ export class SupervisedPostgresMessagingRepository
   }
 
   public static async start(
-    connectionString: string,
+    connectionString: PostgresConnectionTarget,
     options: SupervisedPostgresMessagingOptions = {},
   ): Promise<SupervisedPostgresMessagingRepository> {
     const repository = new SupervisedPostgresMessagingRepository(connectionString, options);
@@ -186,18 +191,31 @@ export class SupervisedPostgresMessagingRepository
       }
 
       attempt += 1;
-      this.#updateState({ attempt, state: "CONNECTING" });
+      this.#updateState({
+        attempt,
+        endpointIndex: this.#repository.databaseEndpointIndex(),
+        state: "CONNECTING",
+      });
       try {
         await this.#repository.migrate();
         await this.#repository.healthCheck();
         attempt = 0;
-        this.#updateState({ attempt: 0, state: "CONNECTED" });
+        this.#updateState({
+          attempt: 0,
+          endpointIndex: this.#repository.databaseEndpointIndex(),
+          state: "CONNECTED",
+        });
         this.#settleFirstAttempt();
       } catch (error) {
         if (!isPostgresAvailabilityError(error)) {
           const failure = asError(error);
           this.#fatalError = failure;
-          this.#updateState({ attempt, error: failure.message, state: "DISCONNECTED" });
+          this.#updateState({
+            attempt,
+            endpointIndex: this.#repository.databaseEndpointIndex(),
+            error: failure.message,
+            state: "DISCONNECTED",
+          });
           this.#settleFirstAttempt(failure);
           for (const waiter of this.#readyWaiters) waiter.reject(failure);
           this.#readyWaiters.clear();
@@ -206,6 +224,7 @@ export class SupervisedPostgresMessagingRepository
         const retryInMilliseconds = reconnectDelay(attempt, this.#options);
         this.#updateState({
           attempt,
+          endpointIndex: this.#repository.databaseEndpointIndex(),
           error: errorMessage(error),
           retryInMilliseconds,
           state: "DISCONNECTED",
@@ -225,6 +244,7 @@ export class SupervisedPostgresMessagingRepository
     if (this.#closed || this.#state.state === "DISCONNECTED") return;
     this.#updateState({
       attempt: 1,
+      endpointIndex: this.#repository.databaseEndpointIndex(),
       error: errorMessage(error),
       retryInMilliseconds: this.#options.initialDelayMilliseconds,
       state: "DISCONNECTED",
@@ -249,6 +269,9 @@ export class SupervisedPostgresMessagingRepository
       "PostgreSQL messaging repository is unavailable",
       {
         databaseState: this.#state.state,
+        ...(this.#state.endpointIndex === undefined
+          ? {}
+          : { endpointIndex: this.#state.endpointIndex }),
         reason: this.#fatalError?.message ?? this.#state.error ?? "connection unavailable",
       },
       true,
@@ -270,6 +293,7 @@ export class SupervisedPostgresMessagingRepository
 
 export function isPostgresAvailabilityError(error: unknown): boolean {
   if (error instanceof RuntimeError) return error.code === "RUNTIME_UNAVAILABLE";
+  if (isPostgresEndpointFailure(error)) return true;
   if (typeof error !== "object" || error === null) return false;
   if ("code" in error) {
     const code = String(error.code);
@@ -281,6 +305,8 @@ export function isPostgresAvailabilityError(error: unknown): boolean {
 }
 
 const POSTGRES_AVAILABILITY_CODES = new Set([
+  "25006",
+  "25007",
   "57P01",
   "57P02",
   "57P03",

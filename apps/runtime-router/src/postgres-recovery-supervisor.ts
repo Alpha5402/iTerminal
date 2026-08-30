@@ -2,6 +2,7 @@ import { RuntimeError } from "@iterminal/domain";
 
 export interface RuntimeRouterDatabaseState {
   readonly attempt: number;
+  readonly endpointIndex?: number;
   readonly phase: "CONNECTING" | "READY" | "UNAVAILABLE";
   readonly retryInMilliseconds?: number;
 }
@@ -19,6 +20,7 @@ export interface RouterPostgresRecoverySupervisor {
 
 export function startRouterPostgresRecoverySupervisor(options: {
   readonly database: {
+    databaseEndpointIndex?(): number;
     healthCheck(): Promise<void>;
     migrate(): Promise<void>;
   };
@@ -54,7 +56,11 @@ export function startRouterPostgresRecoverySupervisor(options: {
     );
   }
   const abortController = new AbortController();
-  let current: RuntimeRouterDatabaseState = { attempt: 0, phase: "CONNECTING" };
+  let current: RuntimeRouterDatabaseState = {
+    attempt: 0,
+    ...endpointState(options.database),
+    phase: "CONNECTING",
+  };
   let closePromise: Promise<void> | undefined;
   const update = (state: RuntimeRouterDatabaseState): void => {
     current = state;
@@ -66,7 +72,9 @@ export function startRouterPostgresRecoverySupervisor(options: {
       throw unavailable(operation, current);
     },
     reportUnavailable: () => {
-      if (current.phase === "READY") update({ attempt: 0, phase: "UNAVAILABLE" });
+      if (current.phase === "READY") {
+        update({ attempt: 0, ...endpointState(options.database), phase: "UNAVAILABLE" });
+      }
     },
   };
   const run = (async (): Promise<void> => {
@@ -78,16 +86,20 @@ export function startRouterPostgresRecoverySupervisor(options: {
         try {
           await options.database.healthCheck();
         } catch {
-          update({ attempt: 0, phase: "UNAVAILABLE" });
+          update({
+            attempt: 0,
+            ...endpointState(options.database),
+            phase: "UNAVAILABLE",
+          });
         }
         continue;
       }
       attempt += 1;
-      update({ attempt, phase: "CONNECTING" });
+      update({ attempt, ...endpointState(options.database), phase: "CONNECTING" });
       try {
         await options.database.migrate();
         attempt = 0;
-        update({ attempt: 0, phase: "READY" });
+        update({ attempt: 0, ...endpointState(options.database), phase: "READY" });
       } catch {
         const retryInMilliseconds = reconnectDelay(
           attempt,
@@ -95,7 +107,12 @@ export function startRouterPostgresRecoverySupervisor(options: {
           maxDelayMilliseconds,
           jitterRatio,
         );
-        update({ attempt, phase: "UNAVAILABLE", retryInMilliseconds });
+        update({
+          attempt,
+          ...endpointState(options.database),
+          phase: "UNAVAILABLE",
+          retryInMilliseconds,
+        });
         await abortableDelay(retryInMilliseconds, abortController.signal);
       }
     }
@@ -126,9 +143,17 @@ function unavailable(operation: string, state: RuntimeRouterDatabaseState): Runt
       ...(state.retryInMilliseconds === undefined
         ? {}
         : { retryInMilliseconds: state.retryInMilliseconds }),
+      ...(state.endpointIndex === undefined ? {} : { endpointIndex: state.endpointIndex }),
     },
     true,
   );
+}
+
+function endpointState(database: { databaseEndpointIndex?(): number }): {
+  readonly endpointIndex?: number;
+} {
+  const endpointIndex = database.databaseEndpointIndex?.();
+  return endpointIndex === undefined ? {} : { endpointIndex };
 }
 
 function positiveInteger(value: number, name: string): number {

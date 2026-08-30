@@ -1,0 +1,72 @@
+name: iterminal-m9-postgres-quorum
+
+x-postgres-common: &postgres-common
+  image: postgres:17-alpine
+  environment:
+    PGDATA: /var/lib/postgresql/data
+    POSTGRES_DB: iterminal_test
+    POSTGRES_HOST_AUTH_METHOD: trust
+    POSTGRES_PASSWORD: iterminal
+    POSTGRES_USER: iterminal
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U iterminal -d iterminal_test"]
+    interval: 2s
+    timeout: 2s
+    retries: 40
+
+services:
+  postgres-primary:
+    <<: *postgres-common
+    hostname: postgres-primary
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=10
+      - -c
+      - hot_standby=on
+      - -c
+      - wal_keep_size=256MB
+    ports:
+      - "127.0.0.1:55441:5432"
+    volumes:
+      - postgres-primary-data:/var/lib/postgresql/data
+      - ../postgres/init-m9-primary.sh:/docker-entrypoint-initdb.d/10-replication-hba.sh:ro
+
+  postgres-standby1:
+    <<: *postgres-common
+    hostname: postgres-standby1
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/opt/iterminal/bootstrap-standby.sh"]
+    environment:
+      ITERM_STANDBY_NAME: standby1
+      PGDATA: /var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:55442:5432"
+    volumes:
+      - postgres-standby1-data:/var/lib/postgresql/data
+      - ../postgres/bootstrap-m9-standby.sh:/opt/iterminal/bootstrap-standby.sh:ro
+
+  postgres-standby2:
+    <<: *postgres-common
+    hostname: postgres-standby2
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/opt/iterminal/bootstrap-standby.sh"]
+    environment:
+      ITERM_STANDBY_NAME: standby2
+      PGDATA: /var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:55443:5432"
+    volumes:
+      - postgres-standby2-data:/var/lib/postgresql/data
+      - ../postgres/bootstrap-m9-standby.sh:/opt/iterminal/bootstrap-standby.sh:ro
+
+volumes:
+  postgres-primary-data:
+  postgres-standby1-data:
+  postgres-standby2-data:

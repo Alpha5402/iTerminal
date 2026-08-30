@@ -11,6 +11,7 @@ import { PtyShellExecutorFactory } from "@iterminal/executor-pty";
 import {
   PostgresRuntimeDurability,
   PostgresRuntimeOwnerRegistry,
+  type PostgresConnectionTarget,
 } from "@iterminal/persistence-postgres";
 import { MemoryRuntimeStore } from "@iterminal/runtime-memory";
 import { XtermScreenProjectionFactory } from "@iterminal/terminal-screen";
@@ -58,7 +59,7 @@ export async function startRuntimeDaemon(options: {
   readonly capacityWeight?: number;
   readonly checkpointEnvironmentKeys?: readonly string[];
   readonly databaseHealthCheckMilliseconds?: number;
-  readonly databaseUrl?: string;
+  readonly databaseUrl?: PostgresConnectionTarget;
   readonly executionDispatch?: "external" | "immediate";
   readonly hooks?: RuntimeServiceOptions["hooks"];
   readonly databaseStatementTimeoutMilliseconds?: number;

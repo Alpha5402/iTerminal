@@ -18,8 +18,9 @@ const human: Actor = {
 };
 
 describeDatabase("PostgreSQL Interaction Guard state", () => {
-  const durability = new PostgresRuntimeDurability(databaseUrl ?? "");
-  const registry = new PostgresRuntimeOwnerRegistry(databaseUrl ?? "");
+  const databaseTarget = databaseUrl ?? "postgresql://localhost/iterminal_test";
+  const durability = new PostgresRuntimeDurability(databaseTarget);
+  const registry = new PostgresRuntimeOwnerRegistry(databaseTarget);
   const pool = new Pool({ connectionString: databaseUrl });
   let owner: RuntimeOwnerRecord;
 
