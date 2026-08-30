@@ -19,6 +19,7 @@ const migrations = [
   { file: "012_session_creation_retention.sql", version: 12 },
   { file: "013_runtime_capacity_weight.sql", version: 13 },
   { file: "014_actor_capabilities.sql", version: 14 },
+  { file: "015_execute_approvals.sql", version: 15 },
 ] as const;
 
 export async function migrateDatabase(pool: Pool): Promise<void> {

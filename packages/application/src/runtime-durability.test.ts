@@ -1,5 +1,8 @@
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
+import type { Approval } from "@iterminal/domain";
 import type {
+  DurableApprovalMutationResult,
+  DurableApprovalRequest,
   DurableExecuteAdmission,
   DurableExecuteAdmissionResult,
   RuntimeDurability,
@@ -294,6 +297,26 @@ class ControlledDurability implements RuntimeDurability {
   public writeAttempts = 0;
   public interactionWriteAttempts = 0;
   #nextFencingToken = 1;
+
+  public requestApproval(
+    fence: SessionFence,
+    input: DurableApprovalRequest,
+  ): Promise<DurableApprovalMutationResult> {
+    void fence;
+    return Promise.resolve({ approval: input.approval, replayed: false });
+  }
+
+  public getApproval(): Promise<Approval> {
+    return Promise.reject(unavailable());
+  }
+
+  public listApprovals(): Promise<readonly Approval[]> {
+    return Promise.resolve([]);
+  }
+
+  public decideApproval(): Promise<DurableApprovalMutationResult> {
+    return Promise.reject(unavailable());
+  }
 
   public createSession(
     session: { readonly generation: number; readonly id: string },

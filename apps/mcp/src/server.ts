@@ -50,6 +50,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
         "PTY_BUSY means another Execute is active: wait for it, send targeted input/control if appropriate, or use another Session. " +
         "BACKPRESSURE means no Action was admitted; wait for durable delivery capacity and retry the identical idempotency key. " +
         "RATE_LIMITED means no Action was admitted; wait for retryAfterMilliseconds and retry the identical idempotency key. " +
+        "APPROVAL_REQUIRED means the exact Agent Execute proposal has no currently APPROVED one-time Approval; use approval_request and wait for a Human decision, then pass approvalId to execute without changing the command, Actor, Session generation, or Action idempotency key. " +
         "OWNER_ROUTE_UNAVAILABLE means the durable target has no usable owner route or a read could not reach its registered endpoint; never infer that the Session itself is missing. " +
         "Before interactive input, inspect interaction_get; INPUT_GUARDED is retryable only after the Guard expires or changes, while POLICY_DENIED requires a Human policy decision. " +
         "Resize is an explicit shared Action: read geometryVersion from screen_get and handle GEOMETRY_CHANGED by re-observing instead of overwriting another Actor's decision. " +
@@ -153,6 +154,96 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
   );
 
   server.registerTool(
+    "approval_request",
+    {
+      annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      description:
+        "Request Human approval for one exact future execute Action. The proposal binds Session generation, Agent identity, command, and actionIdempotencyKey. Reuse requestIdempotencyKey only for the identical proposal. This does not execute the command and does not classify command risk heuristically.",
+      inputSchema: z.strictObject({
+        actionIdempotencyKey: idempotencyKey,
+        command: z
+          .string()
+          .min(1)
+          .max(256 * 1024),
+        generation,
+        reason: z.string().min(1).max(512),
+        requestIdempotencyKey: idempotencyKey,
+        sessionId,
+        ttlMilliseconds: z
+          .number()
+          .int()
+          .min(30_000)
+          .max(30 * 60 * 1_000)
+          .optional(),
+      }),
+      title: "Request exact Execute approval",
+    },
+    async (input) =>
+      call(() =>
+        gateway.requestExecuteApproval({
+          actionIdempotencyKey: input.actionIdempotencyKey,
+          actor,
+          command: input.command,
+          reason: input.reason,
+          requestIdempotencyKey: input.requestIdempotencyKey,
+          sessionGeneration: input.generation,
+          sessionId: input.sessionId,
+          ...(input.ttlMilliseconds === undefined
+            ? {}
+            : { ttlMilliseconds: input.ttlMilliseconds }),
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "approval_get",
+    {
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      description:
+        "Read one Approval requested by this exact Agent. APPROVED may be consumed once by the bound execute proposal; EXPIRED, DENIED, and CONSUMED cannot authorize a different Action.",
+      inputSchema: z.strictObject({
+        approvalId: z.string().min(1).max(256),
+        generation,
+        sessionId,
+      }),
+      title: "Get Execute approval",
+    },
+    async (input) =>
+      call(() =>
+        gateway.getApproval({
+          actor,
+          approvalId: input.approvalId,
+          sessionGeneration: input.generation,
+          sessionId: input.sessionId,
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "approval_list",
+    {
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      description:
+        "List up to 100 newest Approvals requested by this exact Agent in one Session generation. Other Agents' proposals are not disclosed.",
+      inputSchema: z.strictObject({
+        generation,
+        sessionId,
+        status: z.enum(["PENDING", "APPROVED", "DENIED", "EXPIRED", "CONSUMED"]).optional(),
+      }),
+      title: "List Execute approvals",
+    },
+    async (input) =>
+      call(() =>
+        gateway.listApprovals({
+          actor,
+          sessionGeneration: input.generation,
+          sessionId: input.sessionId,
+          ...(input.status === undefined ? {} : { status: input.status }),
+        }),
+      ),
+  );
+
+  server.registerTool(
     "execute",
     {
       annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: true },
@@ -162,6 +253,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
         "On BACKPRESSURE, no Action/reservation exists: wait for Outbox capacity and retry this identical request key. " +
         "On RATE_LIMITED, no Action/reservation exists: wait for retryAfterMilliseconds and retry this identical request key.",
       inputSchema: z.strictObject({
+        approvalId: z.string().min(1).max(256).optional(),
         command: z.string().max(256 * 1024),
         idempotencyKey,
         generation,
@@ -169,10 +261,17 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
       }),
       title: "Execute in shared terminal",
     },
-    async ({ command, generation: requestedGeneration, idempotencyKey: key, sessionId: id }) =>
+    async ({
+      approvalId,
+      command,
+      generation: requestedGeneration,
+      idempotencyKey: key,
+      sessionId: id,
+    }) =>
       call(() =>
         gateway.startExecute({
           actor,
+          ...(approvalId === undefined ? {} : { approvalId }),
           command,
           idempotencyKey: key,
           sessionGeneration: requestedGeneration,

@@ -101,6 +101,32 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     const sessions = await callTool<readonly SessionResult[]>(mcp, "session_list", {});
     expect(sessions).toHaveLength(1);
     const session = required(sessions[0]);
+    const proposal = await callTool<ApprovalResult>(mcp, "approval_request", {
+      actionIdempotencyKey: "m10-browser-approved-action",
+      command: "export ITERM_M10_BROWSER=approved",
+      generation: session.generation,
+      reason: "Browser Human reviews this exact Agent proposal",
+      requestIdempotencyKey: "m10-browser-approval-request",
+      sessionId: session.id,
+    });
+    await waitForPageText(page, ".approval-panel", "export ITERM_M10_BROWSER=approved");
+    await page.getByRole("button", { name: "Approve once" }).click();
+    await waitForPageText(page, ".approval-panel", "APPROVED");
+    const approved = await callTool<ApprovalResult>(mcp, "approval_get", {
+      approvalId: proposal.id,
+      generation: session.generation,
+      sessionId: session.id,
+    });
+    expect(approved.status).toBe("APPROVED");
+    const approvedExecution = await callTool<StartedResult>(mcp, "execute", {
+      approvalId: proposal.id,
+      command: "export ITERM_M10_BROWSER=approved",
+      generation: session.generation,
+      idempotencyKey: "m10-browser-approved-action",
+      sessionId: session.id,
+    });
+    await callTool(mcp, "execution_wait", { executionId: approvedExecution.execution.id });
+    await waitForPageText(page, ".approval-panel", "CONSUMED");
     const python = await callTool<StartedResult>(mcp, "execute", {
       command: "python3 -q",
       generation: session.generation,
@@ -543,6 +569,11 @@ function required<T>(value: T | undefined): T {
 interface SessionResult {
   readonly generation: number;
   readonly id: string;
+}
+
+interface ApprovalResult {
+  readonly id: string;
+  readonly status: string;
 }
 
 interface ScreenResult {

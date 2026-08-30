@@ -56,6 +56,7 @@
     "test:m9:rolling:high": "ITERM_M9_ROLLING_PROFILE=high vitest run --maxWorkers=1 apps/runtime-router/src/high-cardinality-rolling.test.ts",
     "test:m9:rolling:smoke": "ITERM_M9_ROLLING_PROFILE=smoke vitest run --maxWorkers=1 apps/runtime-router/src/high-cardinality-rolling.test.ts",
     "test:m9:rolling:soak": "ITERM_M9_ROLLING_PROFILE=soak vitest run --maxWorkers=1 apps/runtime-router/src/high-cardinality-rolling.test.ts",
+    "test:m10:approval": "vitest run --maxWorkers=1 packages/application/src/approval.test.ts packages/persistence-postgres/src/postgres-runtime-repository.test.ts apps/runtime-daemon/src/approval-durable.test.ts apps/mcp/src/mcp-stdio.test.ts apps/console/src/server.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm verify:docs && pnpm build",
     "verify:docs": "node scripts/check-verification.mjs"

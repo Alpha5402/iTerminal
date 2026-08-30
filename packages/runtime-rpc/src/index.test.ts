@@ -536,6 +536,10 @@ function stubGateway(): RuntimeGateway {
     throw new Error("Unexpected gateway operation");
   };
   return {
+    decideApproval: unsupported,
+    getApproval: unsupported,
+    listApprovals: unsupported,
+    requestExecuteApproval: unsupported,
     closeSession: unsupported,
     createSession: unsupported,
     forkSession: unsupported,

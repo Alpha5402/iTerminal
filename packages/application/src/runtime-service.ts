@@ -5,6 +5,10 @@ import { isAbsolute, relative } from "node:path";
 import type {
   Actor,
   ActorCapability,
+  AgentExecuteApprovalPolicy,
+  Approval,
+  ApprovalDecision,
+  ApprovalStatus,
   ControlAction,
   ControlDelivery,
   EventPage,
@@ -33,10 +37,13 @@ import type {
 } from "@iterminal/domain";
 import {
   actorHasCapability,
+  DEFAULT_APPROVAL_TTL_MS,
   DEFAULT_INTERACTION_GUARD_TTL_MS,
+  MAX_APPROVAL_TTL_MS,
   MAX_INTERACTION_GUARD_RENEWALS,
   MAX_INTERACTION_GUARD_TTL_MS,
   MIN_INTERACTION_GUARD_TTL_MS,
+  MIN_APPROVAL_TTL_MS,
   MAX_TERMINAL_COLUMNS,
   MAX_TERMINAL_ROWS,
   MIN_TERMINAL_COLUMNS,
@@ -112,6 +119,39 @@ export interface ExecuteRequest {
   readonly actor: Actor;
   readonly command: string;
   readonly idempotencyKey: string;
+  readonly approvalId?: string;
+}
+
+export interface RequestExecuteApprovalRequest {
+  readonly actionIdempotencyKey: string;
+  readonly actor: Actor;
+  readonly command: string;
+  readonly reason: string;
+  readonly requestIdempotencyKey: string;
+  readonly sessionGeneration: number;
+  readonly sessionId: string;
+  readonly ttlMilliseconds?: number;
+}
+
+export interface GetApprovalRequest {
+  readonly actor: Actor;
+  readonly approvalId: string;
+  readonly sessionGeneration: number;
+  readonly sessionId: string;
+}
+
+export interface ListApprovalsRequest {
+  readonly actor: Actor;
+  readonly sessionGeneration: number;
+  readonly sessionId: string;
+  readonly status?: ApprovalStatus;
+}
+
+export interface DecideApprovalRequest extends GetApprovalRequest {
+  readonly decision: ApprovalDecision;
+  readonly expectedVersion: number;
+  readonly idempotencyKey: string;
+  readonly reason: string;
 }
 
 export interface InputRequest {
@@ -268,6 +308,11 @@ interface SessionCreationReplay {
   readonly requestHash: string;
 }
 
+interface ApprovalRequestReplay {
+  readonly approvalId: string;
+  readonly requestHash: string;
+}
+
 type IdempotentCreateSessionRequest = Omit<CreateSessionRequest, "idempotencyKey"> & {
   readonly idempotencyKey: string;
 };
@@ -279,6 +324,9 @@ export class RuntimeService {
   readonly #started = new Map<string, Promise<void>>();
   readonly #durableQueues = new Map<string, DurableQueueState>();
   readonly #actors = new Map<string, Actor>();
+  readonly #approvals = new Map<string, Approval>();
+  readonly #approvalRequestReplays = new Map<string, ApprovalRequestReplay>();
+  readonly #agentExecuteApproval: AgentExecuteApprovalPolicy;
   readonly #mutationTails = new Map<string, Promise<void>>();
   readonly #interactionStates = new Map<string, InteractionState>();
   readonly #sessionLeases = new Map<string, SessionLease>();
@@ -304,6 +352,7 @@ export class RuntimeService {
     options: RuntimeServiceOptions = {},
   ) {
     this.#durability = options.durability;
+    this.#agentExecuteApproval = options.agentExecuteApproval ?? "optional";
     this.#checkpointEnvironmentKeys = validateCheckpointEnvironmentKeys(
       options.checkpointEnvironmentKeys ?? DEFAULT_CHECKPOINT_ENVIRONMENT_KEYS,
     );
@@ -1038,17 +1087,267 @@ export class RuntimeService {
     }
   }
 
+  public requestExecuteApproval(request: RequestExecuteApprovalRequest): Promise<Approval> {
+    return this.#withMutationLock(request.sessionId, async () => {
+      this.#requireActorCapability(request.actor, "approval.request");
+      if (request.actor.type !== "agent") {
+        throw new RuntimeError("POLICY_DENIED", "Only an Agent may request Execute Approval", {
+          actorId: request.actor.id,
+          actorType: request.actor.type,
+        });
+      }
+      validateExecuteCommand(request.command);
+      validateIdempotencyKey(request.actionIdempotencyKey);
+      validateIdempotencyKey(request.requestIdempotencyKey);
+      const reason = validateApprovalReason(request.reason, "Approval request reason");
+      const ttlMilliseconds = validateApprovalTtl(request.ttlMilliseconds);
+      await this.#flushDurable(request.sessionId);
+      const session = this.#requireGeneration(request.sessionId, request.sessionGeneration);
+      this.#requireExecutor(session.id);
+      const actionRequestHash = executeApprovalActionRequestHash({
+        actor: request.actor,
+        command: request.command,
+        idempotencyKey: request.actionIdempotencyKey,
+        sessionGeneration: request.sessionGeneration,
+        sessionId: request.sessionId,
+      });
+      const requestHash = hashRequest({ actionRequestHash, reason, ttlMilliseconds });
+      const replayScope = approvalRequestReplayScope(request);
+      const replay = this.#approvalRequestReplays.get(replayScope);
+      if (replay !== undefined && this.#durability === undefined) {
+        if (replay.requestHash !== requestHash) {
+          throw new RuntimeError(
+            "IDEMPOTENCY_KEY_REUSED",
+            "Approval request idempotency key changed proposal",
+            { idempotencyKey: request.requestIdempotencyKey },
+          );
+        }
+        return cloneApproval(this.#requireApproval(replay.approvalId));
+      }
+      const requestedAt = this.#timestamp();
+      const approval: Approval = {
+        actionIdempotencyKey: request.actionIdempotencyKey,
+        actionRequestHash,
+        command: request.command,
+        expiresAt: new Date(new Date(requestedAt).getTime() + ttlMilliseconds).toISOString(),
+        id: `apr_${randomUUID()}`,
+        operation: "execution.start",
+        reason,
+        requestHash,
+        requestIdempotencyKey: request.requestIdempotencyKey,
+        requestedAt,
+        requester: cloneActor(request.actor),
+        sessionGeneration: session.generation,
+        sessionId: session.id,
+        status: "PENDING",
+        version: 1,
+      };
+      const event = this.#eventDraft(
+        session,
+        "approval.requested",
+        {
+          actionRequestHash,
+          approvalId: approval.id,
+          expiresAt: approval.expiresAt,
+          operation: approval.operation,
+          reason,
+        },
+        undefined,
+        undefined,
+        request.actor,
+      );
+      let committed = approval;
+      let committedEvent = event;
+      let replayed = false;
+      if (this.#durability !== undefined) {
+        try {
+          const durable = await this.#enqueueDurable(session.id, 0, () =>
+            this.#durability?.requestApproval(this.#requireSessionFence(session), {
+              approval,
+              event,
+            }),
+          );
+          if (durable === undefined) {
+            throw new RuntimeError("RUNTIME_UNAVAILABLE", "Approval request was not persisted");
+          }
+          committed = durable.approval;
+          replayed = durable.replayed;
+          committedEvent = {
+            ...event,
+            observedAt: committed.requestedAt,
+            payload: { ...event.payload, expiresAt: committed.expiresAt },
+          };
+        } catch (error) {
+          if (isDurabilityFatal(error)) this.#tripDurability(session.id, error);
+          throw error instanceof RuntimeError ? error : durabilityError(error);
+        }
+      }
+      this.#approvals.set(committed.id, committed);
+      this.#approvalRequestReplays.set(replayScope, {
+        approvalId: committed.id,
+        requestHash,
+      });
+      if (!replayed) this.store.appendEvent(session.id, session.generation, committedEvent);
+      return cloneApproval(committed);
+    });
+  }
+
+  public getApproval(request: GetApprovalRequest): Promise<Approval> {
+    return this.#withMutationLock(request.sessionId, async () => {
+      await this.#flushDurable(request.sessionId);
+      const session = this.#requireGeneration(request.sessionId, request.sessionGeneration);
+      const approval =
+        this.#durability === undefined
+          ? this.#approvalForSession(request.approvalId, session.id, session.generation)
+          : await this.#durability.getApproval(session.id, session.generation, request.approvalId);
+      this.#approvals.set(approval.id, approval);
+      this.#authorizeApprovalRead(request.actor, approval);
+      if (this.#durability === undefined) this.#expireApproval(session, approval);
+      return cloneApproval(approval);
+    });
+  }
+
+  public listApprovals(request: ListApprovalsRequest): Promise<readonly Approval[]> {
+    return this.#withMutationLock(request.sessionId, async () => {
+      await this.#flushDurable(request.sessionId);
+      const session = this.#requireGeneration(request.sessionId, request.sessionGeneration);
+      this.#validateActor(request.actor);
+      if (request.actor.type === "human") {
+        this.#requireActorCapability(request.actor, "approval.decide");
+      } else if (request.actor.type === "agent") {
+        this.#requireActorCapability(request.actor, "approval.request");
+      } else {
+        throw new RuntimeError("POLICY_DENIED", "Actor cannot inspect Approvals", {
+          actorId: request.actor.id,
+          actorType: request.actor.type,
+        });
+      }
+      const durableApprovals =
+        this.#durability === undefined
+          ? undefined
+          : await this.#durability.listApprovals(session.id, session.generation);
+      if (durableApprovals !== undefined) {
+        for (const approval of durableApprovals) this.#approvals.set(approval.id, approval);
+      }
+      const approvals = [...(durableApprovals ?? this.#approvals.values())]
+        .filter(
+          (approval) =>
+            approval.sessionId === session.id &&
+            approval.sessionGeneration === session.generation &&
+            (request.actor.type === "human" || sameActor(approval.requester, request.actor)),
+        )
+        .sort((left, right) => right.requestedAt.localeCompare(left.requestedAt))
+        .slice(0, 100);
+      if (this.#durability === undefined) {
+        for (const approval of approvals) this.#expireApproval(session, approval);
+      }
+      return approvals
+        .filter((approval) => request.status === undefined || approval.status === request.status)
+        .map(cloneApproval);
+    });
+  }
+
+  public decideApproval(request: DecideApprovalRequest): Promise<Approval> {
+    return this.#withMutationLock(request.sessionId, async () => {
+      this.#requireActorCapability(request.actor, "approval.decide");
+      if (request.actor.type !== "human") {
+        throw new RuntimeError("POLICY_DENIED", "Only a Human may decide Execute Approval", {
+          actorId: request.actor.id,
+          actorType: request.actor.type,
+        });
+      }
+      validateIdempotencyKey(request.idempotencyKey);
+      const reason = validateApprovalReason(request.reason, "Approval decision reason");
+      validateApprovalDecision(request.decision);
+      await this.#flushDurable(request.sessionId);
+      const session = this.#requireGeneration(request.sessionId, request.sessionGeneration);
+      let approval =
+        this.#durability === undefined
+          ? this.#approvalForSession(request.approvalId, session.id, session.generation)
+          : await this.#durability.getApproval(session.id, session.generation, request.approvalId);
+      this.#approvals.set(approval.id, approval);
+      if (this.#durability === undefined) this.#expireApproval(session, approval);
+      const decisionRequestHash = hashRequest({
+        actor: request.actor,
+        decision: request.decision,
+        reason,
+      });
+      if (approval.decisionIdempotencyKey !== undefined) {
+        if (
+          approval.decisionIdempotencyKey === request.idempotencyKey &&
+          approval.decisionRequestHash === decisionRequestHash
+        ) {
+          return cloneApproval(approval);
+        }
+        throw new RuntimeError(
+          "IDEMPOTENCY_KEY_REUSED",
+          "Approval already has a different decision",
+          { approvalId: approval.id },
+        );
+      }
+      requireApprovalExpectedVersion(approval, request.expectedVersion);
+      if (approval.status !== "PENDING") throw approvalChanged(approval);
+      const decidedAt = this.#timestamp();
+      const decidedVersion = approval.version + 1;
+      const event = this.#eventDraft(
+        session,
+        request.decision === "approve" ? "approval.approved" : "approval.denied",
+        {
+          approvalId: approval.id,
+          decisionReason: reason,
+          expiresAt: approval.expiresAt,
+          operation: approval.operation,
+          version: decidedVersion,
+        },
+        undefined,
+        undefined,
+        request.actor,
+      );
+      if (this.#durability !== undefined) {
+        const durable = await this.#enqueueDurable(session.id, 0, () =>
+          this.#durability?.decideApproval(this.#requireSessionFence(session), {
+            approvalId: approval.id,
+            approver: request.actor,
+            decidedAt,
+            decision: request.decision,
+            decisionIdempotencyKey: request.idempotencyKey,
+            decisionReason: reason,
+            decisionRequestHash,
+            event,
+            expectedVersion: request.expectedVersion,
+            sessionGeneration: session.generation,
+            sessionId: session.id,
+          }),
+        );
+        if (durable === undefined) {
+          throw new RuntimeError("RUNTIME_UNAVAILABLE", "Approval decision was not persisted");
+        }
+        approval = durable.approval;
+        this.#approvals.set(approval.id, approval);
+        if (!durable.replayed) this.store.appendEvent(session.id, session.generation, event);
+        return cloneApproval(approval);
+      }
+      approval.status = request.decision === "approve" ? "APPROVED" : "DENIED";
+      approval.version = decidedVersion;
+      approval.approver = cloneActor(request.actor);
+      approval.decidedAt = decidedAt;
+      approval.decisionIdempotencyKey = request.idempotencyKey;
+      approval.decisionReason = reason;
+      approval.decisionRequestHash = decisionRequestHash;
+      this.store.appendEvent(session.id, session.generation, event);
+      return cloneApproval(approval);
+    });
+  }
+
   public startExecute(request: ExecuteRequest): Promise<StartedExecution> {
     return this.#withMutationLock(request.sessionId, () => this.#startExecuteLocked(request));
   }
 
   async #startExecuteLocked(request: ExecuteRequest): Promise<StartedExecution> {
     this.#requireActorCapability(request.actor, "session.execute");
-    if (request.command.includes("\0")) {
-      throw new RuntimeError("INVALID_REQUEST", "Execute command cannot contain NUL bytes");
-    }
+    validateExecuteCommand(request.command);
     await this.#flushDurable(request.sessionId);
-    const requestHash = hashRequest({ command: request.command });
+    const requestHash = executeRequestHash(request);
     const scope = `${request.sessionId}:${request.actor.id}`;
     const replay = this.#idempotentReplay(scope, request.idempotencyKey, requestHash);
     if (replay !== undefined) {
@@ -1066,6 +1365,15 @@ export class RuntimeService {
 
     const session = this.#requireGeneration(request.sessionId, request.sessionGeneration);
     this.#requireExecutor(session.id);
+    if (request.approvalId !== undefined && this.#durability !== undefined) {
+      const durableApproval = await this.#durability.getApproval(
+        session.id,
+        session.generation,
+        request.approvalId,
+      );
+      this.#approvals.set(durableApproval.id, durableApproval);
+    }
+    const approval = this.#approvalForExecute(request, session);
     const actionId = `act_${randomUUID()}`;
     const executionId = `exe_${randomUUID()}`;
     const reserved = this.store.reserveSession(session.id, session.generation, executionId);
@@ -1075,6 +1383,7 @@ export class RuntimeService {
       acceptedAt,
       actionSequence,
       actor: request.actor,
+      ...(approval === undefined ? {} : { approvalId: approval.id }),
       command: request.command,
       executionId,
       id: actionId,
@@ -1104,6 +1413,10 @@ export class RuntimeService {
       action,
       execution,
     );
+    const approvalConsumption =
+      approval === undefined
+        ? undefined
+        : this.#approvalConsumptionDraft(session, approval, action);
     try {
       if (this.#durability !== undefined) {
         const durable = await this.#enqueueDurable(session.id, 0, () =>
@@ -1112,6 +1425,16 @@ export class RuntimeService {
             action,
             dispatchingEvent,
             execution,
+            ...(approvalConsumption === undefined
+              ? {}
+              : {
+                  approvalConsumption: {
+                    actionRequestHash: approvalConsumption.actionRequestHash,
+                    approvalId: approvalConsumption.approvalId,
+                    consumedAt: approvalConsumption.consumedAt,
+                    event: approvalConsumption.event,
+                  },
+                }),
           }),
         );
         if (
@@ -1141,6 +1464,14 @@ export class RuntimeService {
     this.store.saveExecution(execution);
     this.store.appendEvent(session.id, session.generation, acceptedEvent);
     this.store.appendEvent(session.id, session.generation, dispatchingEvent);
+    if (approval !== undefined && approvalConsumption !== undefined) {
+      this.#consumeApproval(
+        approval,
+        action,
+        approvalConsumption.consumedAt,
+        approvalConsumption.event,
+      );
+    }
 
     const dispatch = this.#createDispatchState(action, execution);
     if (this.#executionDispatch === "immediate") this.#startDispatch(dispatch);
@@ -2470,6 +2801,154 @@ export class RuntimeService {
     return actorHasCapability(actor, capability);
   }
 
+  #approvalForExecute(request: ExecuteRequest, session: Session): Approval | undefined {
+    if (request.actor.type !== "agent") {
+      if (request.approvalId !== undefined) {
+        throw new RuntimeError("POLICY_DENIED", "Only an Agent Execute may consume Approval", {
+          actorId: request.actor.id,
+          actorType: request.actor.type,
+        });
+      }
+      return undefined;
+    }
+    if (request.approvalId === undefined) {
+      if (this.#agentExecuteApproval === "required") {
+        throw new RuntimeError(
+          "APPROVAL_REQUIRED",
+          "Agent Execute requires Human Approval",
+          { operation: "execution.start", sessionId: session.id },
+          true,
+        );
+      }
+      return undefined;
+    }
+    const approval = this.#approvalForSession(request.approvalId, session.id, session.generation);
+    this.#expireApproval(session, approval);
+    const actionRequestHash = executeApprovalActionRequestHash(request);
+    if (
+      approval.status !== "APPROVED" ||
+      !sameActor(approval.requester, request.actor) ||
+      approval.actionRequestHash !== actionRequestHash
+    ) {
+      throw approvalRequired(approval);
+    }
+    return approval;
+  }
+
+  #approvalForSession(approvalId: string, sessionId: string, generation: number): Approval {
+    if (approvalId.length < 1 || approvalId.length > 256 || approvalId.includes("\0")) {
+      throw new RuntimeError("INVALID_REQUEST", "Approval id is invalid");
+    }
+    const approval = this.#approvals.get(approvalId);
+    if (
+      approval === undefined ||
+      approval.sessionId !== sessionId ||
+      approval.sessionGeneration !== generation
+    ) {
+      throw new RuntimeError("APPROVAL_NOT_FOUND", "Approval not found", {
+        approvalId,
+        generation,
+        sessionId,
+      });
+    }
+    return approval;
+  }
+
+  #requireApproval(approvalId: string): Approval {
+    const approval = this.#approvals.get(approvalId);
+    if (approval === undefined) {
+      throw new RuntimeError("APPROVAL_NOT_FOUND", "Approval not found", { approvalId });
+    }
+    return approval;
+  }
+
+  #authorizeApprovalRead(actor: Actor, approval: Approval): void {
+    this.#validateActor(actor);
+    if (actor.type === "human") {
+      this.#requireActorCapability(actor, "approval.decide");
+      return;
+    }
+    if (actor.type === "agent" && sameActor(actor, approval.requester)) {
+      this.#requireActorCapability(actor, "approval.request");
+      return;
+    }
+    throw new RuntimeError("POLICY_DENIED", "Actor cannot inspect this Approval", {
+      actorId: actor.id,
+      approvalId: approval.id,
+    });
+  }
+
+  #expireApproval(session: Session, approval: Approval): void {
+    if (
+      (approval.status !== "PENDING" && approval.status !== "APPROVED") ||
+      new Date(approval.expiresAt).getTime() > this.#now().getTime()
+    ) {
+      return;
+    }
+    approval.status = "EXPIRED";
+    approval.version += 1;
+    const event = this.#eventDraft(
+      session,
+      "approval.expired",
+      {
+        approvalId: approval.id,
+        expiresAt: approval.expiresAt,
+        operation: approval.operation,
+        version: approval.version,
+      },
+      undefined,
+      undefined,
+      approval.requester,
+    );
+    this.store.appendEvent(session.id, session.generation, event);
+  }
+
+  #approvalConsumptionDraft(
+    session: Session,
+    approval: Approval,
+    action: ExecuteAction,
+  ): Readonly<{
+    actionRequestHash: string;
+    approvalId: string;
+    consumedAt: string;
+    event: Omit<SessionEvent, "sequence">;
+  }> {
+    const consumedAt = this.#timestamp();
+    const event = this.#eventDraft(
+      session,
+      "approval.consumed",
+      {
+        actionId: action.id,
+        approvalId: approval.id,
+        operation: approval.operation,
+        version: approval.version + 1,
+      },
+      action,
+      undefined,
+      action.actor,
+    );
+    return {
+      actionRequestHash: approval.actionRequestHash,
+      approvalId: approval.id,
+      consumedAt,
+      event,
+    };
+  }
+
+  #consumeApproval(
+    approval: Approval,
+    action: ExecuteAction,
+    consumedAt: string,
+    event: Omit<SessionEvent, "sequence">,
+  ): void {
+    if (approval.status !== "APPROVED") throw approvalRequired(approval);
+    approval.status = "CONSUMED";
+    approval.version += 1;
+    approval.consumedActionId = action.id;
+    approval.consumedAt = consumedAt;
+    this.store.appendEvent(approval.sessionId, approval.sessionGeneration, event);
+  }
+
   #requireActorCapability(actor: Actor, capability: ActorCapability): void {
     if (!this.#actorHasCapability(actor, capability)) {
       throw new RuntimeError("POLICY_DENIED", `Actor lacks ${capability} capability`, {
@@ -2955,6 +3434,26 @@ export function sessionCreationRequestHash(
   return hashRequest({ shell: request.shell, workspaceRoot: request.workspaceRoot });
 }
 
+export function executeRequestHash(request: Pick<ExecuteRequest, "command">): string {
+  return hashRequest({ command: request.command });
+}
+
+export function executeApprovalActionRequestHash(
+  request: Pick<
+    ExecuteRequest,
+    "actor" | "command" | "idempotencyKey" | "sessionGeneration" | "sessionId"
+  >,
+): string {
+  return hashRequest({
+    actor: request.actor,
+    actionIdempotencyKey: request.idempotencyKey,
+    executeRequestHash: executeRequestHash(request),
+    operation: "execution.start",
+    sessionGeneration: request.sessionGeneration,
+    sessionId: request.sessionId,
+  });
+}
+
 function validateGuardTtl(value: number | undefined): number {
   const ttlMilliseconds = value ?? DEFAULT_INTERACTION_GUARD_TTL_MS;
   if (
@@ -3221,6 +3720,108 @@ function validateIdempotencyKey(value: string): void {
       "Idempotency key must contain 1 to 256 non-NUL characters",
     );
   }
+}
+
+function validateExecuteCommand(command: string): void {
+  if (command.includes("\0")) {
+    throw new RuntimeError("INVALID_REQUEST", "Execute command cannot contain NUL bytes");
+  }
+}
+
+function validateApprovalTtl(value: number | undefined): number {
+  const ttlMilliseconds = value ?? DEFAULT_APPROVAL_TTL_MS;
+  if (
+    !Number.isSafeInteger(ttlMilliseconds) ||
+    ttlMilliseconds < MIN_APPROVAL_TTL_MS ||
+    ttlMilliseconds > MAX_APPROVAL_TTL_MS
+  ) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      `Approval TTL must be between ${MIN_APPROVAL_TTL_MS.toString()} and ${MAX_APPROVAL_TTL_MS.toString()} milliseconds`,
+      { ttlMilliseconds },
+    );
+  }
+  return ttlMilliseconds;
+}
+
+function validateApprovalReason(value: string, label: string): string {
+  const reason = value.trim();
+  if (reason.length < 1 || reason.length > 512 || reason.includes("\0")) {
+    throw new RuntimeError("INVALID_REQUEST", `${label} must contain 1 to 512 non-NUL characters`);
+  }
+  return reason;
+}
+
+function validateApprovalDecision(decision: ApprovalDecision): void {
+  if (decision !== "approve" && decision !== "deny") {
+    throw new RuntimeError("INVALID_REQUEST", "Approval decision must be approve or deny");
+  }
+}
+
+function requireApprovalExpectedVersion(approval: Approval, expectedVersion: number): void {
+  if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+    throw new RuntimeError("INVALID_REQUEST", "Approval expectedVersion must be positive", {
+      expectedVersion,
+    });
+  }
+  if (approval.version !== expectedVersion) {
+    throw new RuntimeError(
+      "APPROVAL_CHANGED",
+      "Approval version changed",
+      {
+        approvalId: approval.id,
+        currentVersion: approval.version,
+        expectedVersion,
+        status: approval.status,
+      },
+      true,
+    );
+  }
+}
+
+function approvalRequired(approval: Approval): RuntimeError {
+  return new RuntimeError(
+    "APPROVAL_REQUIRED",
+    "Agent Execute requires a matching approved request",
+    {
+      approvalId: approval.id,
+      expiresAt: approval.expiresAt,
+      operation: approval.operation,
+      status: approval.status,
+      version: approval.version,
+    },
+    approval.status === "PENDING",
+  );
+}
+
+function approvalChanged(approval: Approval): RuntimeError {
+  return new RuntimeError(
+    "APPROVAL_CHANGED",
+    "Approval is no longer pending",
+    {
+      approvalId: approval.id,
+      expiresAt: approval.expiresAt,
+      status: approval.status,
+      version: approval.version,
+    },
+    false,
+  );
+}
+
+function approvalRequestReplayScope(request: RequestExecuteApprovalRequest): string {
+  return `${request.sessionId}\0${request.actor.id}\0${request.requestIdempotencyKey}`;
+}
+
+function cloneActor(actor: Actor): Actor {
+  return { ...actor, capabilities: [...actor.capabilities] };
+}
+
+function cloneApproval(approval: Approval): Approval {
+  return {
+    ...approval,
+    requester: cloneActor(approval.requester),
+    ...(approval.approver === undefined ? {} : { approver: cloneActor(approval.approver) }),
+  };
 }
 
 async function canonicalWorkspace(workspaceRoot: string): Promise<string> {

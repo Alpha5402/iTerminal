@@ -8,9 +8,13 @@ import type {
   AcquireInteractionGuardRequest,
   ControlRequest,
   CreateSessionRequest,
+  DecideApprovalRequest,
   ExecuteRequest,
+  GetApprovalRequest,
   InputRequest,
   ForkSessionRequest,
+  ListApprovalsRequest,
+  RequestExecuteApprovalRequest,
   ReleaseInteractionGuardRequest,
   RenewInteractionGuardRequest,
   ResizeRequest,
@@ -24,6 +28,7 @@ import type {
 import type { RuntimeService } from "@iterminal/application";
 import type {
   Actor,
+  Approval,
   ControlAction,
   EventPage,
   ExecuteAction,
@@ -90,6 +95,9 @@ const runtimeErrorCodes = new Set<RuntimeError["code"]>([
   "OWNER_LEASE_LOST",
   "OWNER_ROUTE_UNAVAILABLE",
   "SESSION_LEASE_LOST",
+  "APPROVAL_NOT_FOUND",
+  "APPROVAL_CHANGED",
+  "APPROVAL_REQUIRED",
   "RUNTIME_UNAVAILABLE",
   "RESYNC_REQUIRED",
   "INVALID_REQUEST",
@@ -137,6 +145,38 @@ const screenRectangleSchema = sessionIdentitySchema.extend({
 });
 
 const operationSchemas = {
+  "approval.decide": sessionIdentitySchema.extend({
+    actor: actorSchema,
+    approvalId: z.string().min(1).max(256),
+    decision: z.enum(["approve", "deny"]),
+    expectedVersion: z.number().int().positive(),
+    idempotencyKey: z.string().min(1).max(256),
+    reason: z.string().min(1).max(512),
+  }),
+  "approval.get": sessionIdentitySchema.extend({
+    actor: actorSchema,
+    approvalId: z.string().min(1).max(256),
+  }),
+  "approval.list": sessionIdentitySchema.extend({
+    actor: actorSchema,
+    status: z.enum(["PENDING", "APPROVED", "DENIED", "EXPIRED", "CONSUMED"]).optional(),
+  }),
+  "approval.request": sessionIdentitySchema.extend({
+    actionIdempotencyKey: z.string().min(1).max(256),
+    actor: actorSchema,
+    command: z
+      .string()
+      .min(1)
+      .max(256 * 1024),
+    reason: z.string().min(1).max(512),
+    requestIdempotencyKey: z.string().min(1).max(256),
+    ttlMilliseconds: z
+      .number()
+      .int()
+      .min(30_000)
+      .max(30 * 60 * 1_000)
+      .optional(),
+  }),
   "control.send": sessionIdentitySchema.extend({
     actor: actorSchema,
     bypassGuard: z.boolean().default(false),
@@ -161,6 +201,7 @@ const operationSchemas = {
   "execution.dispatch": z.strictObject({ executionId: z.string().min(1).max(256) }),
   "execution.start": sessionIdentitySchema.extend({
     actor: actorSchema,
+    approvalId: z.string().min(1).max(256).optional(),
     command: z.string().max(256 * 1024),
     idempotencyKey: z.string().min(1).max(256),
   }),
@@ -265,6 +306,10 @@ export interface StartedExecutionView {
 }
 
 export interface RuntimeGateway {
+  requestExecuteApproval(request: RequestExecuteApprovalRequest): Promise<Approval>;
+  getApproval(request: GetApprovalRequest): Promise<Approval>;
+  listApprovals(request: ListApprovalsRequest): Promise<readonly Approval[]>;
+  decideApproval(request: DecideApprovalRequest): Promise<Approval>;
   createSession(request: CreateSessionRequest): Promise<Session>;
   getSessionCheckpoint(sessionId: string, generation: number): Promise<ShellCheckpointView>;
   forkSession(request: ForkSessionRequest): Promise<SessionForkResult>;
@@ -303,6 +348,22 @@ export interface RuntimeGateway {
 
 export class LocalRuntimeGateway implements RuntimeGateway {
   public constructor(private readonly runtime: RuntimeService) {}
+
+  public requestExecuteApproval(request: RequestExecuteApprovalRequest): Promise<Approval> {
+    return this.runtime.requestExecuteApproval(request);
+  }
+
+  public getApproval(request: GetApprovalRequest): Promise<Approval> {
+    return this.runtime.getApproval(request);
+  }
+
+  public listApprovals(request: ListApprovalsRequest): Promise<readonly Approval[]> {
+    return this.runtime.listApprovals(request);
+  }
+
+  public decideApproval(request: DecideApprovalRequest): Promise<Approval> {
+    return this.runtime.decideApproval(request);
+  }
 
   public createSession(request: CreateSessionRequest): Promise<Session> {
     return this.runtime.createSession(request);
@@ -539,6 +600,52 @@ export class UnixRuntimeClient implements RuntimeGateway {
     }
   }
 
+  public requestExecuteApproval(request: RequestExecuteApprovalRequest): Promise<Approval> {
+    return this.#request("approval.request", {
+      actionIdempotencyKey: request.actionIdempotencyKey,
+      actor: request.actor,
+      command: request.command,
+      generation: request.sessionGeneration,
+      reason: request.reason,
+      requestIdempotencyKey: request.requestIdempotencyKey,
+      sessionId: request.sessionId,
+      ...(request.ttlMilliseconds === undefined
+        ? {}
+        : { ttlMilliseconds: request.ttlMilliseconds }),
+    });
+  }
+
+  public getApproval(request: GetApprovalRequest): Promise<Approval> {
+    return this.#request("approval.get", {
+      actor: request.actor,
+      approvalId: request.approvalId,
+      generation: request.sessionGeneration,
+      sessionId: request.sessionId,
+    });
+  }
+
+  public listApprovals(request: ListApprovalsRequest): Promise<readonly Approval[]> {
+    return this.#request("approval.list", {
+      actor: request.actor,
+      generation: request.sessionGeneration,
+      sessionId: request.sessionId,
+      ...(request.status === undefined ? {} : { status: request.status }),
+    });
+  }
+
+  public decideApproval(request: DecideApprovalRequest): Promise<Approval> {
+    return this.#request("approval.decide", {
+      actor: request.actor,
+      approvalId: request.approvalId,
+      decision: request.decision,
+      expectedVersion: request.expectedVersion,
+      generation: request.sessionGeneration,
+      idempotencyKey: request.idempotencyKey,
+      reason: request.reason,
+      sessionId: request.sessionId,
+    });
+  }
+
   public createSession(request: CreateSessionRequest): Promise<Session> {
     const idempotencyKey = request.idempotencyKey ?? `session_create_${randomUUID()}`;
     return this.#request("session.create", {
@@ -612,6 +719,7 @@ export class UnixRuntimeClient implements RuntimeGateway {
       generation: request.sessionGeneration,
       idempotencyKey: request.idempotencyKey,
       sessionId: request.sessionId,
+      ...(request.approvalId === undefined ? {} : { approvalId: request.approvalId }),
     });
   }
 
@@ -930,6 +1038,52 @@ async function dispatch(
   signal: AbortSignal,
 ): Promise<unknown> {
   switch (operation) {
+    case "approval.request": {
+      const request = operationSchemas[operation].parse(input);
+      return gateway.requestExecuteApproval({
+        actionIdempotencyKey: request.actionIdempotencyKey,
+        actor: request.actor,
+        command: request.command,
+        reason: request.reason,
+        requestIdempotencyKey: request.requestIdempotencyKey,
+        sessionGeneration: request.generation,
+        sessionId: request.sessionId,
+        ...(request.ttlMilliseconds === undefined
+          ? {}
+          : { ttlMilliseconds: request.ttlMilliseconds }),
+      });
+    }
+    case "approval.get": {
+      const request = operationSchemas[operation].parse(input);
+      return gateway.getApproval({
+        actor: request.actor,
+        approvalId: request.approvalId,
+        sessionGeneration: request.generation,
+        sessionId: request.sessionId,
+      });
+    }
+    case "approval.list": {
+      const request = operationSchemas[operation].parse(input);
+      return gateway.listApprovals({
+        actor: request.actor,
+        sessionGeneration: request.generation,
+        sessionId: request.sessionId,
+        ...(request.status === undefined ? {} : { status: request.status }),
+      });
+    }
+    case "approval.decide": {
+      const request = operationSchemas[operation].parse(input);
+      return gateway.decideApproval({
+        actor: request.actor,
+        approvalId: request.approvalId,
+        decision: request.decision,
+        expectedVersion: request.expectedVersion,
+        idempotencyKey: request.idempotencyKey,
+        reason: request.reason,
+        sessionGeneration: request.generation,
+        sessionId: request.sessionId,
+      });
+    }
     case "session.create": {
       const request = operationSchemas[operation].parse(input);
       return gateway.createSession({
@@ -971,6 +1125,7 @@ async function dispatch(
         idempotencyKey: request.idempotencyKey,
         sessionGeneration: request.generation,
         sessionId: request.sessionId,
+        ...(request.approvalId === undefined ? {} : { approvalId: request.approvalId }),
       });
     }
     case "execution.dispatch": {

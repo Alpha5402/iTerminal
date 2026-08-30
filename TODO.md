@@ -1,10 +1,10 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
-> 状态：Implementation Baseline v6.18 — M5/M6.6/M7.2 已通过 Browser Human L3；M6.7、M7.1 与 M9.1–M9.17 已保存 real PTY/PostgreSQL L2；M9.18 已通过 8-owner/1,043-rotation/33,400-Session/30-minute 的本机 L4 failure/pressure gate；M4 autonomous-model L3 与 repository release L4 仍待完成
+> 状态：Implementation Baseline v6.19 — M10.3b durable Agent Execute Approval 已通过真实 PostgreSQL、Browser Human 与 official MCP Agent L3 路径；M9.18 已闭合本机 failure/pressure L4 gate；M4 autonomous-model L3 与 repository release L4 仍待完成
 >
-> 基线日期：2026-08-30
+> 基线日期：2026-08-31
 >
-> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live Runtime 已接入 PostgreSQL write-ahead journal、bounded ingest loop、versioned dynamic ANSI/VT Virtual Screen，以及 generation-scoped Input Policy/Interaction Guard。M5/M6.6 增加 loopback Human Console 与受控 ResizeAction：真实无头 Chrome Human 和 official MCP SDK Agent 已在同一 PostgreSQL/zsh Session 中共享 cwd/env/Python REPL，并分别驱动同一 PTY 的 SIGWINCH。M6.7 增加不可作为安全事实的 exact-generation `terminal_state`。M7.1 增加 versioned Shell Checkpoint/fork，M7.2 增加 same-owner durable `BROKEN` rebuild projection 与 Browser Human 显式重建。M8.9 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放、DB/AMQP 恢复与真实三节点 RabbitMQ quorum leader failover。M9.1–M9.17 完成 owner registry、central routing、Session fencing、capacity-weighted placement、rate limit、独立进程/分区/crash/retention/drain/rolling/CPU-starvation/PostgreSQL-primary-failover 与 host-local Guardian。M9.18 将 durable Runtime 四个 PostgreSQL role pool 默认各限制为 2，并以 8 个独立 Runtime/Guardian、1,043 次 drain/replacement、33,400 个唯一 Session 和未缩短 30 分钟 soak 闭合本机 M9 failure/pressure Exit Gate。M10.1 已将 Actor capability 变为 closed/canonical 显式授权并固化 immutable durable identity；M10.2 以 signed/expiring operation + Actor scoped grant 覆盖 direct daemon、central Router→owner 双重校验与 least-privilege Worker dispatch（L2）。Approval、secret/redaction 仍未完成。真正整机/VM fencing、跨主机/跨平台 soak 与 repository release L4 仍未证明。Autonomous model 授权、更广 TUI/跨浏览器/style parity、daemon restart 后 durable wait 与完整 MVP/L4 仍未完成。
+> 当前仓库状态：M0–M9 的既有实现与证据保持不变。M10.1 已完成 closed/canonical Actor capability 与 immutable durable identity；M10.2 已完成 signed/expiring operation + Actor scoped Runtime RPC grant。M10.3b 已实现 optional/required Agent Execute Approval：精确绑定 generation/Actor/capabilities/command/Action idempotency，PostgreSQL DB-time TTL、Human-only versioned decision，以及 Approval 消费与 Action/Execution/Outbox 接纳同事务；Runtime RPC/Router/MCP/Human Console 均已接入，真实 Chrome Human + official MCP Agent 路径与故障回滚已验证。完整跨操作 Capability/Policy/Approval 矩阵和 secret/redaction 仍未完成。真正整机/VM fencing、跨主机/跨平台 soak、autonomous model 授权、daemon restart 后 durable wait 与 repository release L4 仍未证明。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -500,7 +500,7 @@ PTY bytes -> ANSI/VT parser -> versioned screen buffer -> full/diff/region/searc
 - [x] `shell_checkpoints`：versioned workspace/cwd/shell/operator-allowlisted env/hash/observed time；READY 更新与 stale 选择已完成 M7.1。
 - [ ] `screen_snapshots`：geometry/cursor/content or artifact ref、screen version。
 - [x] `interaction_guards`：generation-scoped policy、guard actor/reason/TTL/renewal、state version。
-- [ ] `approvals`：exact action hash、actor/approver、expiry、one-time use。
+- [x] `approvals`：exact proposed-Action hash、requester/approver、DB-time expiry、versioned decision、Action admission 同事务 one-time consumption（M10.3b）。
 - [x] `outbox`：`ExecutionReady`、leased claim、confirm publish、mark/retry 与 publish Event。
 - [x] `consumer_inbox`：payload hash、processing lease、attempt/outcome 与完成去重。
 - [ ] `artifacts`：大输出 metadata/hash/size/retention 已完成；录制/导出待 M10。
@@ -615,7 +615,9 @@ M9.1–M9.18 已完成 registry、central Router forwarding、Session lease/fenc
 - `/api/sessions/:sessionId/events`
 - `/api/sessions/:sessionId/interaction`
 - `/api/sessions/:sessionId/interaction/guard`
-- `/api/approvals/:approvalId`
+- `/api/sessions/:sessionId/approvals`
+- `/api/sessions/:sessionId/approvals/:approvalId`
+- `/api/sessions/:sessionId/approvals/:approvalId/decision`
 
 WebSocket 只承载 live event/screen/action transport，不是真相源。重连携带 generation + last durable event cursor；server 可返回 event batch、screen snapshot/diff、guard/policy、backpressure、resync required。
 
@@ -668,7 +670,7 @@ WebSocket 只承载 live event/screen/action transport，不是真相源。重�
 - [x] command composer、Input、Control、stream wait、PTY_BUSY allowed-next-action 建议。
 - [x] Human/Agent/System Action 标签与 bounded Timeline。
 - [x] event cursor 重连、screen resync、live/event gap 提示。
-- [ ] 预留 Approval/secret prompt 状态展示；完整交互与脱敏在 M10 实现。
+- [x] Approval pending/history、exact command/reason、approve-once/deny 状态与交互（M10.3b）；secret prompt/脱敏仍待后续 M10。
 - [x] Runtime-owned canonical geometry：默认 120×40、显式 ResizeAction、viewer 不自动 fit/抢占 ownership。
 - [x] 基本键盘可达、焦点边界、文本状态与非纯颜色提示。
 
@@ -853,7 +855,7 @@ Exit Gate：L2 协议/Runtime/持久化路径已完成；官方 SDK Client 已�
 - [x] React/xterm.js、Fastify HTTP/WS、Session 页面。
 - [x] READY command composer 与 RUNNING interactive focus 分离；READY raw input 在 transport 层拒绝。
 - [x] current execution、Action actor label、bounded Timeline、PTY_BUSY allowed-next-action UI。
-- [x] Input/Control 与 actor/policy/guard 状态 UI；消费 M6.5 稳定契约，Approval/secret 仍待 M10。
+- [x] Input/Control 与 actor/policy/guard 状态 UI；M10.3b 增加 Human Approval 列表与一次性 approve/deny，secret 仍待 M10。
 - [x] durable event cursor reconnect、full screen resync、live/event gap 提示与慢消费者上限。
 - [x] 默认 120×40、受控 dynamic geometry、多 viewer 独立 stream、基本键盘/焦点/非颜色可访问性。
 
@@ -1032,11 +1034,11 @@ Exit Gate：已通过 8 Worker 持续 chaos/pressure；每个 generation 最多�
 
 - [x] M10.1 capability policy core：closed canonical vocabulary、显式 Human/Agent/Scheduler/System profile、Execute/Fork/Input/Control/Resize/Policy/Guard admission、immutable durable Actor identity（L2；不等于 RPC authentication）。
 - [x] M10.2 authenticated Runtime RPC Actor grant：HMAC-SHA256 signed/expiring grant 绑定 canonical operation allowlist 与 exact/paired-prefix Actor scope；direct daemon、central Router verified-context forwarding + owner re-verification、Worker exact service identity 均通过真实路径（L2；同 OS user local trust domain，不等于 remote/multi-user sandbox）。
-- [x] M10.3a Approval contract：ADR-0049 冻结 Agent Execute 的 optional/required policy、exact proposed-Action identity、PENDING→APPROVED/DENIED/EXPIRED→CONSUMED 状态机、Human-only decision、DB-time TTL 与 Action admission 同事务一次性消费；尚未计作实现证据。
-- [ ] M10.3b durable Agent Execute Approval：domain/Application/PostgreSQL/Runtime RPC/MCP/Human Console 实现与真实 Browser Human + official MCP Agent 验证。
+- [x] M10.3a Approval contract：ADR-0049 冻结 Agent Execute 的 optional/required policy、exact proposed-Action identity、PENDING→APPROVED/DENIED/EXPIRED→CONSUMED 状态机、Human-only decision、DB-time TTL 与 Action admission 同事务一次性消费；实现证据见 M10.3b。
+- [x] M10.3b durable Agent Execute Approval：domain/Application/PostgreSQL/Runtime RPC/Router/MCP/Human Console；真实 PostgreSQL 原子回滚/单次消费、required policy、真实 Chrome Human + official MCP Agent 路径（L3）。
 - [ ] Capability/Policy/Approval 完整矩阵。
 - [ ] secret channel、敏感期 recording redaction、审计抽检。
-- [ ] Human Console Approval 与 Human-only secret input 完整交互。
+- [ ] Human-only secret input 与敏感期交互；Human Console Approval 已在 M10.3b 完成。
 - [ ] origin/DNS rebinding/WS hijack/token/log/marker/path/resource exhaustion 测试。
 - [ ] event/artifact retention/export/cleanup 与磁盘上限。
 - [ ] 一条命令启动 PostgreSQL + Runtime + Web；MCP 配置可复制。

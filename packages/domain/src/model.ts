@@ -57,6 +57,12 @@ export type ExecuteActionStatus =
   | "CANCELLED";
 export type InteractionActionStatus = "ACCEPTED" | "DELIVERED" | "REJECTED" | "UNKNOWN";
 export type InputPolicyMode = "common" | "human_guarded" | "human_only" | "agent_only";
+export type AgentExecuteApprovalPolicy = "optional" | "required";
+export type ApprovalDecision = "approve" | "deny";
+export type ApprovalStatus = "PENDING" | "APPROVED" | "DENIED" | "EXPIRED" | "CONSUMED";
+export const DEFAULT_APPROVAL_TTL_MS = 5 * 60 * 1_000;
+export const MIN_APPROVAL_TTL_MS = 30 * 1_000;
+export const MAX_APPROVAL_TTL_MS = 30 * 60 * 1_000;
 export type ExecutionStatus =
   "DISPATCHING" | "RUNNING" | "COMPLETED" | "FAILED" | "INTERRUPTED" | "UNKNOWN";
 export type TtyControl = "CTRL_C" | "CTRL_D" | "CTRL_Z" | "ESC";
@@ -364,6 +370,7 @@ interface ActionBase {
 
 export interface ExecuteAction extends ActionBase {
   readonly type: "execute";
+  readonly approvalId?: string;
   readonly command: string;
   readonly executionId: string;
   status: ExecuteActionStatus;
@@ -394,6 +401,31 @@ export interface ResizeAction extends ActionBase {
 }
 
 export type SessionAction = ExecuteAction | InputAction | ControlAction | ResizeAction;
+
+export interface Approval {
+  readonly actionIdempotencyKey: string;
+  readonly actionRequestHash: string;
+  readonly command: string;
+  readonly expiresAt: string;
+  readonly id: string;
+  readonly operation: "execution.start";
+  readonly reason: string;
+  readonly requestHash: string;
+  readonly requestIdempotencyKey: string;
+  readonly requestedAt: string;
+  readonly requester: Actor;
+  readonly sessionGeneration: number;
+  readonly sessionId: string;
+  status: ApprovalStatus;
+  version: number;
+  approver?: Actor;
+  consumedActionId?: string;
+  consumedAt?: string;
+  decidedAt?: string;
+  decisionIdempotencyKey?: string;
+  decisionReason?: string;
+  decisionRequestHash?: string;
+}
 
 export interface SessionEvent {
   readonly id: string;

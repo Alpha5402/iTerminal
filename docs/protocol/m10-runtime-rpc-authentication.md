@@ -39,7 +39,7 @@ pnpm --silent rpc:grant -- \
   --client mcp-stdio \
   --id agent-local \
   --principal local-agent \
-  --operations control.send,events.query,execution.get,execution.start,execution.wait,input.send,interaction.get,screen.cells,screen.diff,screen.get,screen.region,screen.search,screen.wait,session.checkpoint.get,session.close,session.create,session.fork,session.get,session.list,terminal.resize,terminal.state.get \
+  --operations approval.get,approval.list,approval.request,control.send,events.query,execution.get,execution.start,execution.wait,input.send,interaction.get,screen.cells,screen.diff,screen.get,screen.region,screen.search,screen.wait,session.checkpoint.get,session.close,session.create,session.fork,session.get,session.list,terminal.resize,terminal.state.get \
   > .iterminal/credentials/mcp.grant
 chmod 600 .iterminal/credentials/mcp.grant
 ```
@@ -64,7 +64,7 @@ pnpm --silent rpc:grant -- \
   --scope paired-prefix \
   --id-prefix human_console_ \
   --principal-prefix local-console: \
-  --operations control.send,events.query,execution.get,execution.start,execution.wait,input.send,interaction.get,interaction.guard.acquire,interaction.guard.release,interaction.guard.renew,interaction.policy.set,screen.cells,screen.diff,screen.get,screen.region,screen.search,screen.wait,session.checkpoint.get,session.close,session.create,session.fork,session.get,session.list,terminal.resize,terminal.state.get \
+  --operations approval.decide,approval.get,approval.list,control.send,events.query,execution.get,execution.start,execution.wait,input.send,interaction.get,interaction.guard.acquire,interaction.guard.release,interaction.guard.renew,interaction.policy.set,screen.cells,screen.diff,screen.get,screen.region,screen.search,screen.wait,session.checkpoint.get,session.close,session.create,session.fork,session.get,session.list,terminal.resize,terminal.state.get \
   > .iterminal/credentials/console.grant
 ```
 

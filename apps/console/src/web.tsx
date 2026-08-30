@@ -72,6 +72,18 @@ interface InteractionState {
   readonly version: number;
 }
 
+interface Approval {
+  readonly actionIdempotencyKey: string;
+  readonly command: string;
+  readonly expiresAt: string;
+  readonly id: string;
+  readonly reason: string;
+  readonly requestedAt: string;
+  readonly requester: Actor;
+  readonly status: "PENDING" | "APPROVED" | "DENIED" | "EXPIRED" | "CONSUMED";
+  readonly version: number;
+}
+
 interface ScreenSnapshot {
   readonly columns: number;
   readonly cursor: { readonly column: number; readonly row: number };
@@ -147,6 +159,8 @@ function App(): React.JSX.Element {
   const [staleAcknowledged, setStaleAcknowledged] = useState(false);
   const [screen, setScreen] = useState<ScreenSnapshot>();
   const [timeline, setTimeline] = useState<readonly SessionEvent[]>([]);
+  const [approvals, setApprovals] = useState<readonly Approval[]>([]);
+  const [approvalReason, setApprovalReason] = useState("Reviewed in Human Console");
   const [cursor, setCursor] = useState(0);
   const latestCursor = useRef(0);
   const [streamState, setStreamState] = useState<"offline" | "connecting" | "live" | "gap">(
@@ -178,6 +192,9 @@ function App(): React.JSX.Element {
   const inputBuffer = useRef("");
   const inputTimer = useRef<number | undefined>(undefined);
   const selectedGeneration = sessions.find((candidate) => candidate.id === selectedId)?.generation;
+  const approvalRevision = timeline.findLast((event) =>
+    event.type.startsWith("approval."),
+  )?.sequence;
 
   useEffect(() => {
     latestSession.current = session;
@@ -411,6 +428,26 @@ function App(): React.JSX.Element {
       disposed = true;
     };
   }, [session?.generation, session?.id, session?.status]);
+
+  useEffect(() => {
+    if (session === undefined || session.status === "CLOSED") {
+      setApprovals([]);
+      return;
+    }
+    let disposed = false;
+    void api<readonly Approval[]>(
+      `/api/sessions/${encodeURIComponent(session.id)}/approvals?generation=${session.generation.toString()}`,
+    )
+      .then((next) => {
+        if (!disposed) setApprovals(next);
+      })
+      .catch((reason: unknown) => {
+        if (!disposed) setError(normalizeClientError(reason));
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [approvalRevision, session?.generation, session?.id, session?.status]);
 
   useEffect(() => {
     if (session?.status !== "RUNNING") setInteractive(false);
@@ -670,6 +707,33 @@ function App(): React.JSX.Element {
     }
   };
 
+  const decideApproval = async (
+    approval: Approval,
+    decision: "approve" | "deny",
+  ): Promise<void> => {
+    if (session === undefined) return;
+    try {
+      const decided = await api<Approval>(
+        `/api/sessions/${encodeURIComponent(session.id)}/approvals/${encodeURIComponent(approval.id)}/decision`,
+        {
+          body: {
+            decision,
+            expectedVersion: approval.version,
+            generation: session.generation,
+            idempotencyKey: crypto.randomUUID(),
+            reason: approvalReason,
+          },
+          method: "POST",
+        },
+      );
+      setApprovals((current) =>
+        current.map((candidate) => (candidate.id === decided.id ? decided : candidate)),
+      );
+    } catch (reason) {
+      setError(normalizeClientError(reason));
+    }
+  };
+
   const closeSession = async (): Promise<void> => {
     if (session === undefined) return;
     try {
@@ -893,6 +957,57 @@ function App(): React.JSX.Element {
         </section>
 
         <aside className="inspector" aria-label="Interaction and timeline">
+          <section className="approval-panel" aria-label="Agent Execute approvals">
+            <div className="section-title">
+              <h2>Approvals</h2>
+              <span>{approvals.filter((approval) => approval.status === "PENDING").length}</span>
+            </div>
+            <label>
+              Decision reason
+              <input
+                maxLength={512}
+                onChange={(event) => setApprovalReason(event.target.value)}
+                required
+                value={approvalReason}
+              />
+            </label>
+            {approvals.length === 0 ? (
+              <p className="mode-note">No Agent Execute proposals for this generation.</p>
+            ) : (
+              <ol className="approval-list">
+                {approvals.map((approval) => (
+                  <li key={approval.id}>
+                    <div className="section-title">
+                      <strong>{approval.status}</strong>
+                      <small>{formatTime(approval.expiresAt)}</small>
+                    </div>
+                    <code>{approval.command}</code>
+                    <small>
+                      {actorName(approval.requester)} · {approval.reason}
+                    </small>
+                    {approval.status === "PENDING" && (
+                      <div>
+                        <button
+                          disabled={approvalReason.trim() === ""}
+                          onClick={() => void decideApproval(approval, "approve")}
+                          type="button"
+                        >
+                          Approve once
+                        </button>
+                        <button
+                          disabled={approvalReason.trim() === ""}
+                          onClick={() => void decideApproval(approval, "deny")}
+                          type="button"
+                        >
+                          Deny
+                        </button>
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ol>
+            )}
+          </section>
           <section className="checkpoint-panel" aria-label="Shell checkpoint and rebuild">
             <div className="section-title">
               <h2>Shell checkpoint</h2>

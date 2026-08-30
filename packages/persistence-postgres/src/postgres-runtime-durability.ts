@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 
 import type {
+  DurableApprovalDecision,
+  DurableApprovalMutationResult,
+  DurableApprovalRequest,
   DurableExecuteAdmission,
   DurableExecuteAdmissionResult,
   DurableForkAdmission,
@@ -14,6 +17,7 @@ import type {
 } from "@iterminal/application";
 import type {
   Actor,
+  Approval,
   ControlAction,
   EventPage,
   Execution,
@@ -133,6 +137,45 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
 
   public async close(): Promise<void> {
     await Promise.all([this.#pool.end(), this.#observation.close(), this.#admission.close()]);
+  }
+
+  public requestApproval(
+    fence: SessionFence,
+    input: DurableApprovalRequest,
+  ): Promise<DurableApprovalMutationResult> {
+    return this.#admission.requestApproval({
+      approval: input.approval,
+      eventId: input.event.id,
+      fence,
+    });
+  }
+
+  public getApproval(sessionId: string, generation: number, approvalId: string): Promise<Approval> {
+    return this.#admission.getApproval(sessionId, generation, approvalId);
+  }
+
+  public listApprovals(sessionId: string, generation: number): Promise<readonly Approval[]> {
+    return this.#admission.listApprovals(sessionId, generation);
+  }
+
+  public decideApproval(
+    fence: SessionFence,
+    input: DurableApprovalDecision,
+  ): Promise<DurableApprovalMutationResult> {
+    return this.#admission.decideApproval({
+      approvalId: input.approvalId,
+      approver: input.approver,
+      decidedAt: new Date(input.decidedAt),
+      decision: input.decision,
+      decisionIdempotencyKey: input.decisionIdempotencyKey,
+      decisionReason: input.decisionReason,
+      decisionRequestHash: input.decisionRequestHash,
+      eventId: input.event.id,
+      expectedVersion: input.expectedVersion,
+      fence,
+      sessionGeneration: input.sessionGeneration,
+      sessionId: input.sessionId,
+    });
   }
 
   public async createSession(
@@ -626,6 +669,16 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
       requestHash: input.action.requestHash,
       sessionId: input.action.sessionId,
       fence,
+      ...(input.approvalConsumption === undefined
+        ? {}
+        : {
+            approvalConsumption: {
+              actionRequestHash: input.approvalConsumption.actionRequestHash,
+              approvalId: input.approvalConsumption.approvalId,
+              consumedAt: new Date(input.approvalConsumption.consumedAt),
+              eventId: input.approvalConsumption.event.id,
+            },
+          }),
     });
   }
 

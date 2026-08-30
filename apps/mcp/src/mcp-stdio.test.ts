@@ -36,6 +36,9 @@ describe("M4 stdio MCP bridge", () => {
     const first = await connectClient("m4-client-first");
     const listed = await first.listTools();
     expect(listed.tools.map((tool) => tool.name).sort()).toEqual([
+      "approval_get",
+      "approval_list",
+      "approval_request",
       "control",
       "events_query",
       "execute",
@@ -74,6 +77,55 @@ describe("M4 stdio MCP bridge", () => {
       status: "READY",
     });
     expect(sessions.some((candidate) => candidate.id === session.id)).toBe(true);
+    const proposal = await callTool<ApprovalResult>(first, "approval_request", {
+      actionIdempotencyKey: "m10-approved-action",
+      command: "export ITERM_APPROVED=yes",
+      generation: session.generation,
+      reason: "Set test environment after Human review",
+      requestIdempotencyKey: "m10-approved-request",
+      sessionId: session.id,
+    });
+    expect(proposal).toMatchObject({ status: "PENDING", version: 1 });
+    const ownApprovals = await callTool<readonly ApprovalResult[]>(first, "approval_list", {
+      generation: session.generation,
+      sessionId: session.id,
+      status: "PENDING",
+    });
+    expect(ownApprovals.map((approval) => approval.id)).toContain(proposal.id);
+    if (daemon === undefined) throw new Error("Runtime daemon was not started");
+    const approvalHuman = new UnixRuntimeClient(daemon.socketPath);
+    const decided = await approvalHuman.decideApproval({
+      actor: {
+        capabilities: ACTOR_CAPABILITY_PROFILES.human,
+        client: "m10-human-rpc",
+        id: "human-m10",
+        principal: "m10-test-human",
+        type: "human",
+      },
+      approvalId: proposal.id,
+      decision: "approve",
+      expectedVersion: proposal.version,
+      idempotencyKey: "m10-human-approve",
+      reason: "Exact command reviewed",
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+    });
+    expect(decided.status).toBe("APPROVED");
+    const approvedMutation = await callTool<StartedResult>(first, "execute", {
+      approvalId: proposal.id,
+      command: "export ITERM_APPROVED=yes",
+      generation: session.generation,
+      idempotencyKey: "m10-approved-action",
+      sessionId: session.id,
+    });
+    await callTool(first, "execution_wait", { executionId: approvedMutation.execution.id });
+    expect(
+      await callTool<ApprovalResult>(first, "approval_get", {
+        approvalId: proposal.id,
+        generation: session.generation,
+        sessionId: session.id,
+      }),
+    ).toMatchObject({ status: "CONSUMED", version: 3 });
     const mutation = await callTool<StartedResult>(first, "execute", {
       command: "cd subdir && export ITERM_M4=shared",
       generation: session.generation,
@@ -387,4 +439,10 @@ type ScreenResult = {
   readonly screenVersion: number;
   readonly sessionGeneration: number;
   readonly sessionId: string;
+};
+
+type ApprovalResult = {
+  readonly id: string;
+  readonly status: string;
+  readonly version: number;
 };

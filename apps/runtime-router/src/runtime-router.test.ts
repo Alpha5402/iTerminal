@@ -73,6 +73,45 @@ describeDatabase("M9.2 central Runtime Router", () => {
     const second = await client.createSession({ shell: "zsh", workspaceRoot: rightWorkspace });
     expect(second.ownerId).toBe("owner-router-b");
 
+    const approval = await client.requestExecuteApproval({
+      actionIdempotencyKey: "router-approved-action",
+      actor,
+      command: "export ROUTER_APPROVED=yes",
+      reason: "Verify exact owner Approval routing",
+      requestIdempotencyKey: "router-approval-request",
+      sessionGeneration: first.generation,
+      sessionId: first.id,
+    });
+    expect(
+      await client.decideApproval({
+        actor: human,
+        approvalId: approval.id,
+        decision: "approve",
+        expectedVersion: approval.version,
+        idempotencyKey: "router-approval-decision",
+        reason: "Exact routed proposal reviewed",
+        sessionGeneration: first.generation,
+        sessionId: first.id,
+      }),
+    ).toMatchObject({ status: "APPROVED", version: 2 });
+    const approved = await client.startExecute({
+      actor,
+      approvalId: approval.id,
+      command: "export ROUTER_APPROVED=yes",
+      idempotencyKey: "router-approved-action",
+      sessionGeneration: first.generation,
+      sessionId: first.id,
+    });
+    expect((await client.waitExecution(approved.execution.id)).status).toBe("COMPLETED");
+    expect(
+      await client.getApproval({
+        actor,
+        approvalId: approval.id,
+        sessionGeneration: first.generation,
+        sessionId: first.id,
+      }),
+    ).toMatchObject({ status: "CONSUMED", version: 3 });
+
     const firstResult = join(root, "first.txt");
     const firstSetup = await client.startExecute({
       actor,
@@ -573,6 +612,14 @@ const actor = {
   principal: "local-agent",
   capabilities: ACTOR_CAPABILITY_PROFILES.agent,
   type: "agent" as const,
+};
+
+const human = {
+  client: "m10-router-human",
+  id: "human-m10-router",
+  principal: "local-human",
+  capabilities: ACTOR_CAPABILITY_PROFILES.human,
+  type: "human" as const,
 };
 
 function shellQuote(value: string): string {

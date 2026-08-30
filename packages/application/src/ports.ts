@@ -1,5 +1,7 @@
 import type {
   Actor,
+  AgentExecuteApprovalPolicy,
+  Approval,
   ControlAction,
   ControlDelivery,
   EventPage,
@@ -137,6 +139,36 @@ export interface DurableExecuteAdmission {
   readonly execution: Execution;
   readonly acceptedEvent: DurableSessionEvent;
   readonly dispatchingEvent: DurableSessionEvent;
+  readonly approvalConsumption?: Readonly<{
+    readonly actionRequestHash: string;
+    readonly approvalId: string;
+    readonly consumedAt: string;
+    readonly event: DurableSessionEvent;
+  }>;
+}
+
+export interface DurableApprovalRequest {
+  readonly approval: Approval;
+  readonly event: DurableSessionEvent;
+}
+
+export interface DurableApprovalDecision {
+  readonly approvalId: string;
+  readonly approver: Actor;
+  readonly decidedAt: string;
+  readonly decision: "approve" | "deny";
+  readonly decisionIdempotencyKey: string;
+  readonly decisionReason: string;
+  readonly decisionRequestHash: string;
+  readonly event: DurableSessionEvent;
+  readonly expectedVersion: number;
+  readonly sessionGeneration: number;
+  readonly sessionId: string;
+}
+
+export interface DurableApprovalMutationResult {
+  readonly approval: Approval;
+  readonly replayed: boolean;
 }
 
 export interface DurableExecuteAdmissionResult {
@@ -254,6 +286,16 @@ export interface RuntimeOwnerRegistry {
 }
 
 export interface RuntimeDurability {
+  requestApproval(
+    fence: SessionFence,
+    input: DurableApprovalRequest,
+  ): Promise<DurableApprovalMutationResult>;
+  getApproval(sessionId: string, generation: number, approvalId: string): Promise<Approval>;
+  listApprovals(sessionId: string, generation: number): Promise<readonly Approval[]>;
+  decideApproval(
+    fence: SessionFence,
+    input: DurableApprovalDecision,
+  ): Promise<DurableApprovalMutationResult>;
   createSession(
     session: Session,
     events: readonly DurableSessionEvent[],
@@ -382,6 +424,7 @@ export interface RuntimeDurability {
 }
 
 export interface RuntimeServiceOptions {
+  readonly agentExecuteApproval?: AgentExecuteApprovalPolicy;
   readonly checkpointEnvironmentKeys?: readonly string[];
   readonly durability?: RuntimeDurability;
   readonly executionDispatch?: "external" | "immediate";

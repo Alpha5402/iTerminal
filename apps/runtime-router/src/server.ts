@@ -6,9 +6,13 @@ import {
   type AcquireInteractionGuardRequest,
   type ControlRequest,
   type CreateSessionRequest,
+  type DecideApprovalRequest,
   type ExecuteRequest,
   type ForkSessionRequest,
+  type GetApprovalRequest,
   type InputRequest,
+  type ListApprovalsRequest,
+  type RequestExecuteApprovalRequest,
   type ReleaseInteractionGuardRequest,
   type RenewInteractionGuardRequest,
   type ResizeRequest,
@@ -23,6 +27,7 @@ import {
   type SetInputPolicyRequest,
 } from "@iterminal/application";
 import type {
+  Approval,
   ControlAction,
   EventPage,
   Execution,
@@ -86,6 +91,30 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
     private readonly hooks: RuntimeRouterHooks = {},
     private readonly databaseGate?: RuntimeRouterDatabaseGate,
   ) {}
+
+  public requestExecuteApproval(request: RequestExecuteApprovalRequest): Promise<Approval> {
+    return this.#withSession(request.sessionId, "approval.request", (client) =>
+      client.requestExecuteApproval(request),
+    );
+  }
+
+  public getApproval(request: GetApprovalRequest): Promise<Approval> {
+    return this.#withSession(request.sessionId, "approval.get", (client) =>
+      client.getApproval(request),
+    );
+  }
+
+  public listApprovals(request: ListApprovalsRequest): Promise<readonly Approval[]> {
+    return this.#withSession(request.sessionId, "approval.list", (client) =>
+      client.listApprovals(request),
+    );
+  }
+
+  public decideApproval(request: DecideApprovalRequest): Promise<Approval> {
+    return this.#withSession(request.sessionId, "approval.decide", (client) =>
+      client.decideApproval(request),
+    );
+  }
 
   public async createSession(request: CreateSessionRequest): Promise<Session> {
     const idempotencyKey = request.idempotencyKey;

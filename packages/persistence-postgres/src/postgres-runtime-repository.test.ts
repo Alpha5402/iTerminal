@@ -1,4 +1,5 @@
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
+import type { Approval } from "@iterminal/domain";
 import { randomUUID } from "node:crypto";
 
 import { RuntimeError } from "@iterminal/domain";
@@ -158,6 +159,104 @@ describeDatabase("PostgresRuntimeRepository", () => {
     });
   });
 
+  it("atomically consumes one approved proposal with Execute admission", async () => {
+    const session = await createSession(repository);
+    const execute = executeRequest(session.id, "agent-approved");
+    const approval = approvalFixture(execute);
+    const requested = await repository.requestApproval({
+      approval,
+      eventId: `evt_${randomUUID()}`,
+    });
+    expect(requested).toMatchObject({
+      approval: {
+        ...approval,
+        expiresAt: expect.any(String) as string,
+        requestedAt: expect.any(String) as string,
+      },
+      replayed: false,
+    });
+    const replayedRequest = await repository.requestApproval({
+      approval: { ...approval, id: `apr_${randomUUID()}` },
+      eventId: `evt_${randomUUID()}`,
+    });
+    expect(replayedRequest).toEqual({ approval: requested.approval, replayed: true });
+
+    const decided = await repository.decideApproval({
+      approvalId: approval.id,
+      approver: {
+        capabilities: ACTOR_CAPABILITY_PROFILES.human,
+        client: "m10-test",
+        id: "human-approver",
+        principal: "human-approver",
+        type: "human",
+      },
+      decidedAt: new Date(),
+      decision: "approve",
+      decisionIdempotencyKey: "approve-once",
+      decisionReason: "Reviewed exact command",
+      decisionRequestHash: "d".repeat(64),
+      eventId: `evt_${randomUUID()}`,
+      expectedVersion: 1,
+      sessionGeneration: 1,
+      sessionId: session.id,
+    });
+    expect(decided.approval).toMatchObject({ status: "APPROVED", version: 2 });
+
+    const admission = {
+      ...execute,
+      approvalConsumption: {
+        actionRequestHash: approval.actionRequestHash,
+        approvalId: approval.id,
+        consumedAt: new Date(),
+        eventId: `evt_${randomUUID()}`,
+      },
+    } satisfies AcceptExecuteTransaction;
+    await expect(
+      repository.acceptExecute({ ...admission, failpoint: "before_commit" }),
+    ).rejects.toThrow("Injected failure before commit");
+    expect(await repository.getApproval(session.id, 1, approval.id)).toMatchObject({
+      status: "APPROVED",
+      version: 2,
+    });
+    expect(await repository.inspectSession(session.id)).toMatchObject({
+      actionCount: 0,
+      status: "READY",
+    });
+
+    const accepted = await repository.acceptExecute(admission);
+    expect(await repository.getApproval(session.id, 1, approval.id)).toMatchObject({
+      consumedActionId: accepted.actionId,
+      status: "CONSUMED",
+      version: 3,
+    });
+    const replay = await repository.acceptExecute({
+      ...admission,
+      actionId: `act_${randomUUID()}`,
+      eventId: `evt_${randomUUID()}`,
+      executionId: `exe_${randomUUID()}`,
+      outboxId: `out_${randomUUID()}`,
+    });
+    expect(replay).toEqual({ ...accepted, replayed: true });
+    await expect(
+      repository.acceptExecute({
+        ...executeRequest(session.id, "agent-approved"),
+        approvalConsumption: {
+          ...admission.approvalConsumption,
+          eventId: `evt_${randomUUID()}`,
+        },
+        idempotencyKey: "different-action",
+      }),
+    ).rejects.toMatchObject({ code: "APPROVAL_REQUIRED" });
+    const action = await pool.query<{ payload: { approvalId?: string; command?: string } }>(
+      "SELECT payload FROM actions WHERE id = $1",
+      [accepted.actionId],
+    );
+    expect(action.rows[0]?.payload).toEqual({
+      approvalId: approval.id,
+      command: execute.command,
+    });
+  });
+
   it("marks lost live generations BROKEN and ambiguous executions UNKNOWN", async () => {
     const session = await createSession(repository);
     await repository.acceptExecute(executeRequest(session.id, "agent-crash"));
@@ -307,5 +406,26 @@ function executeRequest(sessionId: string, actorId: string): AcceptExecuteTransa
     outboxId: `out_${randomUUID()}`,
     requestHash: `hash-${actorId}`,
     sessionId,
+  };
+}
+
+function approvalFixture(execute: AcceptExecuteTransaction): Approval {
+  const requestedAt = new Date();
+  return {
+    actionIdempotencyKey: execute.idempotencyKey,
+    actionRequestHash: "a".repeat(64),
+    command: execute.command,
+    expiresAt: new Date(requestedAt.getTime() + 300_000).toISOString(),
+    id: `apr_${randomUUID()}`,
+    operation: "execution.start",
+    reason: "Needs Human confirmation",
+    requestHash: "b".repeat(64),
+    requestIdempotencyKey: `approval-${execute.idempotencyKey}`,
+    requestedAt: requestedAt.toISOString(),
+    requester: execute.actor,
+    sessionGeneration: execute.generation,
+    sessionId: execute.sessionId,
+    status: "PENDING",
+    version: 1,
   };
 }

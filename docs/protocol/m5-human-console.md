@@ -54,6 +54,9 @@ The HTTP status is only transport guidance. Clients branch on the stable Runtime
 | `GET`    | `/api/sessions/:id/checkpoint?generation=`                        | bounded checkpoint metadata; no environment values                        |
 | `POST`   | `/api/sessions/:id/fork`                                          | exact-version, stale-aware Human `session.fork`                           |
 | `POST`   | `/api/sessions/:id/execute`                                       | READY-only `execution.start`; command + idempotency key                   |
+| `GET`    | `/api/sessions/:id/approvals?generation=&status=`                 | Human-visible Approval pending/history list                               |
+| `GET`    | `/api/sessions/:id/approvals/:approvalId?generation=`             | exact-generation `approval.get`                                           |
+| `POST`   | `/api/sessions/:id/approvals/:approvalId/decision`                | Human-only expected-version approve/deny                                  |
 | `POST`   | `/api/sessions/:id/input`                                         | RUNNING-only `input.send`; exact Execution and optional screen version    |
 | `POST`   | `/api/sessions/:id/control`                                       | RUNNING-only `control.send`; explicit delivery and Guard-bypass audit bit |
 | `POST`   | `/api/sessions/:id/resize`                                        | expected-geometry-version `terminal.resize`; READY/RESERVED/RUNNING       |
@@ -69,6 +72,8 @@ The HTTP status is only transport guidance. Clients branch on the stable Runtime
 READY Input/Control is rejected before Runtime write admission. RUNNING Execute continues to use the Runtime's `PTY_BUSY` result. The Console cannot turn an HTTP success into an Execution-completed claim: Execute returns accepted Action plus the initial Execution projection.
 
 `POST /api/sessions` requires `idempotencyKey`. The browser retains one generated key after an uncertain or failed create and reuses it only while shell and workspace are unchanged; success clears it. A same-key request with changed creation fields returns `IDEMPOTENCY_KEY_REUSED`.
+
+The Approval panel shows the exact Agent command, requester, bounded request reason, expiry, and lifecycle status for one Session generation. Approve and deny require a non-empty Human decision reason and the displayed expected version. Browser JSON cannot choose the Human Actor, approve another generation, mutate the proposal, or turn a decision into an Execute. An approval authorizes only the bound Agent proposal once; PostgreSQL consumes it in the same transaction as Action admission. The command is stored in the Approval row for authorized Human review but is not copied into Approval Event payloads, transport errors, or metrics.
 
 For a historical `BROKEN` Session the Console does not open the live screen WebSocket. It reads durable Events, shows checkpoint version/status/age/cwd and environment key names, and requires an explicit stale acknowledgement before rebuild. The fork request uses the cookie-bound Human Actor, exact checkpoint version, and an idempotency key. Success selects a new Session/PTY; the historical parent remains `BROKEN`. The UI explicitly states that process, REPL/editor/vim, job, alias/function/trap, socket, and descriptor state is not copied and that workspace files remain shared.
 

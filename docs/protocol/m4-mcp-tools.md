@@ -1,13 +1,13 @@
 # M4 MCP stdio protocol
 
-M6.1–M7.2 extend this protocol with bounded screen observation, synchronization, stable styled-cell metadata, generation-scoped interaction policy, controlled terminal geometry, advisory terminal-state evidence, versioned checkpoint fork, and same-owner durable rebuild while preserving the M4 Action and Event contracts.
+M6.1–M7.2 extend this protocol with bounded screen observation, synchronization, interaction policy, controlled geometry, checkpoint fork, and durable rebuild. M10.3 adds exact Agent Execute Approval without weakening the M4 Action and Event contracts.
 
 iTerminal uses the official Model Context Protocol TypeScript SDK v2 and `serveStdio`. The bridge logs only to stderr because stdout is the MCP framing channel. Separate Runtime daemons own all live state; set `ITERM_RUNTIME_SOCKET` to one daemon's absolute Unix socket or, for M9 multi-owner routing, the stable Router socket before starting the bridge.
 
 The daemon has two explicit storage modes:
 
 - Without `ITERM_DATABASE_URL` or `ITERM_DATABASE_URLS`, it is a development-only in-memory live Runtime.
-- With exactly one of those settings, Execute/Input/Control/Resize admission, interaction policy/Guard state, Shell Checkpoints, Session fork lineage/idempotency, and lifecycle facts are committed to PostgreSQL, PTY output enters a bounded per-Session ingest loop, and `events_query` reads the durable Event stream.
+- With exactly one of those settings, Execute/Input/Control/Resize admission, Approval state/consumption, interaction policy/Guard state, Shell Checkpoints, Session fork lineage/idempotency, and lifecycle facts are committed to PostgreSQL, PTY output enters a bounded per-Session ingest loop, and `events_query` reads the durable Event stream.
 
 In both modes the PTY remains process-local live truth. Restart recovery marks the previous stable owner generation `BROKEN` and ambiguous work `UNKNOWN`; a PostgreSQL-backed daemon may expose a bounded same-owner `BROKEN` rebuild projection, but it has no Executor, screen, or fake READY state.
 
@@ -55,6 +55,7 @@ M9.18 gives each durable Runtime database role a bounded connection pool. `ITERM
 | `ITERM_ACTOR_ACTION_RATE_LIMIT`               | `120`                           |
 | `ITERM_SESSION_ACTION_RATE_LIMIT`             | `240`                           |
 | `ITERM_ACTION_RATE_LIMIT_WINDOW_MS`           | `1000`                          |
+| `ITERM_AGENT_EXECUTE_APPROVAL`                | `optional`; or `required`       |
 
 Capacity weight is an integer from 1 through 1000 and expresses only the owner's relative share of new root Sessions. The Session lease must exceed two database health-check intervals; the owner lease must additionally cover the Guardian termination grace. Session expiry is capped at the current owner lease expiry. The drain timeout is one shared budget for pending root-create settlement and accepted RPC response drain; expiry proceeds to Session closure without reassigning exact-owner work. The production Runtime Router uses the health/reconnect/statement-timeout values for degraded startup and recovery. Database-wide connection planning must multiply the four Runtime roles by Runtime count, endpoint count, and `ITERM_DATABASE_POOL_MAX`, then reserve capacity for Router/relay/worker/Console/migration/monitoring clients. These settings are valid only with exactly one of `ITERM_DATABASE_URL` or `ITERM_DATABASE_URLS`; the latter is comma-separated and ordered. Read-only standbys are rejected until an external control plane promotes one.
 
@@ -82,7 +83,10 @@ M10.2 requires the bridge to present an expiring exact-Actor Runtime RPC grant. 
 | `session_close`      | Terminates the exact generation's PTY/process group                                   |
 | `session_checkpoint` | Reads bounded latest checkpoint metadata without environment values                   |
 | `session_fork`       | Rebuilds a new Session from an exact checkpoint version with stale acknowledgement    |
-| `execute`            | Returns accepted Action and DISPATCHING/RUNNING Execution immediately                 |
+| `approval_request`   | Requests Human review of one exact future Agent Execute proposal                      |
+| `approval_get`       | Reads one Approval requested by this exact Agent                                      |
+| `approval_list`      | Lists only this Agent's Approvals for one exact Session generation                    |
+| `execute`            | Optionally consumes `approvalId`; returns accepted Action/Execution immediately       |
 | `execution_get`      | Reads current bounded Execution projection                                            |
 | `execution_wait`     | Waits for a terminal Execution state without replay                                   |
 | `interaction_get`    | Reads exact-generation policy, state version, and active short Human Guard            |
@@ -117,6 +121,8 @@ Every successful tool result contains a JSON text block and `structuredContent: 
 `session_create` requires a caller-generated global creation idempotency key. After `DELIVERY_UNKNOWN`, repeat the exact key, shell, and workspace to retrieve the original durable Session; a changed request returns `IDEMPOTENCY_KEY_REUSED`. Concurrent Routers converge on one placement and Session for that key. The database defaults to retaining at most 100,000 requests for a minimum of 24 hours and cleaning at most 1,000 eligible rows during one new admission. Operators change the singleton `session_creation_policies` row, not individual Router environment variables. Completed active Sessions and unfinished requests whose exact owner is live are not eligible. Once terminal/stale retention expires and cleanup removes a key, using it again is explicitly a new creation request and may produce a different Session/PTTY. Development-only in-memory mode retains settled keys for the process lifetime and is not a hostile-client boundary.
 
 `execute`, `input`, `control`, and `terminal_resize` also require caller-generated idempotency keys. Their namespace is one Session + Actor across all Action kinds, so reusing a key for another kind or payload returns `IDEMPOTENCY_KEY_REUSED`. A transport disconnect after a mutating RPC returns `DELIVERY_UNKNOWN`; inspect state using the same idempotency key or Events before any deliberate retry.
+
+`approval_request` binds one future `execute` to the exact Session generation, canonical Agent identity and capabilities, command, and Action idempotency key. TTL defaults to five minutes and is bounded to 30 seconds–30 minutes. The MCP bridge can request/get/list only its own records; it never exposes `approval.decide`. A Human decides through an authenticated Runtime/Console path using the expected Approval version. After `APPROVED`, the Agent must call `execute` with the same bound fields plus `approvalId`. PostgreSQL atomically admits the Action and changes the Approval to `CONSUMED`; an exact admitted Action replay still returns the original result, but a second Action cannot reuse the Approval. `ITERM_AGENT_EXECUTE_APPROVAL=required` enforces this for every new Agent Execute; `optional` accepts unapproved Agent Execute while still validating any supplied Approval. Approval Events omit command content.
 
 `terminal_resize` takes `columns`, `rows`, and the exact `expectedGeometryVersion` observed from `screen_get`. Geometry starts at 120×40/version 1 and is bounded to 40–240 columns by 12–100 rows. A stale CAS returns retryable `GEOMETRY_CHANGED` before creating an Action. Human/Agent resize follows the same policy and Human Guard as Input/Control; Scheduler/System remain denied. A confirmed resize increments both geometry and screen versions. Once `terminal.resize_write_attempted` exists, any unconfirmed PTY/projection outcome becomes Action `UNKNOWN` plus generation `BROKEN` and is never automatically replayed.
 

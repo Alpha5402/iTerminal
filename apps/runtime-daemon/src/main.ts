@@ -26,6 +26,7 @@ const actionRateLimitWindowMilliseconds = optionalPositiveInteger(
   "ITERM_ACTION_RATE_LIMIT_WINDOW_MS",
 );
 const executionDispatch = parseExecutionDispatch(process.env.ITERM_EXECUTION_DISPATCH);
+const agentExecuteApproval = parseAgentExecuteApproval(process.env.ITERM_AGENT_EXECUTE_APPROVAL);
 const checkpointEnvironmentKeys = optionalEnvironmentKeys("ITERM_CHECKPOINT_ENV_KEYS");
 const databaseStatementTimeoutMilliseconds = optionalPositiveInteger(
   "ITERM_DATABASE_STATEMENT_TIMEOUT_MS",
@@ -44,6 +45,7 @@ const processGuardianTerminationGraceMilliseconds = optionalPositiveInteger(
 const rpcAuthentication = runtimeRpcAuthenticationFromEnvironment(process.env);
 const daemon = await startRuntimeDaemon({
   socketPath,
+  ...(agentExecuteApproval === undefined ? {} : { agentExecuteApproval }),
   ...(actionRateLimitWindowMilliseconds === undefined ? {} : { actionRateLimitWindowMilliseconds }),
   ...(actorActionRateLimit === undefined ? {} : { actorActionRateLimit }),
   ...(checkpointEnvironmentKeys === undefined ? {} : { checkpointEnvironmentKeys }),
@@ -103,6 +105,12 @@ function parseExecutionDispatch(value: string | undefined): "external" | "immedi
   if (value === undefined) return undefined;
   if (value === "external" || value === "immediate") return value;
   throw new Error("ITERM_EXECUTION_DISPATCH must be 'external' or 'immediate'");
+}
+
+function parseAgentExecuteApproval(value: string | undefined): "optional" | "required" | undefined {
+  if (value === undefined) return undefined;
+  if (value === "optional" || value === "required") return value;
+  throw new Error("ITERM_AGENT_EXECUTE_APPROVAL must be 'optional' or 'required'");
 }
 
 function optionalPositiveInteger(name: string): number | undefined {

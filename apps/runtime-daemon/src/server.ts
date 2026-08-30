@@ -69,6 +69,7 @@ const DEFAULT_CAPACITY_WEIGHT = 1;
 const DEFAULT_GUARDIAN_TERMINATION_GRACE_MILLISECONDS = 100;
 
 export async function startRuntimeDaemon(options: {
+  readonly agentExecuteApproval?: RuntimeServiceOptions["agentExecuteApproval"];
   readonly actionRateLimitWindowMilliseconds?: number;
   readonly actorActionRateLimit?: number;
   readonly beforeAcceptExecuteCommit?: () => void;
@@ -297,6 +298,9 @@ export async function startRuntimeDaemon(options: {
   const runtime =
     options.runtime ??
     new RuntimeService(new MemoryRuntimeStore(), new PtyShellExecutorFactory(processGuardian), {
+      ...(options.agentExecuteApproval === undefined
+        ? {}
+        : { agentExecuteApproval: options.agentExecuteApproval }),
       ...(durability === undefined ? {} : { durability }),
       ...(options.checkpointEnvironmentKeys === undefined
         ? {}

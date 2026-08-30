@@ -32,17 +32,31 @@ const identitySchema = z.strictObject({
   generation: z.number().int().positive(),
 });
 const sessionParamsSchema = z.strictObject({ sessionId: z.string().min(1).max(256) });
+const approvalParamsSchema = sessionParamsSchema.extend({
+  approvalId: z.string().min(1).max(256),
+});
 const createSessionSchema = z.strictObject({
   idempotencyKey: z.string().min(1).max(256),
   shell: z.enum(["bash", "zsh"]),
   workspaceRoot: z.string().min(1).max(4_096),
 });
 const executeSchema = identitySchema.extend({
+  approvalId: z.string().min(1).max(256).optional(),
   command: z
     .string()
     .min(1)
     .max(256 * 1_024),
   idempotencyKey: z.string().min(1).max(256),
+});
+const approvalListSchema = z.strictObject({
+  generation: z.coerce.number().int().positive(),
+  status: z.enum(["PENDING", "APPROVED", "DENIED", "EXPIRED", "CONSUMED"]).optional(),
+});
+const approvalDecisionSchema = identitySchema.extend({
+  decision: z.enum(["approve", "deny"]),
+  expectedVersion: z.number().int().positive(),
+  idempotencyKey: z.string().min(1).max(256),
+  reason: z.string().min(1).max(512),
 });
 const forkSessionSchema = identitySchema.extend({
   allowStale: z.boolean(),
@@ -250,12 +264,62 @@ export async function createHumanConsoleApp(
         request,
         await options.gateway.startExecute({
           actor,
+          ...(body.approvalId === undefined ? {} : { approvalId: body.approvalId }),
           command: body.command,
           idempotencyKey: body.idempotencyKey,
           sessionGeneration: body.generation,
           sessionId,
         }),
       ),
+    );
+  });
+
+  app.get("/api/sessions/:sessionId/approvals", async (request, reply) => {
+    const actor = actorForRequest(request, reply, actors, now);
+    const { sessionId } = sessionParamsSchema.parse(request.params);
+    const query = approvalListSchema.parse(request.query);
+    return success(
+      request,
+      await options.gateway.listApprovals({
+        actor,
+        sessionGeneration: query.generation,
+        sessionId,
+        ...(query.status === undefined ? {} : { status: query.status }),
+      }),
+    );
+  });
+
+  app.get("/api/sessions/:sessionId/approvals/:approvalId", async (request, reply) => {
+    const actor = actorForRequest(request, reply, actors, now);
+    const { approvalId, sessionId } = approvalParamsSchema.parse(request.params);
+    const { generation } = approvalListSchema.pick({ generation: true }).parse(request.query);
+    return success(
+      request,
+      await options.gateway.getApproval({
+        actor,
+        approvalId,
+        sessionGeneration: generation,
+        sessionId,
+      }),
+    );
+  });
+
+  app.post("/api/sessions/:sessionId/approvals/:approvalId/decision", async (request, reply) => {
+    const actor = actorForRequest(request, reply, actors, now);
+    const { approvalId, sessionId } = approvalParamsSchema.parse(request.params);
+    const body = approvalDecisionSchema.parse(request.body);
+    return success(
+      request,
+      await options.gateway.decideApproval({
+        actor,
+        approvalId,
+        decision: body.decision,
+        expectedVersion: body.expectedVersion,
+        idempotencyKey: body.idempotencyKey,
+        reason: body.reason,
+        sessionGeneration: body.generation,
+        sessionId,
+      }),
     );
   });
 
@@ -915,6 +979,8 @@ function runtimeStatus(code: RuntimeError["code"]): number {
       return 404;
     case "POLICY_DENIED":
       return 403;
+    case "APPROVAL_NOT_FOUND":
+      return 404;
     case "INPUT_GUARDED":
       return 423;
     case "BACKPRESSURE":
@@ -951,6 +1017,10 @@ function allowedNextActions(code: string): readonly string[] {
       return ["inspect_checkpoint", "create_clean_session"];
     case "EXECUTION_CHANGED":
       return ["refresh_session", "target_current_execution"];
+    case "APPROVAL_REQUIRED":
+      return ["request_approval", "wait_for_human_decision", "retry_exact_approved_action"];
+    case "APPROVAL_CHANGED":
+      return ["refresh_approval", "decide_current_version"];
     case "BACKPRESSURE":
       return ["wait_and_retry_same_idempotency_key"];
     case "RATE_LIMITED":

@@ -100,6 +100,47 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
     expect(readyInput.status).toBe(409);
     expect(await bodyErrorCode(readyInput)).toBe("SESSION_NOT_READY");
 
+    const proposal = await runtime.requestExecuteApproval({
+      actionIdempotencyKey: "m10-console-approved-action",
+      actor: agent,
+      command: "export ITERM_CONSOLE_APPROVED=yes",
+      reason: "Exercise the Human Console decision path",
+      requestIdempotencyKey: "m10-console-approval-request",
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+    });
+    const pending = await requestResult<readonly ApprovalResult[]>(
+      consoleServer,
+      cookie,
+      `/api/sessions/${session.id}/approvals?generation=${session.generation.toString()}&status=PENDING`,
+    );
+    expect(pending.map((approval) => approval.id)).toContain(proposal.id);
+    const approved = await requestResult<ApprovalResult>(
+      consoleServer,
+      cookie,
+      `/api/sessions/${session.id}/approvals/${proposal.id}/decision`,
+      {
+        body: {
+          decision: "approve",
+          expectedVersion: proposal.version,
+          generation: session.generation,
+          idempotencyKey: "m10-console-human-approve",
+          reason: "Exact Agent command reviewed in Console",
+        },
+        method: "POST",
+      },
+    );
+    expect(approved).toMatchObject({ status: "APPROVED", version: 2 });
+    const approvedExecution = await runtime.startExecute({
+      actor: agent,
+      approvalId: proposal.id,
+      command: "export ITERM_CONSOLE_APPROVED=yes",
+      idempotencyKey: "m10-console-approved-action",
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+    });
+    await runtime.waitExecution(approvedExecution.execution.id);
+
     const started = await requestResult<StartedResult>(
       consoleServer,
       cookie,
@@ -251,6 +292,12 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
     await runtime.closeSession(parent.id, parent.generation);
   }, 30_000);
 });
+
+type ApprovalResult = {
+  readonly id: string;
+  readonly status: string;
+  readonly version: number;
+};
 
 async function createFixture(fixtures: string[]): Promise<{
   readonly root: string;
