@@ -12,6 +12,7 @@ const requiredReports = [
   "docs/verification/M8/2026-08-30-reliable-messaging.md",
   "docs/verification/M8/2026-08-30-owner-dispatch.md",
   "docs/verification/M8/2026-08-30-interaction-crash-retry-outage.md",
+  "docs/verification/M8/2026-08-30-admission-backpressure.md",
 ];
 
 for (const report of requiredReports) {

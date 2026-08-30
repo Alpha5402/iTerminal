@@ -28,7 +28,7 @@ pnpm test:m1
 pnpm test:m4
 ```
 
-- M2 reservation/recovery: 6 tests passed.
+- M2 reservation/recovery: 7 tests passed.
 - M3 bounded observation: 4 tests passed.
 - M4.1 durable end to end: 2 tests passed.
 - Application durability failure injection: 2 tests passed.

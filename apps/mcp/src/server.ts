@@ -26,6 +26,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
         "Create or select one shared Session, then pass its exact generation to every operation. " +
         "execute starts one top-level Shell command and returns immediately; use execution_wait or events_query to observe it. " +
         "PTY_BUSY means another Execute is active: wait for it, send targeted input/control if appropriate, or use another Session. " +
+        "BACKPRESSURE means no Action was admitted; wait for durable delivery capacity and retry the identical idempotency key. " +
         "Never retry a mutating call after DELIVERY_UNKNOWN without first inspecting the idempotency key or durable events.",
     },
   );
@@ -87,7 +88,8 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
       annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: true },
       description:
         "Start one top-level command in the Session's persistent Shell and return its Action/Execution immediately. " +
-        "Only one Execute may be active. On PTY_BUSY, inspect activeExecutionId and choose execution_wait, input, or control; Session forking arrives in a later milestone.",
+        "Only one Execute may be active. On PTY_BUSY, inspect activeExecutionId and choose execution_wait, input, or control. " +
+        "On BACKPRESSURE, no Action/reservation exists: wait for Outbox capacity and retry this identical request key. Session forking arrives in a later milestone.",
       inputSchema: z.strictObject({
         command: z.string().max(256 * 1024),
         idempotencyKey,

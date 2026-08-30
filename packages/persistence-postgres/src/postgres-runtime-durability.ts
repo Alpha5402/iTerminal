@@ -22,21 +22,31 @@ import { Pool, type PoolClient } from "pg";
 import { PostgresObservationRepository } from "./postgres-observation-repository.js";
 import { PostgresRuntimeRepository } from "./postgres-runtime-repository.js";
 
+export interface PostgresRuntimeDurabilityOptions {
+  readonly beforeAcceptExecuteCommit?: () => void;
+  readonly maxPendingOutbox?: number;
+  readonly statementTimeoutMilliseconds?: number;
+}
+
 export class PostgresRuntimeDurability implements RuntimeDurability {
   readonly #pool: Pool;
   readonly #observation: PostgresObservationRepository;
   readonly #admission: PostgresRuntimeRepository;
 
-  public constructor(connectionString: string) {
+  public constructor(connectionString: string, options: PostgresRuntimeDurabilityOptions = {}) {
+    const statementTimeoutMilliseconds = positiveInteger(
+      options.statementTimeoutMilliseconds ?? 30_000,
+      "statementTimeoutMilliseconds",
+    );
     this.#pool = new Pool({
       connectionString,
       connectionTimeoutMillis: 5_000,
       max: 20,
-      query_timeout: 30_000,
-      statement_timeout: 30_000,
+      query_timeout: statementTimeoutMilliseconds,
+      statement_timeout: statementTimeoutMilliseconds,
     });
     this.#observation = new PostgresObservationRepository(connectionString);
-    this.#admission = new PostgresRuntimeRepository(connectionString);
+    this.#admission = new PostgresRuntimeRepository(connectionString, options);
   }
 
   public async migrate(): Promise<void> {
@@ -621,6 +631,15 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
       client.release();
     }
   }
+}
+
+function positiveInteger(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new RuntimeError("INVALID_REQUEST", `${name} must be a positive integer`, {
+      [name]: value,
+    });
+  }
+  return value;
 }
 
 async function insertEvents(

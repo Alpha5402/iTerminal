@@ -12,8 +12,11 @@
     "@iterminal/runtime-rpc": "workspace:*"
   },
   "devDependencies": {
+    "@iterminal/messaging": "workspace:*",
+    "@iterminal/queue-rabbitmq": "workspace:*",
     "@modelcontextprotocol/client": "2.0.0",
     "@types/pg": "^8.15.5",
+    "amqplib": "2.0.1",
     "pg": "^8.16.3"
   }
 }

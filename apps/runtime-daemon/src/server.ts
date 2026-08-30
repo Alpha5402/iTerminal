@@ -22,6 +22,8 @@ export async function startRuntimeDaemon(options: {
   readonly databaseUrl?: string;
   readonly executionDispatch?: "external" | "immediate";
   readonly hooks?: RuntimeServiceOptions["hooks"];
+  readonly databaseStatementTimeoutMilliseconds?: number;
+  readonly outboxMaxPending?: number;
   readonly ownerId?: string;
   readonly socketPath: string;
   readonly runtime?: RuntimeService;
@@ -40,8 +42,10 @@ export async function startRuntimeDaemon(options: {
   if (
     options.runtime !== undefined &&
     (options.databaseUrl !== undefined ||
+      options.databaseStatementTimeoutMilliseconds !== undefined ||
       options.executionDispatch !== undefined ||
-      options.hooks !== undefined)
+      options.hooks !== undefined ||
+      options.outboxMaxPending !== undefined)
   ) {
     throw new RuntimeError(
       "INVALID_REQUEST",
@@ -51,7 +55,14 @@ export async function startRuntimeDaemon(options: {
   const durability =
     options.databaseUrl === undefined
       ? undefined
-      : new PostgresRuntimeDurability(options.databaseUrl);
+      : new PostgresRuntimeDurability(options.databaseUrl, {
+          ...(options.databaseStatementTimeoutMilliseconds === undefined
+            ? {}
+            : { statementTimeoutMilliseconds: options.databaseStatementTimeoutMilliseconds }),
+          ...(options.outboxMaxPending === undefined
+            ? {}
+            : { maxPendingOutbox: options.outboxMaxPending }),
+        });
   const ownerId = options.ownerId ?? runtimeOwnerIdForSocket(options.socketPath);
   const runtime =
     options.runtime ??

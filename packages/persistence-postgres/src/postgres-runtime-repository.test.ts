@@ -79,6 +79,29 @@ describeDatabase("PostgresRuntimeRepository", () => {
     ).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
   });
 
+  it("coalesces concurrent matching idempotency before applying Outbox capacity", async () => {
+    const session = await createSession(repository);
+    const request = executeRequest(session.id, "agent-concurrent-idempotent");
+    const [left, right] = await Promise.all([
+      repository.acceptExecute(request),
+      repository.acceptExecute({
+        ...request,
+        actionId: `act_${randomUUID()}`,
+        eventId: `evt_${randomUUID()}`,
+        executionId: `exe_${randomUUID()}`,
+        outboxId: `out_${randomUUID()}`,
+      }),
+    ]);
+    expect(left.actionId).toBe(right.actionId);
+    expect(left.executionId).toBe(right.executionId);
+    expect([left.replayed, right.replayed].sort()).toEqual([false, true]);
+    expect(await repository.inspectSession(session.id)).toMatchObject({
+      actionCount: 1,
+      outboxCount: 1,
+      status: "RESERVED",
+    });
+  });
+
   it("rolls back all rows when failure occurs before commit", async () => {
     const session = await createSession(repository);
     await expect(

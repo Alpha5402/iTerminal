@@ -54,6 +54,8 @@ Every successful tool result contains a JSON text block and `structuredContent: 
 
 `execute`, `input`, and `control` require caller-generated idempotency keys. The namespace is one Session + Actor across all three Action kinds, so reusing a key for another kind or payload returns `IDEMPOTENCY_KEY_REUSED`. A transport disconnect after a mutating RPC returns `DELIVERY_UNKNOWN`; inspect state using the same idempotency key or Events before any deliberate retry.
 
+`BACKPRESSURE` means the durable delivery backlog is at its configured bound. No new Action or Session reservation was created, the READY Session remains usable, and the caller may retry the same request/idempotency key after Outbox capacity drains. `RUNTIME_UNAVAILABLE` instead means the durable journal or Runtime boundary is unhealthy; callers must inspect/reconnect rather than assuming the old PTY survived.
+
 ## Run locally
 
 Use two terminals:

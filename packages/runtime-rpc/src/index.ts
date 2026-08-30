@@ -34,6 +34,7 @@ const runtimeErrorCodes = new Set<RuntimeError["code"]>([
   "SCREEN_CHANGED",
   "IDEMPOTENCY_KEY_REUSED",
   "DELIVERY_UNKNOWN",
+  "BACKPRESSURE",
   "RUNTIME_UNAVAILABLE",
   "RESYNC_REQUIRED",
   "INVALID_REQUEST",

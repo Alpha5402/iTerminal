@@ -6,6 +6,16 @@ import { Pool, type PoolClient } from "pg";
 
 import { migrateDatabase } from "./migrate.js";
 
+const DEFAULT_MAX_PENDING_OUTBOX = 10_000;
+const DEFAULT_STATEMENT_TIMEOUT_MS = 30_000;
+const OUTBOX_ADMISSION_LOCK = 1_746_883_921;
+
+export interface PostgresRuntimeRepositoryOptions {
+  readonly beforeAcceptExecuteCommit?: () => void;
+  readonly maxPendingOutbox?: number;
+  readonly statementTimeoutMilliseconds?: number;
+}
+
 export interface CreateDurableSession {
   readonly id: string;
   readonly generation: number;
@@ -71,14 +81,25 @@ export interface CheckpointUpdate {
 
 export class PostgresRuntimeRepository {
   readonly #pool: Pool;
+  readonly #beforeAcceptExecuteCommit: (() => void) | undefined;
+  readonly #maxPendingOutbox: number;
 
-  public constructor(connectionString: string) {
+  public constructor(connectionString: string, options: PostgresRuntimeRepositoryOptions = {}) {
+    this.#beforeAcceptExecuteCommit = options.beforeAcceptExecuteCommit;
+    this.#maxPendingOutbox = positiveInteger(
+      options.maxPendingOutbox ?? DEFAULT_MAX_PENDING_OUTBOX,
+      "maxPendingOutbox",
+    );
+    const statementTimeoutMilliseconds = positiveInteger(
+      options.statementTimeoutMilliseconds ?? DEFAULT_STATEMENT_TIMEOUT_MS,
+      "statementTimeoutMilliseconds",
+    );
     this.#pool = new Pool({
       connectionString,
       connectionTimeoutMillis: 5_000,
       max: 20,
-      query_timeout: 30_000,
-      statement_timeout: 30_000,
+      query_timeout: statementTimeoutMilliseconds,
+      statement_timeout: statementTimeoutMilliseconds,
     });
   }
 
@@ -123,33 +144,23 @@ export class PostgresRuntimeRepository {
 
   public async acceptExecute(input: AcceptExecuteTransaction): Promise<AcceptedExecute> {
     return this.#transaction(async (client) => {
-      const replay = await client.query<{
-        id: string;
-        request_hash: string;
-        action_sequence: string;
-        execution_id: string;
-      }>(
-        `SELECT a.id, a.request_hash, a.action_sequence, e.id AS execution_id
-           FROM actions a
-           JOIN executions e ON e.action_id = a.id
-          WHERE a.session_id = $1 AND a.actor_id = $2 AND a.idempotency_key = $3`,
-        [input.sessionId, input.actor.id, input.idempotencyKey],
+      const replay = await findExecuteReplay(client, input);
+      if (replay !== undefined) return replay;
+
+      await client.query("SELECT pg_advisory_xact_lock($1)", [OUTBOX_ADMISSION_LOCK]);
+      const concurrentReplay = await findExecuteReplay(client, input);
+      if (concurrentReplay !== undefined) return concurrentReplay;
+      const backlog = await client.query<{ pending: string }>(
+        "SELECT count(*) AS pending FROM outbox WHERE published_at IS NULL",
       );
-      const previous = replay.rows[0];
-      if (previous !== undefined) {
-        if (previous.request_hash !== input.requestHash) {
-          throw new RuntimeError(
-            "IDEMPOTENCY_KEY_REUSED",
-            "Idempotency key was used with a different request hash",
-            { actionId: previous.id },
-          );
-        }
-        return {
-          actionId: previous.id,
-          actionSequence: Number.parseInt(previous.action_sequence, 10),
-          executionId: previous.execution_id,
-          replayed: true,
-        };
+      const pending = Number.parseInt(backlog.rows[0]?.pending ?? "0", 10);
+      if (pending >= this.#maxPendingOutbox) {
+        throw new RuntimeError(
+          "BACKPRESSURE",
+          "Pending Outbox capacity is exhausted",
+          { maxPendingOutbox: this.#maxPendingOutbox, pendingOutbox: pending },
+          true,
+        );
       }
 
       const reserved = await client.query<{ next_action_sequence: string; owner_id: string }>(
@@ -269,6 +280,7 @@ export class PostgresRuntimeRepository {
           WHERE session_id = $1 AND generation = $2`,
         [input.sessionId, input.generation],
       );
+      this.#beforeAcceptExecuteCommit?.();
       if (input.failpoint === "before_commit") {
         throw new Error("Injected failure before commit");
       }
@@ -531,6 +543,48 @@ export class PostgresRuntimeRepository {
       client.release();
     }
   }
+}
+
+async function findExecuteReplay(
+  client: PoolClient,
+  input: AcceptExecuteTransaction,
+): Promise<AcceptedExecute | undefined> {
+  const replay = await client.query<{
+    action_sequence: string;
+    execution_id: string;
+    id: string;
+    request_hash: string;
+  }>(
+    `SELECT a.id, a.request_hash, a.action_sequence, e.id AS execution_id
+       FROM actions a
+       JOIN executions e ON e.action_id = a.id
+      WHERE a.session_id = $1 AND a.actor_id = $2 AND a.idempotency_key = $3`,
+    [input.sessionId, input.actor.id, input.idempotencyKey],
+  );
+  const previous = replay.rows[0];
+  if (previous === undefined) return undefined;
+  if (previous.request_hash !== input.requestHash) {
+    throw new RuntimeError(
+      "IDEMPOTENCY_KEY_REUSED",
+      "Idempotency key was used with a different request hash",
+      { actionId: previous.id },
+    );
+  }
+  return {
+    actionId: previous.id,
+    actionSequence: Number.parseInt(previous.action_sequence, 10),
+    executionId: previous.execution_id,
+    replayed: true,
+  };
+}
+
+function positiveInteger(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new RuntimeError("INVALID_REQUEST", `${name} must be a positive integer`, {
+      [name]: value,
+    });
+  }
+  return value;
 }
 
 async function nextEventSequence(

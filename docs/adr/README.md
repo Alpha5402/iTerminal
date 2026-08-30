@@ -16,6 +16,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0010](./0010-owner-local-queue-dispatch.md)    | Queue wake-up with owner-local PTY dispatch              | Accepted for M8.2        |
 | [0011](./0011-interaction-write-uncertainty.md) | Durable Input/Control write-attempt boundary             | Accepted for M8.3        |
 | [0012](./0012-retry-publish-outage-backoff.md)  | Backoff before NACK when retry publication fails         | Accepted for M8.3        |
+| [0013](./0013-admission-outbox-backpressure.md) | Bound admission during durable delivery backlog          | Accepted for M8.4        |
 
 Statuses:
 

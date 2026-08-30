@@ -8,13 +8,14 @@ The repository performs these operations under one transaction:
 
 1. Resolve `(session, actor, idempotency_key)` before attempting a new reservation.
 2. Return the original Action/Execution when the request hash matches; reject changed hashes.
-3. CAS `sessions.status` from READY to RESERVED and assign the active Execution.
-4. Allocate the next Session Action sequence.
-5. Upsert Actor identity.
-6. Insert immutable ExecuteAction payload and DISPATCHING Execution.
-7. Allocate the generation-scoped Event sequence and insert `action.accepted`.
-8. Insert an `ExecutionReady` Outbox record.
-9. Mark the generation RESERVED and commit.
+3. Serialize new admissions with a transaction advisory lock and reject retryably before reservation when unpublished Outbox capacity is exhausted.
+4. CAS `sessions.status` from READY to RESERVED and assign the active Execution.
+5. Allocate the next Session Action sequence.
+6. Upsert Actor identity.
+7. Insert immutable ExecuteAction payload and DISPATCHING Execution.
+8. Allocate the generation-scoped Event sequence and insert `action.accepted`.
+9. Insert an `ExecutionReady` Outbox record.
+10. Mark the generation RESERVED and commit.
 
 There is no in-Session Execute queue. A failed CAS returns structured `PTY_BUSY`; a pre-commit error rolls back every row above.
 
@@ -38,3 +39,5 @@ Snapshots and Shell Checkpoints use observed-time conditional upserts. An older 
 M4.1 integrates this transaction with the live daemon while keeping PTY callbacks on a bounded asynchronous ingest loop. M8.1 adds leased Outbox publication, RabbitMQ confirms, and Consumer Inbox deduplication. M8.2 preserves the same fail-fast Session reservation while an `ExecutionReady` wake-up drives an owner-local Unix RPC and PTY dispatch; a durable write-attempt boundary prevents blind replay after owner loss.
 
 M8.3 applies the same conservative boundary to Input/Control: an expected owner/generation/active-Execution transaction appends `interaction.write_attempted` before the adapter call. `DELIVERED` is a later transaction. Owner loss between them leaves the Action `UNKNOWN`; it is not replayed against a replacement PTY.
+
+M8.4 bounds unpublished Outbox work before reservation. Capacity rejection is `BACKPRESSURE`, so Application rolls back only its tentative local sequence/reservation and preserves the READY PTY. Database timeout remains `RUNTIME_UNAVAILABLE` and breaks the generation because durable ordering can no longer be guaranteed.

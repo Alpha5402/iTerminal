@@ -23,7 +23,7 @@ ITERM_DATABASE_URL=postgresql://iterminal_test:iterminal_test@127.0.0.1:55432/it
 ```
 
 - Full repository gate: exit 0; 4 test files / 11 tests passed, the DB-only file was explicitly skipped without a URL, report checks and build passed.
-- PostgreSQL gate: exit 0; 1 file / 6 tests passed against the real container.
+- PostgreSQL gate: exit 0; 1 file / 7 tests passed against the real container.
 
 ## Proven scenarios
 

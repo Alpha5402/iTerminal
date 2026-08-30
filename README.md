@@ -52,11 +52,11 @@ Most terminal tools optimize for command execution or remote administration. iTe
 
 ## Current status
 
-**M0–M4.1 and the M8.3 local crash-semantics path pass at L2: shared Shell, durable Action Runtime, real stdio MCP, reliable queue-driven PTY dispatch, and non-replayable uncertain interactions.**
+**M0–M4.1 and the M8.4 local admission/crash path pass at L2: shared Shell, durable Action Runtime, real stdio MCP, reliable queue-driven PTY dispatch, non-replayable uncertain interactions, and bounded delivery backlog.**
 
 Real local bash and zsh PTY scenarios prove command boundaries, shared state, fail-fast Busy, structured Input/Control, stale-target rejection, marker-spoof isolation, large output, and Ctrl+C recovery. With `ITERM_DATABASE_URL`, the live daemon now commits Execute/Input/Control admission before PTY delivery, sends attributed output through a bounded per-Session ingest loop, serves durable cursors, and marks a `SIGKILL`-lost owner generation `BROKEN/UNKNOWN` on restart. An official MCP SDK Client drives the same live zsh across stdio bridge restarts; OpenCode and Claude Code handshakes also pass. In-memory development mode remains available, but no model-driven Agent has been authorized and the Human Console is not complete.
 
-M8.2 keeps RabbitMQ as an at-least-once wake-up plane and adds a separately supervised Execution Worker. Durable Execute admission remains `DISPATCHING` until that Worker reloads PostgreSQL owner/generation state and calls the matching daemon over internal Unix RPC. M8.3 extends the conservative write-attempt boundary to Input/Control and rate-limits NACK/requeue when retry publication is unavailable. Worker loss before RPC is retried; Runtime loss after any PTY write-attempt boundary becomes `BROKEN/UNKNOWN` and is never blindly replayed. This is not an exactly-once claim, and M8's complete L4 outage/reconnect gate remains open.
+M8.2 keeps RabbitMQ as an at-least-once wake-up plane and adds a separately supervised Execution Worker. M8.3 extends the conservative write-attempt boundary to Input/Control and rate-limits NACK/requeue when retry publication is unavailable. M8.4 bounds unpublished Outbox rows and returns retryable `BACKPRESSURE` before reserving a Session; database admission timeout remains a fatal durable-truth loss for that generation. Worker loss before RPC is retried, while Runtime loss after any PTY write attempt becomes `BROKEN/UNKNOWN` and is never blindly replayed. This is not an exactly-once claim, and M8's process-outage/reconnect L4 gate remains open.
 
 See:
 
@@ -81,6 +81,8 @@ See:
 - [M8.3 interaction decision](./docs/adr/0011-interaction-write-uncertainty.md) — durable Input/Control intent and terminal uncertainty.
 - [M8.3 retry-outage decision](./docs/adr/0012-retry-publish-outage-backoff.md) — preserving the original delivery without a hot loop.
 - [M8.3 verification](./docs/verification/M8/2026-08-30-interaction-crash-retry-outage.md) — real PTY write-after-`SIGKILL` and retry-exchange outage evidence.
+- [M8.4 admission decision](./docs/adr/0013-admission-outbox-backpressure.md) — bounded pending delivery, retryable pressure, and database timeout semantics.
+- [M8.4 verification](./docs/verification/M8/2026-08-30-admission-backpressure.md) — real pre-commit crash, concurrent backlog, RabbitMQ drain, and PostgreSQL lock evidence.
 
 ## Planned shape
 
@@ -124,7 +126,7 @@ pnpm spike:shell -- --shell zsh
 pnpm spike:shell -- --shell bash
 ```
 
-The plain daemon command above starts explicit in-memory development mode. To run the M8.2 path, start PostgreSQL and RabbitMQ, then launch the daemon with `ITERM_DATABASE_URL`, `ITERM_EXECUTION_DISPATCH=external`, and a socket; launch the Outbox relay and Execution Worker against the same database/broker, and point MCP at that socket. Stable owner IDs derive from the socket unless explicitly configured. PostgreSQL durability does not sandbox Shell commands or resurrect a lost PTY.
+The plain daemon command above starts explicit in-memory development mode. To run the M8 path, start PostgreSQL and RabbitMQ, then launch the daemon with `ITERM_DATABASE_URL`, `ITERM_EXECUTION_DISPATCH=external`, and a socket; launch the Outbox relay and Execution Worker against the same database/broker, and point MCP at that socket. `ITERM_OUTBOX_MAX_PENDING` bounds unpublished work (default 10,000), while `ITERM_DATABASE_STATEMENT_TIMEOUT_MS` bounds admission/database waits (default 30,000 ms). Stable owner IDs derive from the socket unless explicitly configured. PostgreSQL durability does not sandbox Shell commands or resurrect a lost PTY.
 
 The repository does not yet have a final license. That decision is intentionally tracked in the roadmap instead of being silently assumed.
 
