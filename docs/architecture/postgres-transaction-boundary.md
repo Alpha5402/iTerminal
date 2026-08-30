@@ -35,4 +35,4 @@ Snapshots and Shell Checkpoints use observed-time conditional upserts. An older 
 
 ## Current boundary
 
-M4.1 integrates this transaction with the live daemon while keeping PTY callbacks on a bounded asynchronous ingest loop. M8.1 adds leased Outbox publication, RabbitMQ confirms, and Consumer Inbox deduplication. Actual PTY dispatch is still owner-local after admission; moving it behind an `ExecutionReady` wake-up remains M8.2 work and must preserve the same fail-fast Session reservation.
+M4.1 integrates this transaction with the live daemon while keeping PTY callbacks on a bounded asynchronous ingest loop. M8.1 adds leased Outbox publication, RabbitMQ confirms, and Consumer Inbox deduplication. M8.2 preserves the same fail-fast Session reservation while an `ExecutionReady` wake-up drives an owner-local Unix RPC and PTY dispatch; a durable write-attempt boundary prevents blind replay after owner loss.

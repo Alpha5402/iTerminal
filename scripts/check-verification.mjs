@@ -10,6 +10,7 @@ const requiredReports = [
   "docs/verification/M4/2026-08-30-mcp-adapter.md",
   "docs/verification/M4/2026-08-30-durable-runtime.md",
   "docs/verification/M8/2026-08-30-reliable-messaging.md",
+  "docs/verification/M8/2026-08-30-owner-dispatch.md",
 ];
 
 for (const report of requiredReports) {

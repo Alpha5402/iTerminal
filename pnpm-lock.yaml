@@ -75,6 +75,31 @@ importers:
         specifier: workspace:*
         version: link:../../packages/runtime-memory
 
+  apps/execution-worker:
+    dependencies:
+      '@iterminal/messaging':
+        specifier: workspace:*
+        version: link:../../packages/messaging
+      '@iterminal/persistence-postgres':
+        specifier: workspace:*
+        version: link:../../packages/persistence-postgres
+      '@iterminal/queue-rabbitmq':
+        specifier: workspace:*
+        version: link:../../packages/queue-rabbitmq
+      '@iterminal/runtime-rpc':
+        specifier: workspace:*
+        version: link:../../packages/runtime-rpc
+    devDependencies:
+      '@iterminal/runtime-daemon':
+        specifier: workspace:*
+        version: link:../runtime-daemon
+      amqplib:
+        specifier: 2.0.1
+        version: 2.0.1
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
+
   apps/mcp:
     dependencies:
       '@iterminal/domain':

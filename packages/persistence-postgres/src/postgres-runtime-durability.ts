@@ -234,6 +234,37 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
     });
   }
 
+  public async markExecutionWriteAttempted(input: {
+    readonly session: Session;
+    readonly action: Extract<SessionAction, { type: "execute" }>;
+    readonly execution: Execution;
+    readonly event: DurableSessionEvent;
+  }): Promise<void> {
+    await this.#transaction(async (client) => {
+      const execution = await client.query(
+        `SELECT 1 FROM executions
+          WHERE id = $1 AND session_id = $2 AND session_generation = $3
+            AND owner_id = $4 AND status = 'DISPATCHING'
+          FOR UPDATE`,
+        [input.execution.id, input.session.id, input.session.generation, input.session.ownerId],
+      );
+      if (execution.rowCount !== 1) {
+        throw new RuntimeError("DELIVERY_UNKNOWN", "Execution write attempt is no longer current");
+      }
+      const session = await client.query(
+        `SELECT 1 FROM sessions
+          WHERE id = $1 AND current_generation = $2 AND owner_id = $3
+            AND status = 'RESERVED' AND active_execution_id = $4
+          FOR UPDATE`,
+        [input.session.id, input.session.generation, input.session.ownerId, input.execution.id],
+      );
+      if (session.rowCount !== 1) {
+        throw new RuntimeError("DELIVERY_UNKNOWN", "Session is no longer reserved for dispatch");
+      }
+      await insertEvents(client, [input.event]);
+    });
+  }
+
   public async finishExecution(input: {
     readonly session: Session;
     readonly action: Extract<SessionAction, { type: "execute" }>;

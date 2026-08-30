@@ -22,6 +22,36 @@ const actor = {
 };
 
 describe("Runtime durable write-ahead boundary", () => {
+  it("keeps external Execute reserved until one idempotent owner dispatch", async () => {
+    const durability = new ControlledDurability();
+    const executor = new RecordingExecutor();
+    const runtime = new RuntimeService(new MemoryRuntimeStore(), new RecordingFactory(executor), {
+      durability,
+      executionDispatch: "external",
+      ownerId: "owner-durability-test",
+    });
+    const session = await runtime.createSession({ shell: "zsh", workspaceRoot: "/tmp" });
+    const admitted = await runtime.startExecute({
+      actor,
+      command: "python3 -q",
+      idempotencyKey: "external-dispatch",
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+    });
+    expect(executor.commands).toEqual([]);
+    expect(runtime.getSession(session.id).status).toBe("RESERVED");
+
+    const [left, right] = await Promise.all([
+      runtime.dispatchExecution(admitted.execution.id),
+      runtime.dispatchExecution(admitted.execution.id),
+    ]);
+    expect(left.execution.id).toBe(admitted.execution.id);
+    expect(right.execution.id).toBe(admitted.execution.id);
+    expect(executor.commands).toEqual(["python3 -q"]);
+    expect(durability.writeAttempts).toBe(1);
+    await runtime.closeSession(session.id, session.generation);
+  });
+
   it("does not write Execute to the Shell when durable admission fails", async () => {
     const durability = new ControlledDurability();
     const executor = new RecordingExecutor();
@@ -123,6 +153,7 @@ class RecordingExecutor implements ShellExecutor {
 class ControlledDurability implements RuntimeDurability {
   public failExecute = false;
   public failInteraction = false;
+  public writeAttempts = 0;
 
   public createSession(): Promise<void> {
     return Promise.resolve();
@@ -151,6 +182,11 @@ class ControlledDurability implements RuntimeDurability {
   }
 
   public markExecutionRunning(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  public markExecutionWriteAttempted(): Promise<void> {
+    this.writeAttempts += 1;
     return Promise.resolve();
   }
 

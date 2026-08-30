@@ -52,11 +52,11 @@ Most terminal tools optimize for command execution or remote administration. iTe
 
 ## Current status
 
-**M0–M4.1 and the M8.1 notification plane pass at L2: shared Shell, durable Action Runtime, real stdio MCP, and reliable Outbox/RabbitMQ/Inbox delivery.**
+**M0–M4.1 and the M8.2 owner-local queue-dispatch path pass at L2: shared Shell, durable Action Runtime, real stdio MCP, and reliable Outbox/RabbitMQ/Inbox delivery into the live PTY owner.**
 
 Real local bash and zsh PTY scenarios prove command boundaries, shared state, fail-fast Busy, structured Input/Control, stale-target rejection, marker-spoof isolation, large output, and Ctrl+C recovery. With `ITERM_DATABASE_URL`, the live daemon now commits Execute/Input/Control admission before PTY delivery, sends attributed output through a bounded per-Session ingest loop, serves durable cursors, and marks a `SIGKILL`-lost owner generation `BROKEN/UNKNOWN` on restart. An official MCP SDK Client drives the same live zsh across stdio bridge restarts; OpenCode and Claude Code handshakes also pass. In-memory development mode remains available, but no model-driven Agent has been authorized and the Human Console is not complete.
 
-M8.1 adds a standalone leased Outbox relay, RabbitMQ publisher confirms, durable quorum main/retry/DLQ queues, manual ACK with bounded prefetch, canonical Consumer Inbox deduplication, and database revalidation of delayed `ExecutionReady` messages. It is an at-least-once notification plane: actual PTY dispatch remains inside the owner-local M4.1 daemon until M8.2 proves the write crash matrix.
+M8.2 keeps RabbitMQ as an at-least-once wake-up plane and adds a separately supervised Execution Worker. Durable Execute admission now remains `DISPATCHING` until that Worker reloads PostgreSQL owner/generation state and calls the matching daemon over internal Unix RPC. Duplicate delivery joins one owner-local dispatch state. Worker loss before RPC is retried; Runtime loss after the durable `execution.write_attempted` boundary becomes `BROKEN/UNKNOWN` and is never blindly replayed. This is not an exactly-once claim, and M8's complete L4 gate remains open.
 
 See:
 
@@ -76,6 +76,8 @@ See:
 - [M4.1 verification](./docs/verification/M4/2026-08-30-durable-runtime.md) — real PostgreSQL/MCP Actions and daemon crash recovery.
 - [M8.1 messaging decision](./docs/adr/0009-outbox-rabbitmq-inbox.md) — why confirms, ACKs, Inbox leases, and DB rechecks are separate boundaries.
 - [M8.1 verification](./docs/verification/M8/2026-08-30-reliable-messaging.md) — real PostgreSQL/RabbitMQ duplicate, retry, DLQ, and relay lifecycle evidence.
+- [M8.2 dispatch decision](./docs/adr/0010-owner-local-queue-dispatch.md) — owner-local RPC, dispatch idempotency, and PTY write uncertainty.
+- [M8.2 verification](./docs/verification/M8/2026-08-30-owner-dispatch.md) — real queue-driven zsh and Worker/Runtime `SIGKILL` evidence.
 
 ## Planned shape
 
@@ -110,12 +112,16 @@ pnpm verify
 pnpm cli
 ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm daemon
 ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm mcp
+ITERM_DATABASE_URL=postgresql://... ITERM_EXECUTION_DISPATCH=external \
+  ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm daemon
 ITERM_DATABASE_URL=postgresql://... ITERM_RABBITMQ_URL=amqp://... pnpm outbox-relay
+ITERM_DATABASE_URL=postgresql://... ITERM_RABBITMQ_URL=amqp://... \
+  ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm execution-worker
 pnpm spike:shell -- --shell zsh
 pnpm spike:shell -- --shell bash
 ```
 
-The command above starts explicit in-memory development mode. To enable the durable journal, start PostgreSQL and pass `ITERM_DATABASE_URL` to `pnpm daemon`; the MCP bridge still receives only `ITERM_RUNTIME_SOCKET`. PostgreSQL durability does not sandbox Shell commands or resurrect a lost PTY.
+The plain daemon command above starts explicit in-memory development mode. To run the M8.2 path, start PostgreSQL and RabbitMQ, then launch the daemon with `ITERM_DATABASE_URL`, `ITERM_EXECUTION_DISPATCH=external`, and a socket; launch the Outbox relay and Execution Worker against the same database/broker, and point MCP at that socket. Stable owner IDs derive from the socket unless explicitly configured. PostgreSQL durability does not sandbox Shell commands or resurrect a lost PTY.
 
 The repository does not yet have a final license. That decision is intentionally tracked in the roadmap instead of being silently assumed.
 

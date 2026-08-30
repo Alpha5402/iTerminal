@@ -69,6 +69,7 @@ function stubGateway(): RuntimeGateway {
   return {
     closeSession: unsupported,
     createSession: unsupported,
+    dispatchExecution: unsupported,
     getExecution: unsupported,
     getSession: unsupported,
     listSessions: () => Promise.resolve([]),

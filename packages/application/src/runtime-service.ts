@@ -20,6 +20,7 @@ import type {
   RuntimeDurability,
   RuntimeServiceOptions,
   RuntimeStore,
+  ShellExecutionResult,
   ShellExecutor,
   ShellExecutorFactory,
 } from "./ports.js";
@@ -82,6 +83,20 @@ interface DurableQueueState {
   tail: Promise<void>;
 }
 
+interface ExecutionDispatchState {
+  readonly action: ExecuteAction;
+  readonly completion: Deferred<Execution>;
+  dispatchTask?: Promise<void>;
+  readonly execution: Execution;
+  readonly started: Deferred<void>;
+}
+
+interface Deferred<T> {
+  readonly promise: Promise<T>;
+  readonly reject: (reason?: unknown) => void;
+  readonly resolve: (value: T | PromiseLike<T>) => void;
+}
+
 export class RuntimeService {
   readonly #executors = new Map<string, ShellExecutor>();
   readonly #completions = new Map<string, Promise<Execution>>();
@@ -89,6 +104,9 @@ export class RuntimeService {
   readonly #durableQueues = new Map<string, DurableQueueState>();
   readonly #mutationTails = new Map<string, Promise<void>>();
   readonly #durability: RuntimeDurability | undefined;
+  readonly #dispatchStates = new Map<string, ExecutionDispatchState>();
+  readonly #executionDispatch: "external" | "immediate";
+  readonly #hooks: NonNullable<RuntimeServiceOptions["hooks"]>;
   readonly #now: () => Date;
   readonly #ownerId: string;
 
@@ -98,6 +116,8 @@ export class RuntimeService {
     options: RuntimeServiceOptions = {},
   ) {
     this.#durability = options.durability;
+    this.#executionDispatch = options.executionDispatch ?? "immediate";
+    this.#hooks = options.hooks ?? {};
     this.#now = options.now ?? (() => new Date());
     this.#ownerId = options.ownerId ?? `owner_${process.pid.toString()}`;
   }
@@ -219,7 +239,7 @@ export class RuntimeService {
     }
 
     const session = this.#requireGeneration(request.sessionId, request.sessionGeneration);
-    const executor = this.#requireExecutor(session.id);
+    this.#requireExecutor(session.id);
     const actionId = `act_${randomUUID()}`;
     const executionId = `exe_${randomUUID()}`;
     const reserved = this.store.reserveSession(session.id, session.generation, executionId);
@@ -295,114 +315,237 @@ export class RuntimeService {
     this.store.appendEvent(session.id, session.generation, acceptedEvent);
     this.store.appendEvent(session.id, session.generation, dispatchingEvent);
 
-    const startedDeferred = deferred<void>();
-    void startedDeferred.promise.catch(() => undefined);
-    this.#started.set(execution.id, startedDeferred.promise);
-    const completion = executor
-      .execute(request.command, {
-        onStarted: (observedCommand) => {
-          execution.status = "RUNNING";
-          execution.startedAt = this.#timestamp();
-          action.status = "RUNNING";
-          const running = this.store.markSessionRunning(
-            session.id,
-            session.generation,
-            execution.id,
-          );
-          const startedEvent = this.#event(
-            running,
-            "execution.started",
-            { observedCommand },
-            { action, execution, persist: false },
-          );
-          void this.#enqueueDurable(session.id, 0, () =>
-            this.#durability?.markExecutionRunning({
-              action,
-              event: startedEvent,
-              execution,
-              session: running,
-            }),
-          ).catch((error: unknown) => this.#tripDurability(session.id, error));
-          startedDeferred.resolve();
-        },
-      })
-      .then(async (result) => {
-        execution.exitCode = result.exitCode;
-        execution.cwd = result.cwd;
-        execution.finishedAt = this.#timestamp();
-        execution.output = result.output;
-        execution.outputTruncated = result.outputTruncated;
-        const interrupted = execution.interruptedRequested === true && result.exitCode !== 0;
-        execution.status = interrupted ? "INTERRUPTED" : "COMPLETED";
-        action.status = interrupted ? "INTERRUPTED" : "COMPLETED";
-        const ready = this.store.releaseSession(session.id, session.generation, execution.id);
-        const completedEvent = this.#event(
-          ready,
-          interrupted ? "execution.interrupted" : "execution.completed",
-          { cwd: result.cwd, exitCode: result.exitCode, outputTruncated: result.outputTruncated },
-          { action, execution, persist: false },
+    const dispatch = this.#createDispatchState(action, execution);
+    if (this.#executionDispatch === "immediate") this.#startDispatch(dispatch);
+    return this.#startedExecution(dispatch);
+  }
+
+  public async dispatchExecution(executionId: string): Promise<StartedExecution> {
+    const execution = this.#requireExecution(executionId);
+    return this.#withMutationLock(execution.sessionId, async () => {
+      await this.#flushDurable(execution.sessionId);
+      const dispatch = this.#dispatchStates.get(execution.id);
+      if (dispatch === undefined) {
+        throw new RuntimeError(
+          "DELIVERY_UNKNOWN",
+          "Execution has no dispatch state in this Runtime owner",
+          { executionId },
+          false,
         );
-        const readyEvent = this.#event(
-          ready,
-          "session.shell_ready",
-          { cwd: result.cwd },
-          { persist: false },
-        );
-        try {
-          await this.#enqueueDurable(session.id, 0, () =>
-            this.#durability?.finishExecution({
-              action,
-              events: [completedEvent, readyEvent],
-              execution,
-              session: ready,
-            }),
-          );
-        } catch (error) {
-          execution.status = "UNKNOWN";
-          action.status = "UNKNOWN";
-          this.#tripDurability(session.id, error);
-          throw durabilityError(error);
-        }
-        return execution;
-      })
-      .catch(async (error: unknown) => {
-        if (execution.status === "UNKNOWN") {
-          throw error;
-        }
-        startedDeferred.reject(error);
-        execution.status = "FAILED";
-        execution.finishedAt = this.#timestamp();
-        action.status = "FAILED";
-        const current = this.store.getSession(session.id);
-        if (current?.status !== "CLOSED") {
-          const broken = this.store.breakSession(session.id, session.generation);
-          const failedEvent = this.#event(
-            broken,
-            "execution.failed",
-            { reason: errorMessage(error) },
-            { action, execution, persist: false },
-          );
-          const brokenEvent = this.#event(
-            broken,
-            "session.broken",
-            { reason: errorMessage(error) },
-            { persist: false },
-          );
-          await this.#enqueueDurable(session.id, 0, () =>
-            this.#durability?.failExecution({
-              action,
-              events: [failedEvent, brokenEvent],
-              execution,
-              reason: errorMessage(error),
-              session: broken,
-            }),
-          ).catch((durableError: unknown) => this.#tripDurability(session.id, durableError));
-        }
-        throw error;
+      }
+      this.#startDispatch(dispatch);
+      await dispatch.started.promise;
+      return this.#startedExecution(dispatch);
+    });
+  }
+
+  #createDispatchState(action: ExecuteAction, execution: Execution): ExecutionDispatchState {
+    const state: ExecutionDispatchState = {
+      action,
+      completion: deferred<Execution>(),
+      execution,
+      started: deferred<void>(),
+    };
+    void state.started.promise.catch(() => undefined);
+    void state.completion.promise.catch(() => undefined);
+    this.#dispatchStates.set(execution.id, state);
+    this.#started.set(execution.id, state.started.promise);
+    this.#completions.set(execution.id, state.completion.promise);
+    return state;
+  }
+
+  #startDispatch(state: ExecutionDispatchState): void {
+    if (state.dispatchTask !== undefined) return;
+    const task = this.#launchDispatch(state);
+    state.dispatchTask = task;
+    void task.catch((error: unknown) => {
+      state.started.reject(error);
+      state.completion.reject(error);
+    });
+  }
+
+  async #launchDispatch(state: ExecutionDispatchState): Promise<void> {
+    const { action, execution } = state;
+    const session = this.#requireGeneration(execution.sessionId, execution.sessionGeneration);
+    if (
+      session.status !== "RESERVED" ||
+      session.activeExecutionId !== execution.id ||
+      execution.status !== "DISPATCHING"
+    ) {
+      throw new RuntimeError("DELIVERY_UNKNOWN", "Execution is not dispatchable", {
+        activeExecutionId: session.activeExecutionId,
+        executionId: execution.id,
+        executionStatus: execution.status,
+        sessionStatus: session.status,
       });
-    void completion.catch(() => undefined);
-    this.#completions.set(execution.id, completion);
-    return { action, completion, execution, started: startedDeferred.promise };
+    }
+    const writeAttemptedEvent = this.#eventDraft(
+      session,
+      "execution.write_attempted",
+      {},
+      action,
+      execution,
+    );
+    try {
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.markExecutionWriteAttempted({
+          action,
+          event: writeAttemptedEvent,
+          execution,
+          session,
+        }),
+      );
+    } catch (error) {
+      this.#tripDurability(session.id, error);
+      throw durabilityError(error);
+    }
+    this.store.appendEvent(session.id, session.generation, writeAttemptedEvent);
+
+    const executor = this.#requireExecutor(session.id);
+    let shellCompletion: Promise<ShellExecutionResult>;
+    try {
+      shellCompletion = executor.execute(execution.command, {
+        onStarted: (observedCommand) => {
+          try {
+            execution.status = "RUNNING";
+            execution.startedAt = this.#timestamp();
+            action.status = "RUNNING";
+            const running = this.store.markSessionRunning(
+              session.id,
+              session.generation,
+              execution.id,
+            );
+            const startedEvent = this.#event(
+              running,
+              "execution.started",
+              { observedCommand },
+              { action, execution, persist: false },
+            );
+            void this.#enqueueDurable(session.id, 0, () =>
+              this.#durability?.markExecutionRunning({
+                action,
+                event: startedEvent,
+                execution,
+                session: running,
+              }),
+            ).then(
+              () => state.started.resolve(),
+              (error: unknown) => {
+                this.#tripDurability(session.id, error);
+                state.started.reject(durabilityError(error));
+              },
+            );
+          } catch (error) {
+            state.started.reject(error);
+            throw error;
+          }
+        },
+      });
+      this.#hooks.afterExecutionWrite?.(execution);
+    } catch (error) {
+      await this.#failDispatchedExecution(state, error);
+      throw error;
+    }
+
+    const result = shellCompletion.then(
+      (completed) => this.#finishDispatchedExecution(state, completed),
+      (error: unknown) => this.#failDispatchedExecution(state, error),
+    );
+    void result.then(state.completion.resolve, state.completion.reject);
+    await state.started.promise;
+  }
+
+  async #finishDispatchedExecution(
+    state: ExecutionDispatchState,
+    result: ShellExecutionResult,
+  ): Promise<Execution> {
+    const { action, execution } = state;
+    execution.exitCode = result.exitCode;
+    execution.cwd = result.cwd;
+    execution.finishedAt = this.#timestamp();
+    execution.output = result.output;
+    execution.outputTruncated = result.outputTruncated;
+    const interrupted = execution.interruptedRequested === true && result.exitCode !== 0;
+    execution.status = interrupted ? "INTERRUPTED" : "COMPLETED";
+    action.status = interrupted ? "INTERRUPTED" : "COMPLETED";
+    const ready = this.store.releaseSession(
+      execution.sessionId,
+      execution.sessionGeneration,
+      execution.id,
+    );
+    const completedEvent = this.#event(
+      ready,
+      interrupted ? "execution.interrupted" : "execution.completed",
+      { cwd: result.cwd, exitCode: result.exitCode, outputTruncated: result.outputTruncated },
+      { action, execution, persist: false },
+    );
+    const readyEvent = this.#event(
+      ready,
+      "session.shell_ready",
+      { cwd: result.cwd },
+      { persist: false },
+    );
+    this.#hooks.beforeExecutionFinishPersist?.(execution);
+    try {
+      await this.#enqueueDurable(execution.sessionId, 0, () =>
+        this.#durability?.finishExecution({
+          action,
+          events: [completedEvent, readyEvent],
+          execution,
+          session: ready,
+        }),
+      );
+    } catch (error) {
+      execution.status = "UNKNOWN";
+      action.status = "UNKNOWN";
+      this.#tripDurability(execution.sessionId, error);
+      throw durabilityError(error);
+    }
+    return execution;
+  }
+
+  async #failDispatchedExecution(state: ExecutionDispatchState, error: unknown): Promise<never> {
+    const { action, execution } = state;
+    if (execution.status === "UNKNOWN") throw error;
+    state.started.reject(error);
+    execution.status = "FAILED";
+    execution.finishedAt = this.#timestamp();
+    action.status = "FAILED";
+    const current = this.store.getSession(execution.sessionId);
+    if (current?.status !== "CLOSED") {
+      const broken = this.store.breakSession(execution.sessionId, execution.sessionGeneration);
+      const failedEvent = this.#event(
+        broken,
+        "execution.failed",
+        { reason: errorMessage(error) },
+        { action, execution, persist: false },
+      );
+      const brokenEvent = this.#event(
+        broken,
+        "session.broken",
+        { reason: errorMessage(error) },
+        { persist: false },
+      );
+      await this.#enqueueDurable(execution.sessionId, 0, () =>
+        this.#durability?.failExecution({
+          action,
+          events: [failedEvent, brokenEvent],
+          execution,
+          reason: errorMessage(error),
+          session: broken,
+        }),
+      ).catch((durableError: unknown) => this.#tripDurability(execution.sessionId, durableError));
+    }
+    throw error;
+  }
+
+  #startedExecution(state: ExecutionDispatchState): StartedExecution {
+    return {
+      action: state.action,
+      completion: state.completion.promise,
+      execution: state.execution,
+      started: state.started.promise,
+    };
   }
 
   public async execute(request: ExecuteRequest): Promise<Execution> {
@@ -625,6 +768,7 @@ export class RuntimeService {
       });
       const session = this.#requireExactGeneration(sessionId, generation);
       const previousStatus = session.status;
+      this.#markActiveDispatchUnknown(session, "Session closed before Execution outcome");
       this.#executors.get(sessionId)?.close();
       this.#executors.delete(sessionId);
       const closed = this.store.closeSession(sessionId, generation);
@@ -880,20 +1024,31 @@ export class RuntimeService {
     const state = this.#durableQueue(sessionId);
     state.failure ??= durabilityError(error);
     const session = this.store.getSession(sessionId);
-    if (session?.activeExecutionId !== undefined) {
-      const execution = this.store.getExecution(session.activeExecutionId);
-      if (execution !== undefined) {
-        execution.status = "UNKNOWN";
-        execution.finishedAt ??= this.#timestamp();
-        const action = this.store.getAction(execution.actionId);
-        if (action?.type === "execute") action.status = "UNKNOWN";
-      }
-    }
+    if (session !== undefined) this.#markActiveDispatchUnknown(session, errorMessage(error));
     this.#executors.get(sessionId)?.close();
     this.#executors.delete(sessionId);
     if (session !== undefined && session.status !== "CLOSED" && session.status !== "BROKEN") {
       this.store.breakSession(session.id, session.generation);
     }
+  }
+
+  #markActiveDispatchUnknown(session: Session, reason: string): void {
+    if (session.activeExecutionId === undefined) return;
+    const execution = this.store.getExecution(session.activeExecutionId);
+    if (execution === undefined || isExecutionTerminal(execution.status)) return;
+    execution.status = "UNKNOWN";
+    execution.finishedAt ??= this.#timestamp();
+    const action = this.store.getAction(execution.actionId);
+    if (action?.type === "execute") action.status = "UNKNOWN";
+    const dispatch = this.#dispatchStates.get(execution.id);
+    const failure = new RuntimeError(
+      "DELIVERY_UNKNOWN",
+      "Execution outcome is unknown",
+      { executionId: execution.id, reason },
+      false,
+    );
+    dispatch?.started.reject(failure);
+    dispatch?.completion.reject(failure);
   }
 
   async #withMutationLock<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
@@ -957,6 +1112,15 @@ function isInterrupt(delivery: ControlDelivery): boolean {
   );
 }
 
+function isExecutionTerminal(status: Execution["status"]): boolean {
+  return (
+    status === "COMPLETED" ||
+    status === "FAILED" ||
+    status === "INTERRUPTED" ||
+    status === "UNKNOWN"
+  );
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -979,11 +1143,7 @@ function isDurabilityFatal(error: unknown): boolean {
   );
 }
 
-function deferred<T>(): {
-  readonly promise: Promise<T>;
-  readonly resolve: (value: T | PromiseLike<T>) => void;
-  readonly reject: (reason?: unknown) => void;
-} {
+function deferred<T>(): Deferred<T> {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (reason?: unknown) => void;
   const promise = new Promise<T>((innerResolve, innerReject) => {

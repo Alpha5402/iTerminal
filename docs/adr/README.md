@@ -13,6 +13,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0007](./0007-runtime-daemon-mcp-bridge.md)    | Runtime daemon separated from MCP stdio lifecycle        | Accepted for M4          |
 | [0008](./0008-live-runtime-durable-journal.md) | Live PTY truth plus PostgreSQL durable journal           | Accepted for M4.1        |
 | [0009](./0009-outbox-rabbitmq-inbox.md)        | At-least-once Outbox wake-up plus Consumer Inbox         | Accepted for M8.1        |
+| [0010](./0010-owner-local-queue-dispatch.md)   | Queue wake-up with owner-local PTY dispatch              | Accepted for M8.2        |
 
 Statuses:
 

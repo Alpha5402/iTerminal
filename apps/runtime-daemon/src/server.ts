@@ -1,14 +1,14 @@
-import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
-import { RuntimeService } from "@iterminal/application";
+import { RuntimeService, type RuntimeServiceOptions } from "@iterminal/application";
 import { RuntimeError } from "@iterminal/domain";
 import { PtyShellExecutorFactory } from "@iterminal/executor-pty";
 import { PostgresRuntimeDurability } from "@iterminal/persistence-postgres";
 import { MemoryRuntimeStore } from "@iterminal/runtime-memory";
 import {
   LocalRuntimeGateway,
+  runtimeOwnerIdForSocket,
   startRuntimeRpcServer,
   type RuntimeRpcServerHandle,
 } from "@iterminal/runtime-rpc";
@@ -20,6 +20,8 @@ export interface RuntimeDaemonHandle extends RuntimeRpcServerHandle {
 
 export async function startRuntimeDaemon(options: {
   readonly databaseUrl?: string;
+  readonly executionDispatch?: "external" | "immediate";
+  readonly hooks?: RuntimeServiceOptions["hooks"];
   readonly ownerId?: string;
   readonly socketPath: string;
   readonly runtime?: RuntimeService;
@@ -29,7 +31,18 @@ export async function startRuntimeDaemon(options: {
       socketPath: options.socketPath,
     });
   }
-  if (options.runtime !== undefined && options.databaseUrl !== undefined) {
+  if (options.executionDispatch === "external" && options.databaseUrl === undefined) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      "External Execution dispatch requires PostgreSQL durability",
+    );
+  }
+  if (
+    options.runtime !== undefined &&
+    (options.databaseUrl !== undefined ||
+      options.executionDispatch !== undefined ||
+      options.hooks !== undefined)
+  ) {
     throw new RuntimeError(
       "INVALID_REQUEST",
       "A custom RuntimeService cannot be combined with daemon database configuration",
@@ -39,11 +52,15 @@ export async function startRuntimeDaemon(options: {
     options.databaseUrl === undefined
       ? undefined
       : new PostgresRuntimeDurability(options.databaseUrl);
-  const ownerId = options.ownerId ?? runtimeOwnerId(options.socketPath);
+  const ownerId = options.ownerId ?? runtimeOwnerIdForSocket(options.socketPath);
   const runtime =
     options.runtime ??
     new RuntimeService(new MemoryRuntimeStore(), new PtyShellExecutorFactory(), {
       ...(durability === undefined ? {} : { durability }),
+      ...(options.executionDispatch === undefined
+        ? {}
+        : { executionDispatch: options.executionDispatch }),
+      ...(options.hooks === undefined ? {} : { hooks: options.hooks }),
       ownerId,
     });
   let rpc: RuntimeRpcServerHandle | undefined;
@@ -100,7 +117,7 @@ async function closeDaemon(
 }
 
 export function runtimeOwnerId(socketPath: string): string {
-  return `owner_local_${createHash("sha256").update(socketPath).digest("hex").slice(0, 24)}`;
+  return runtimeOwnerIdForSocket(socketPath);
 }
 
 export function defaultRuntimeSocketPath(): string {

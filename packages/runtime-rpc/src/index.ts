@@ -1,6 +1,6 @@
 import { chmod, lstat, unlink } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type {
   ControlRequest,
@@ -73,6 +73,7 @@ const operationSchemas = {
     limit: z.number().int().min(1).max(500).default(100),
   }),
   "execution.get": z.strictObject({ executionId: z.string().min(1).max(256) }),
+  "execution.dispatch": z.strictObject({ executionId: z.string().min(1).max(256) }),
   "execution.start": sessionIdentitySchema.extend({
     actor: actorSchema,
     command: z.string().max(256 * 1024),
@@ -107,6 +108,7 @@ export interface RuntimeGateway {
   getSession(sessionId: string): Promise<Session>;
   listSessions(): Promise<readonly Session[]>;
   startExecute(request: ExecuteRequest): Promise<StartedExecutionView>;
+  dispatchExecution(executionId: string): Promise<StartedExecutionView>;
   getExecution(executionId: string): Promise<Execution>;
   waitExecution(executionId: string): Promise<Execution>;
   sendInput(request: InputRequest): Promise<InputAction>;
@@ -138,6 +140,11 @@ export class LocalRuntimeGateway implements RuntimeGateway {
   public async startExecute(request: ExecuteRequest): Promise<StartedExecutionView> {
     const started = await this.runtime.startExecute(request);
     return Promise.resolve({ action: started.action, execution: started.execution });
+  }
+
+  public async dispatchExecution(executionId: string): Promise<StartedExecutionView> {
+    const started = await this.runtime.dispatchExecution(executionId);
+    return { action: started.action, execution: started.execution };
   }
 
   public getExecution(executionId: string): Promise<Execution> {
@@ -263,6 +270,10 @@ export class UnixRuntimeClient implements RuntimeGateway {
       idempotencyKey: request.idempotencyKey,
       sessionId: request.sessionId,
     });
+  }
+
+  public dispatchExecution(executionId: string): Promise<StartedExecutionView> {
+    return this.#request("execution.dispatch", { executionId });
   }
 
   public getExecution(executionId: string): Promise<Execution> {
@@ -481,6 +492,10 @@ async function dispatch(
         sessionId: request.sessionId,
       });
     }
+    case "execution.dispatch": {
+      const request = operationSchemas[operation].parse(input);
+      return gateway.dispatchExecution(request.executionId);
+    }
     case "execution.get": {
       const request = operationSchemas[operation].parse(input);
       return gateway.getExecution(request.executionId);
@@ -606,10 +621,15 @@ function isMutating(operation: RuntimeOperation): boolean {
   return (
     operation === "session.create" ||
     operation === "session.close" ||
+    operation === "execution.dispatch" ||
     operation === "execution.start" ||
     operation === "input.send" ||
     operation === "control.send"
   );
+}
+
+export function runtimeOwnerIdForSocket(socketPath: string): string {
+  return `owner_local_${createHash("sha256").update(socketPath).digest("hex").slice(0, 24)}`;
 }
 
 function runtimeErrorCode(code: string): RuntimeError["code"] {

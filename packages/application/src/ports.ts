@@ -106,6 +106,12 @@ export interface RuntimeDurability {
     readonly execution: Execution;
     readonly event: DurableSessionEvent;
   }): Promise<void>;
+  markExecutionWriteAttempted(input: {
+    readonly session: Session;
+    readonly action: ExecuteAction;
+    readonly execution: Execution;
+    readonly event: DurableSessionEvent;
+  }): Promise<void>;
   finishExecution(input: {
     readonly session: Session;
     readonly action: ExecuteAction;
@@ -139,6 +145,11 @@ export interface RuntimeDurability {
 
 export interface RuntimeServiceOptions {
   readonly durability?: RuntimeDurability;
+  readonly executionDispatch?: "external" | "immediate";
+  readonly hooks?: Readonly<{
+    readonly afterExecutionWrite?: (execution: Execution) => void;
+    readonly beforeExecutionFinishPersist?: (execution: Execution) => void;
+  }>;
   readonly ownerId?: string;
   readonly now?: () => Date;
 }
