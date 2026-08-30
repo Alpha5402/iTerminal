@@ -4,6 +4,8 @@ import type { Actor } from "@iterminal/domain";
 import { RuntimeError } from "@iterminal/domain";
 import { Pool, type PoolClient } from "pg";
 
+import { guardPostgresPool } from "./postgres-pool.js";
+
 const MAX_EVENT_LIMIT = 500;
 const MAX_SEARCH_LIMIT = 50;
 const MAX_ARTIFACT_READ_BYTES = 64 * 1024;
@@ -87,13 +89,15 @@ export class PostgresObservationRepository {
   readonly #pool: Pool;
 
   public constructor(connectionString: string) {
-    this.#pool = new Pool({
-      connectionString,
-      connectionTimeoutMillis: 5_000,
-      max: 10,
-      query_timeout: 30_000,
-      statement_timeout: 30_000,
-    });
+    this.#pool = guardPostgresPool(
+      new Pool({
+        connectionString,
+        connectionTimeoutMillis: 5_000,
+        max: 10,
+        query_timeout: 30_000,
+        statement_timeout: 30_000,
+      }),
+    );
   }
 
   public async close(): Promise<void> {

@@ -13,6 +13,7 @@ import { RuntimeError } from "@iterminal/domain";
 import { Pool, type PoolClient } from "pg";
 
 import { migrateDatabase } from "./migrate.js";
+import { guardPostgresPool } from "./postgres-pool.js";
 
 export class PostgresMessagingRepository
   implements OutboxRepository, ConsumerInbox, ExecutionReadyInspector
@@ -20,13 +21,15 @@ export class PostgresMessagingRepository
   readonly #pool: Pool;
 
   public constructor(connectionString: string) {
-    this.#pool = new Pool({
-      connectionString,
-      connectionTimeoutMillis: 5_000,
-      max: 20,
-      query_timeout: 30_000,
-      statement_timeout: 30_000,
-    });
+    this.#pool = guardPostgresPool(
+      new Pool({
+        connectionString,
+        connectionTimeoutMillis: 5_000,
+        max: 20,
+        query_timeout: 30_000,
+        statement_timeout: 30_000,
+      }),
+    );
   }
 
   public async migrate(): Promise<void> {

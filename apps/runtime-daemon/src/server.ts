@@ -13,16 +13,31 @@ import {
   type RuntimeRpcServerHandle,
 } from "@iterminal/runtime-rpc";
 
+import {
+  startPostgresRecoverySupervisor,
+  type PostgresRecoverySupervisor,
+  type RuntimeDaemonDurabilityState,
+} from "./postgres-recovery-supervisor.js";
+
+export type { RuntimeDaemonDurabilityState } from "./postgres-recovery-supervisor.js";
+
 export interface RuntimeDaemonHandle extends RuntimeRpcServerHandle {
   readonly durable: boolean;
   readonly runtime: RuntimeService;
+  durabilityState(): RuntimeDaemonDurabilityState;
+  waitUntilReady(): Promise<void>;
 }
 
 export async function startRuntimeDaemon(options: {
+  readonly databaseHealthCheckMilliseconds?: number;
   readonly databaseUrl?: string;
   readonly executionDispatch?: "external" | "immediate";
   readonly hooks?: RuntimeServiceOptions["hooks"];
   readonly databaseStatementTimeoutMilliseconds?: number;
+  readonly databaseReconnectInitialMilliseconds?: number;
+  readonly databaseReconnectJitterRatio?: number;
+  readonly databaseReconnectMaxMilliseconds?: number;
+  readonly onDurabilityState?: (state: RuntimeDaemonDurabilityState) => void;
   readonly outboxMaxPending?: number;
   readonly ownerId?: string;
   readonly socketPath: string;
@@ -42,9 +57,14 @@ export async function startRuntimeDaemon(options: {
   if (
     options.runtime !== undefined &&
     (options.databaseUrl !== undefined ||
+      options.databaseHealthCheckMilliseconds !== undefined ||
       options.databaseStatementTimeoutMilliseconds !== undefined ||
+      options.databaseReconnectInitialMilliseconds !== undefined ||
+      options.databaseReconnectJitterRatio !== undefined ||
+      options.databaseReconnectMaxMilliseconds !== undefined ||
       options.executionDispatch !== undefined ||
       options.hooks !== undefined ||
+      options.onDurabilityState !== undefined ||
       options.outboxMaxPending !== undefined)
   ) {
     throw new RuntimeError(
@@ -75,17 +95,57 @@ export async function startRuntimeDaemon(options: {
       ownerId,
     });
   let rpc: RuntimeRpcServerHandle | undefined;
-  let ready = false;
+  let durabilityState: RuntimeDaemonDurabilityState =
+    durability === undefined
+      ? { attempt: 0, phase: "DISABLED" }
+      : { attempt: 0, phase: "CONNECTING" };
+  const readyWaiters = new Set<Deferred<void>>();
+  let closed = false;
+  const isReady = (): boolean =>
+    !closed &&
+    (durabilityState.phase === "DISABLED" ||
+      (durabilityState.phase === "READY" && runtime.isDurabilityHealthy()));
+  const updateDurabilityState = (state: RuntimeDaemonDurabilityState): void => {
+    durabilityState = state;
+    try {
+      options.onDurabilityState?.(state);
+    } catch {
+      // Diagnostics must not change Runtime readiness.
+    }
+    if (isReady()) {
+      for (const waiter of readyWaiters) waiter.resolve();
+      readyWaiters.clear();
+    }
+  };
+  let supervisor: PostgresRecoverySupervisor | undefined;
   try {
     rpc = await startRuntimeRpcServer({
       gateway: new LocalRuntimeGateway(runtime),
-      isReady: () => ready,
+      isReady,
       socketPath: options.socketPath,
     });
-    await durability?.migrate();
-    await runtime.recoverDurableOwner("runtime owner restarted without a graceful close");
-    ready = true;
+    if (durability !== undefined) {
+      supervisor = startPostgresRecoverySupervisor({
+        durability,
+        runtime,
+        updateState: updateDurabilityState,
+        ...(options.databaseHealthCheckMilliseconds === undefined
+          ? {}
+          : { healthCheckMilliseconds: options.databaseHealthCheckMilliseconds }),
+        ...(options.databaseReconnectInitialMilliseconds === undefined
+          ? {}
+          : { initialDelayMilliseconds: options.databaseReconnectInitialMilliseconds }),
+        ...(options.databaseReconnectJitterRatio === undefined
+          ? {}
+          : { jitterRatio: options.databaseReconnectJitterRatio }),
+        ...(options.databaseReconnectMaxMilliseconds === undefined
+          ? {}
+          : { maxDelayMilliseconds: options.databaseReconnectMaxMilliseconds }),
+      });
+      await supervisor.firstAttempt;
+    }
   } catch (error) {
+    await supervisor?.close().catch(() => undefined);
     await rpc?.close().catch(() => undefined);
     await durability?.close().catch(() => undefined);
     throw error;
@@ -98,11 +158,34 @@ export async function startRuntimeDaemon(options: {
   let closePromise: Promise<void> | undefined;
   return {
     durable: durability !== undefined,
+    durabilityState: () => durabilityState,
     runtime,
     socketPath: rpcHandle.socketPath,
     close: () => {
-      closePromise ??= closeDaemon(rpcHandle, runtime, durability);
+      if (!closed) {
+        closed = true;
+        const failure = new RuntimeError(
+          "RUNTIME_UNAVAILABLE",
+          "Runtime daemon closed before PostgreSQL became ready",
+          {},
+          true,
+        );
+        for (const waiter of readyWaiters) waiter.reject(failure);
+        readyWaiters.clear();
+      }
+      closePromise ??= closeDaemon(rpcHandle, runtime, durability, supervisor, durabilityState);
       return closePromise;
+    },
+    waitUntilReady: () => {
+      if (isReady()) return Promise.resolve();
+      if (closed) {
+        return Promise.reject(
+          new RuntimeError("RUNTIME_UNAVAILABLE", "Runtime daemon is closed", {}, true),
+        );
+      }
+      const waiter = deferred<void>();
+      readyWaiters.add(waiter);
+      return waiter.promise;
     },
   };
 }
@@ -111,20 +194,44 @@ async function closeDaemon(
   rpc: RuntimeRpcServerHandle,
   runtime: RuntimeService,
   durability: PostgresRuntimeDurability | undefined,
+  supervisor: PostgresRecoverySupervisor | undefined,
+  durabilityState: RuntimeDaemonDurabilityState,
 ): Promise<void> {
   const errors: unknown[] = [];
   await rpc.close().catch((error: unknown) => errors.push(error));
-  for (const session of runtime.listSessions()) {
-    if (session.status !== "CLOSED") {
-      await runtime
-        .closeSession(session.id, session.generation)
-        .catch((error: unknown) => errors.push(error));
+  await supervisor?.close().catch((error: unknown) => errors.push(error));
+  if (durabilityState.phase === "READY" && runtime.isDurabilityHealthy()) {
+    for (const session of runtime.listSessions()) {
+      if (session.status !== "CLOSED" && session.status !== "BROKEN") {
+        await runtime
+          .closeSession(session.id, session.generation)
+          .catch((error: unknown) => errors.push(error));
+      }
     }
+  } else {
+    runtime.shutdownLiveOwner("Runtime daemon stopped while PostgreSQL was unavailable");
   }
   await durability?.close().catch((error: unknown) => errors.push(error));
   if (errors.length > 0) {
     throw new AggregateError(errors, "Runtime daemon did not close cleanly");
   }
+}
+
+interface Deferred<T> {
+  readonly promise: Promise<T>;
+  readonly reject: (reason?: unknown) => void;
+  readonly resolve: (value: T | PromiseLike<T>) => void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((innerResolve, innerReject) => {
+    resolve = innerResolve;
+    reject = innerReject;
+  });
+  void promise.catch(() => undefined);
+  return { promise, reject, resolve };
 }
 
 export function runtimeOwnerId(socketPath: string): string {

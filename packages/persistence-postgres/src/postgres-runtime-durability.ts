@@ -20,6 +20,7 @@ import { RuntimeError } from "@iterminal/domain";
 import { Pool, type PoolClient } from "pg";
 
 import { PostgresObservationRepository } from "./postgres-observation-repository.js";
+import { guardPostgresPool } from "./postgres-pool.js";
 import { PostgresRuntimeRepository } from "./postgres-runtime-repository.js";
 
 export interface PostgresRuntimeDurabilityOptions {
@@ -38,19 +39,25 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
       options.statementTimeoutMilliseconds ?? 30_000,
       "statementTimeoutMilliseconds",
     );
-    this.#pool = new Pool({
-      connectionString,
-      connectionTimeoutMillis: 5_000,
-      max: 20,
-      query_timeout: statementTimeoutMilliseconds,
-      statement_timeout: statementTimeoutMilliseconds,
-    });
+    this.#pool = guardPostgresPool(
+      new Pool({
+        connectionString,
+        connectionTimeoutMillis: 5_000,
+        max: 20,
+        query_timeout: statementTimeoutMilliseconds,
+        statement_timeout: statementTimeoutMilliseconds,
+      }),
+    );
     this.#observation = new PostgresObservationRepository(connectionString);
     this.#admission = new PostgresRuntimeRepository(connectionString, options);
   }
 
   public async migrate(): Promise<void> {
     await this.#admission.migrate();
+  }
+
+  public async healthCheck(): Promise<void> {
+    await this.#pool.query("SELECT 1");
   }
 
   public async close(): Promise<void> {

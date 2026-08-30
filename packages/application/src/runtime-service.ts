@@ -104,6 +104,7 @@ export class RuntimeService {
   readonly #durableQueues = new Map<string, DurableQueueState>();
   readonly #mutationTails = new Map<string, Promise<void>>();
   readonly #durability: RuntimeDurability | undefined;
+  #ownerDurabilityFailure: RuntimeError | undefined;
   readonly #dispatchStates = new Map<string, ExecutionDispatchState>();
   readonly #executionDispatch: "external" | "immediate";
   readonly #hooks: NonNullable<RuntimeServiceOptions["hooks"]>;
@@ -123,6 +124,7 @@ export class RuntimeService {
   }
 
   public async createSession(request: CreateSessionRequest): Promise<Session> {
+    this.#requireOwnerDurability();
     const sessionId = `ses_${randomUUID()}`;
     const generation = 1;
     const createdAt = this.#timestamp();
@@ -155,6 +157,7 @@ export class RuntimeService {
       );
     } catch (error) {
       this.store.breakSession(sessionId, generation);
+      if (isDurabilityFatal(error)) this.#tripDurability(sessionId, error);
       throw durabilityError(error);
     }
 
@@ -172,9 +175,14 @@ export class RuntimeService {
         { shellPid: executor.shellPid },
         { persist: false },
       );
-      await this.#enqueueDurable(session.id, 0, () =>
-        this.#durability?.markSessionReady(ready, executor.shellPid, readyEvent),
-      );
+      try {
+        await this.#enqueueDurable(session.id, 0, () =>
+          this.#durability?.markSessionReady(ready, executor.shellPid, readyEvent),
+        );
+      } catch (error) {
+        if (isDurabilityFatal(error)) this.#tripDurability(sessionId, error);
+        throw error;
+      }
       return ready;
     } catch (error) {
       this.#executors.get(sessionId)?.close();
@@ -188,7 +196,7 @@ export class RuntimeService {
       );
       await this.#enqueueDurable(session.id, 0, () =>
         this.#durability?.markSessionBroken(broken, [brokenEvent], errorMessage(error)),
-      ).catch(() => undefined);
+      ).catch((durableError: unknown) => this.#tripDurability(session.id, durableError));
       throw error;
     }
   }
@@ -205,12 +213,32 @@ export class RuntimeService {
     readonly brokenSessions: number;
     readonly unknownExecutions: number;
   }> {
-    return (
-      (await this.#durability?.recoverOwner(this.#ownerId, reason)) ?? {
+    try {
+      const recovered = (await this.#durability?.recoverOwner(this.#ownerId, reason)) ?? {
         brokenSessions: 0,
         unknownExecutions: 0,
-      }
-    );
+      };
+      this.#ownerDurabilityFailure = undefined;
+      return recovered;
+    } catch (error) {
+      const failure = durabilityError(error);
+      this.#tripOwnerDurability(failure);
+      throw failure;
+    }
+  }
+
+  public isDurabilityHealthy(): boolean {
+    return this.#ownerDurabilityFailure === undefined;
+  }
+
+  public reportDurabilityUnavailable(error: unknown): void {
+    this.#tripOwnerDurability(durabilityError(error));
+  }
+
+  public shutdownLiveOwner(reason: string): void {
+    for (const session of this.store.listSessions()) {
+      this.#breakLiveSession(session, reason);
+    }
   }
 
   public startExecute(request: ExecuteRequest): Promise<StartedExecution> {
@@ -780,7 +808,12 @@ export class RuntimeService {
     const limit = Math.max(1, Math.min(requestedLimit, MAX_EVENT_LIMIT));
     if (this.#durability !== undefined) {
       await this.#flushDurable(sessionId);
-      return this.#durability.queryEvents(sessionId, generation, after, limit);
+      try {
+        return await this.#durability.queryEvents(sessionId, generation, after, limit);
+      } catch (error) {
+        if (isDurabilityFatal(error)) this.#tripDurability(sessionId, error);
+        throw durabilityError(error);
+      }
     }
     const events = this.store.queryEvents(sessionId, generation, after, limit + 1);
     const truncated = events.length > limit;
@@ -812,9 +845,14 @@ export class RuntimeService {
         { persist: false },
       );
       if (flushFailure !== undefined) throw durabilityError(flushFailure);
-      await this.#enqueueDurable(sessionId, 0, () =>
-        this.#durability?.closeSession(closed, closedEvent),
-      );
+      try {
+        await this.#enqueueDurable(sessionId, 0, () =>
+          this.#durability?.closeSession(closed, closedEvent),
+        );
+      } catch (error) {
+        if (isDurabilityFatal(error)) this.#tripDurability(sessionId, error);
+        throw error;
+      }
       return closed;
     });
   }
@@ -982,6 +1020,7 @@ export class RuntimeService {
     work: () => Promise<T> | undefined,
   ): Promise<T | undefined> {
     if (this.#durability === undefined) return undefined;
+    this.#requireOwnerDurability();
     const state = this.#durableQueue(sessionId);
     if (state.failure !== undefined) throw state.failure;
     if (
@@ -992,6 +1031,7 @@ export class RuntimeService {
         "RUNTIME_UNAVAILABLE",
         "Durable event ingest backlog exceeded its bound",
         {
+          durabilityScope: "session",
           maxPendingBytes: MAX_PENDING_DURABLE_BYTES,
           maxPendingEvents: MAX_PENDING_DURABLE_EVENTS,
           sessionId,
@@ -1030,6 +1070,7 @@ export class RuntimeService {
 
   async #flushDurable(sessionId: string): Promise<void> {
     if (this.#durability === undefined) return;
+    this.#requireOwnerDurability();
     const state = this.#durableQueue(sessionId);
     try {
       await withTimeout(
@@ -1039,6 +1080,7 @@ export class RuntimeService {
       );
     } catch (error) {
       state.failure ??= durabilityError(error);
+      this.#tripDurability(sessionId, error);
       throw state.failure;
     }
     if (state.failure !== undefined) throw state.failure;
@@ -1054,15 +1096,37 @@ export class RuntimeService {
   }
 
   #tripDurability(sessionId: string, error: unknown): void {
+    if (isOwnerDurabilityFailure(error)) {
+      this.#tripOwnerDurability(durabilityError(error));
+      return;
+    }
     const state = this.#durableQueue(sessionId);
     state.failure ??= durabilityError(error);
     const session = this.store.getSession(sessionId);
-    if (session !== undefined) this.#markActiveDispatchUnknown(session, errorMessage(error));
-    this.#executors.get(sessionId)?.close();
-    this.#executors.delete(sessionId);
-    if (session !== undefined && session.status !== "CLOSED" && session.status !== "BROKEN") {
+    if (session !== undefined) this.#breakLiveSession(session, errorMessage(error));
+  }
+
+  #tripOwnerDurability(failure: RuntimeError): void {
+    this.#ownerDurabilityFailure ??= failure;
+    const ownerFailure = this.#ownerDurabilityFailure;
+    for (const session of this.store.listSessions()) {
+      const state = this.#durableQueue(session.id);
+      state.failure ??= ownerFailure;
+      this.#breakLiveSession(session, ownerFailure.message);
+    }
+  }
+
+  #breakLiveSession(session: Session, reason: string): void {
+    this.#markActiveDispatchUnknown(session, reason);
+    this.#executors.get(session.id)?.close();
+    this.#executors.delete(session.id);
+    if (session.status !== "CLOSED" && session.status !== "BROKEN") {
       this.store.breakSession(session.id, session.generation);
     }
+  }
+
+  #requireOwnerDurability(): void {
+    if (this.#ownerDurabilityFailure !== undefined) throw this.#ownerDurabilityFailure;
   }
 
   #markActiveDispatchUnknown(session: Session, reason: string): void {
@@ -1163,10 +1227,38 @@ function durabilityError(error: unknown): RuntimeError {
   return new RuntimeError(
     "RUNTIME_UNAVAILABLE",
     "PostgreSQL durable journal is unavailable",
-    { reason: errorMessage(error) },
+    {
+      durabilityScope: isOwnerDurabilityFailure(error) ? "owner" : "session",
+      reason: errorMessage(error),
+    },
     true,
   );
 }
+
+function isOwnerDurabilityFailure(error: unknown): boolean {
+  if (error instanceof RuntimeError) {
+    if (error.code !== "RUNTIME_UNAVAILABLE") return false;
+    return error.details.durabilityScope !== "session";
+  }
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const code = String(error.code);
+    if (code === "57014") return false;
+    if (code.startsWith("08") || OWNER_CONNECTION_ERROR_CODES.has(code)) return true;
+  }
+  return true;
+}
+
+const OWNER_CONNECTION_ERROR_CODES = new Set([
+  "57P01",
+  "57P02",
+  "57P03",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "EPIPE",
+  "ETIMEDOUT",
+]);
 
 function isDurabilityFatal(error: unknown): boolean {
   return (

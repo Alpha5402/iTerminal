@@ -5,6 +5,7 @@ import { RuntimeError } from "@iterminal/domain";
 import { Pool, type PoolClient } from "pg";
 
 import { migrateDatabase } from "./migrate.js";
+import { guardPostgresPool } from "./postgres-pool.js";
 
 const DEFAULT_MAX_PENDING_OUTBOX = 10_000;
 const DEFAULT_STATEMENT_TIMEOUT_MS = 30_000;
@@ -94,13 +95,15 @@ export class PostgresRuntimeRepository {
       options.statementTimeoutMilliseconds ?? DEFAULT_STATEMENT_TIMEOUT_MS,
       "statementTimeoutMilliseconds",
     );
-    this.#pool = new Pool({
-      connectionString,
-      connectionTimeoutMillis: 5_000,
-      max: 20,
-      query_timeout: statementTimeoutMilliseconds,
-      statement_timeout: statementTimeoutMilliseconds,
-    });
+    this.#pool = guardPostgresPool(
+      new Pool({
+        connectionString,
+        connectionTimeoutMillis: 5_000,
+        max: 20,
+        query_timeout: statementTimeoutMilliseconds,
+        statement_timeout: statementTimeoutMilliseconds,
+      }),
+    );
   }
 
   public async migrate(): Promise<void> {

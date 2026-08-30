@@ -14,6 +14,7 @@ const requiredReports = [
   "docs/verification/M8/2026-08-30-interaction-crash-retry-outage.md",
   "docs/verification/M8/2026-08-30-admission-backpressure.md",
   "docs/verification/M8/2026-08-30-rabbitmq-process-reconnect.md",
+  "docs/verification/M8/2026-08-30-postgres-process-recovery.md",
 ];
 
 for (const report of requiredReports) {

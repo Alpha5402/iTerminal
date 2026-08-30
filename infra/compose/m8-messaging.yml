@@ -12,8 +12,8 @@ services:
       retries: 20
     ports:
       - "127.0.0.1:55432:5432"
-    tmpfs:
-      - /var/lib/postgresql/data
+    volumes:
+      - postgres-test-data:/var/lib/postgresql/data
 
   rabbitmq:
     image: rabbitmq:4.3-alpine
@@ -24,3 +24,6 @@ services:
       retries: 30
     ports:
       - "127.0.0.1:5673:5672"
+
+volumes:
+  postgres-test-data:

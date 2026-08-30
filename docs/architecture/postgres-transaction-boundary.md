@@ -41,3 +41,5 @@ M4.1 integrates this transaction with the live daemon while keeping PTY callback
 M8.3 applies the same conservative boundary to Input/Control: an expected owner/generation/active-Execution transaction appends `interaction.write_attempted` before the adapter call. `DELIVERED` is a later transaction. Owner loss between them leaves the Action `UNKNOWN`; it is not replayed against a replacement PTY.
 
 M8.4 bounds unpublished Outbox work before reservation. Capacity rejection is `BACKPRESSURE`, so Application rolls back only its tentative local sequence/reservation and preserves the READY PTY. Database timeout remains `RUNTIME_UNAVAILABLE` and breaks the generation because durable ordering can no longer be guaranteed.
+
+M8.6 distinguishes a Session-scoped statement timeout/conflict from a connection-level PostgreSQL outage. Connection loss opens an owner-wide circuit: every local PTY closes, RPC readiness drops, and a health/recovery supervisor reconnects with bounded backoff. Readiness returns only after `recoverOwner` atomically marks every old live durable generation `BROKEN` and active Execution `UNKNOWN`; no old PTY is recreated.

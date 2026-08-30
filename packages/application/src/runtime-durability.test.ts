@@ -116,6 +116,77 @@ describe("Runtime durable write-ahead boundary", () => {
       status: "BROKEN",
     });
   });
+
+  it("trips every live Session for an owner-wide durability outage and admits only after recovery", async () => {
+    const durability = new ControlledDurability();
+    const factory = new TrackingFactory();
+    const runtime = new RuntimeService(new MemoryRuntimeStore(), factory, {
+      durability,
+      ownerId: "owner-wide-durability-test",
+    });
+    const left = await runtime.createSession({ shell: "zsh", workspaceRoot: "/tmp" });
+    const right = await runtime.createSession({ shell: "zsh", workspaceRoot: "/tmp" });
+    durability.failExecute = true;
+
+    await expect(
+      runtime.startExecute({
+        actor,
+        command: "touch must-not-run",
+        idempotencyKey: "owner-outage",
+        sessionGeneration: left.generation,
+        sessionId: left.id,
+      }),
+    ).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+
+    expect(runtime.isDurabilityHealthy()).toBe(false);
+    expect(runtime.getSession(left.id).status).toBe("BROKEN");
+    expect(runtime.getSession(right.id).status).toBe("BROKEN");
+    expect(factory.executors.slice(0, 2).every((executor) => executor.closed)).toBe(true);
+    await expect(
+      runtime.createSession({ shell: "zsh", workspaceRoot: "/tmp" }),
+    ).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+
+    durability.failExecute = false;
+    await runtime.recoverDurableOwner("database connection recovered");
+    expect(runtime.isDurabilityHealthy()).toBe(true);
+    const replacement = await runtime.createSession({ shell: "zsh", workspaceRoot: "/tmp" });
+    expect(replacement.status).toBe("READY");
+    expect(runtime.getSession(left.id).status).toBe("BROKEN");
+    expect(runtime.getSession(right.id).status).toBe("BROKEN");
+    await runtime.closeSession(replacement.id, replacement.generation);
+  });
+
+  it("keeps a durable state conflict scoped to its Session", async () => {
+    const durability = new ControlledDurability();
+    const factory = new TrackingFactory();
+    const runtime = new RuntimeService(new MemoryRuntimeStore(), factory, {
+      durability,
+      ownerId: "owner-session-conflict-test",
+    });
+    const conflicted = await runtime.createSession({ shell: "zsh", workspaceRoot: "/tmp" });
+    const healthy = await runtime.createSession({ shell: "zsh", workspaceRoot: "/tmp" });
+    durability.executeError = new RuntimeError(
+      "DELIVERY_UNKNOWN",
+      "injected Session-scoped durable conflict",
+    );
+
+    await expect(
+      runtime.startExecute({
+        actor,
+        command: "true",
+        idempotencyKey: "session-conflict",
+        sessionGeneration: conflicted.generation,
+        sessionId: conflicted.id,
+      }),
+    ).rejects.toMatchObject({ code: "DELIVERY_UNKNOWN" });
+
+    expect(runtime.isDurabilityHealthy()).toBe(true);
+    expect(runtime.getSession(conflicted.id).status).toBe("BROKEN");
+    expect(runtime.getSession(healthy.id).status).toBe("READY");
+    expect(factory.executors[0]?.closed).toBe(true);
+    expect(factory.executors[1]?.closed).toBe(false);
+    await runtime.closeSession(healthy.id, healthy.generation);
+  });
 });
 
 class RecordingFactory implements ShellExecutorFactory {
@@ -123,6 +194,16 @@ class RecordingFactory implements ShellExecutorFactory {
 
   public create(): Promise<ShellExecutor> {
     return Promise.resolve(this.executor);
+  }
+}
+
+class TrackingFactory implements ShellExecutorFactory {
+  public readonly executors: RecordingExecutor[] = [];
+
+  public create(): Promise<ShellExecutor> {
+    const executor = new RecordingExecutor();
+    this.executors.push(executor);
+    return Promise.resolve(executor);
   }
 }
 
@@ -151,6 +232,7 @@ class RecordingExecutor implements ShellExecutor {
 }
 
 class ControlledDurability implements RuntimeDurability {
+  public executeError: RuntimeError | undefined;
   public failExecute = false;
   public failInteraction = false;
   public writeAttempts = 0;
@@ -173,6 +255,7 @@ class ControlledDurability implements RuntimeDurability {
   }
 
   public acceptExecute(input: DurableExecuteAdmission): Promise<DurableExecuteAdmissionResult> {
+    if (this.executeError !== undefined) return Promise.reject(this.executeError);
     if (this.failExecute) return Promise.reject(unavailable());
     return Promise.resolve({
       actionId: input.action.id,
