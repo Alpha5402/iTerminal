@@ -168,7 +168,9 @@ describeDispatch("M8.2 owner-local Execution dispatch", () => {
       expect(daemonChild.signalCode).toBe("SIGKILL");
 
       const replacement = await createDaemon(fixture.socketPath, ownerId);
-      expect(replacement.runtime.listSessions()).toEqual([]);
+      expect(replacement.runtime.listSessions()).toContainEqual(
+        expect.objectContaining({ id: session.id, status: "BROKEN" }),
+      );
       await waitFor(async () => (await executionStatus(admitted.execution.id)) === "UNKNOWN");
       await waitFor(async () => (await inboxStatus()) === "COMPLETED");
       const contents = await readFile(fixture.sideEffect, "utf8").catch(() => "");
@@ -202,11 +204,17 @@ describeDispatch("M8.2 owner-local Execution dispatch", () => {
 
   async function createDaemon(socketPath: string, ownerId: string): Promise<RuntimeDaemonHandle> {
     const daemon = await startRuntimeDaemon({
+      databaseHealthCheckMilliseconds: 50,
+      databaseReconnectInitialMilliseconds: 25,
+      databaseReconnectJitterRatio: 0,
+      databaseReconnectMaxMilliseconds: 25,
       databaseUrl: databaseUrl ?? "",
       executionDispatch: "external",
       ownerId,
+      ownerLeaseMilliseconds: 300,
       socketPath,
     });
+    await daemon.waitUntilReady();
     daemons.push(daemon);
     return daemon;
   }
@@ -310,7 +318,9 @@ async function startFailpointDaemon(
     "external-dispatch daemon ready",
     {
       ITERM_DATABASE_URL: databaseUrl ?? "",
+      ITERM_DATABASE_HEALTH_CHECK_MS: "50",
       ITERM_RUNTIME_OWNER_ID: ownerId,
+      ITERM_RUNTIME_OWNER_LEASE_MS: "300",
       ITERM_RUNTIME_SOCKET: socketPath,
       ITERM_TEST_FAILPOINT: failpoint,
     },

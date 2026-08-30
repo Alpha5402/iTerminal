@@ -222,11 +222,19 @@ describeDatabase("M4.1 durable Runtime daemon", () => {
     clients.splice(clients.indexOf(client), 1);
 
     daemon = await startRuntimeDaemon({
+      databaseHealthCheckMilliseconds: 50,
+      databaseReconnectInitialMilliseconds: 25,
+      databaseReconnectJitterRatio: 0,
+      databaseReconnectMaxMilliseconds: 25,
       databaseUrl: databaseUrl ?? "",
       ownerId,
+      ownerLeaseMilliseconds: 300,
       socketPath,
     });
-    expect(daemon.runtime.listSessions()).toEqual([]);
+    await daemon.waitUntilReady();
+    expect(daemon.runtime.listSessions()).toContainEqual(
+      expect.objectContaining({ id: session.id, status: "BROKEN" }),
+    );
     const recovered = await pool.query<{
       execution_status: string;
       session_status: string;
@@ -289,7 +297,9 @@ async function startDaemonChild(
       env: {
         ...process.env,
         ITERM_DATABASE_URL: connectionString,
+        ITERM_DATABASE_HEALTH_CHECK_MS: "50",
         ITERM_RUNTIME_OWNER_ID: ownerId,
+        ITERM_RUNTIME_OWNER_LEASE_MS: "300",
         ITERM_RUNTIME_SOCKET: socketPath,
       },
       stdio: ["pipe", "pipe", "pipe"],

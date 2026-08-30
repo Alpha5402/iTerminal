@@ -98,12 +98,20 @@ describeDatabase("M8.3 Input/Control crash uncertainty", () => {
       expect(child.signalCode).toBe("SIGKILL");
 
       const replacement = await startRuntimeDaemon({
+        databaseHealthCheckMilliseconds: 50,
+        databaseReconnectInitialMilliseconds: 25,
+        databaseReconnectJitterRatio: 0,
+        databaseReconnectMaxMilliseconds: 25,
         databaseUrl: databaseUrl ?? "",
         ownerId,
+        ownerLeaseMilliseconds: 300,
         socketPath: fixture.socketPath,
       });
       daemons.push(replacement);
-      expect(replacement.runtime.listSessions()).toEqual([]);
+      await replacement.waitUntilReady();
+      expect(replacement.runtime.listSessions()).toContainEqual(
+        expect.objectContaining({ id: session.id, status: "BROKEN" }),
+      );
       const recovered = await interactionState(idempotencyKey);
       expect(recovered).toMatchObject({
         action_status: "UNKNOWN",
@@ -116,14 +124,14 @@ describeDatabase("M8.3 Input/Control crash uncertainty", () => {
       if (interactionType === "input") {
         await expect(
           replacementClient.sendInput({ ...request, data: "input-once\n" }),
-        ).rejects.toMatchObject({ code: "SESSION_NOT_FOUND" });
+        ).rejects.toMatchObject({ code: "SESSION_BROKEN" });
       } else {
         await expect(
           replacementClient.sendControl({
             ...request,
             delivery: { control: "CTRL_C", mode: "TTY_CONTROL" },
           }),
-        ).rejects.toMatchObject({ code: "SESSION_NOT_FOUND" });
+        ).rejects.toMatchObject({ code: "SESSION_BROKEN" });
       }
       await delay(250);
       const contents = await readFile(fixture.sideEffect, "utf8").catch(() => "");
@@ -213,7 +221,9 @@ async function startCrashDaemon(
       env: {
         ...process.env,
         ITERM_DATABASE_URL: databaseUrl ?? "",
+        ITERM_DATABASE_HEALTH_CHECK_MS: "50",
         ITERM_RUNTIME_OWNER_ID: ownerId,
+        ITERM_RUNTIME_OWNER_LEASE_MS: "300",
         ITERM_RUNTIME_SOCKET: socketPath,
         ITERM_TEST_FAILPOINT: failpoint,
       },

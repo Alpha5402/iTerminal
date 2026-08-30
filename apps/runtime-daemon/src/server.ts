@@ -1,9 +1,17 @@
+import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
 
-import { RuntimeService, type RuntimeServiceOptions } from "@iterminal/application";
+import {
+  RuntimeService,
+  type RuntimeOwnerRecord,
+  type RuntimeServiceOptions,
+} from "@iterminal/application";
 import { RuntimeError } from "@iterminal/domain";
 import { PtyShellExecutorFactory } from "@iterminal/executor-pty";
-import { PostgresRuntimeDurability } from "@iterminal/persistence-postgres";
+import {
+  PostgresRuntimeDurability,
+  PostgresRuntimeOwnerRegistry,
+} from "@iterminal/persistence-postgres";
 import { MemoryRuntimeStore } from "@iterminal/runtime-memory";
 import { XtermScreenProjectionFactory } from "@iterminal/terminal-screen";
 import {
@@ -28,8 +36,12 @@ export interface RuntimeDaemonHandle extends RuntimeRpcServerHandle {
   readonly durable: boolean;
   readonly runtime: RuntimeService;
   durabilityState(): RuntimeDaemonDurabilityState;
+  ownerRegistration(): RuntimeOwnerRecord | undefined;
   waitUntilReady(): Promise<void>;
 }
+
+const DEFAULT_OWNER_LEASE_MILLISECONDS = 15_000;
+const DEFAULT_DATABASE_HEALTH_CHECK_MILLISECONDS = 1_000;
 
 export async function startRuntimeDaemon(options: {
   readonly checkpointEnvironmentKeys?: readonly string[];
@@ -44,6 +56,8 @@ export async function startRuntimeDaemon(options: {
   readonly onDurabilityState?: (state: RuntimeDaemonDurabilityState) => void;
   readonly outboxMaxPending?: number;
   readonly ownerId?: string;
+  readonly ownerInstanceId?: string;
+  readonly ownerLeaseMilliseconds?: number;
   readonly socketPath: string;
   readonly runtime?: RuntimeService;
 }): Promise<RuntimeDaemonHandle> {
@@ -59,6 +73,15 @@ export async function startRuntimeDaemon(options: {
     );
   }
   if (
+    options.databaseUrl === undefined &&
+    (options.ownerInstanceId !== undefined || options.ownerLeaseMilliseconds !== undefined)
+  ) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      "Runtime owner registry configuration requires PostgreSQL durability",
+    );
+  }
+  if (
     options.runtime !== undefined &&
     (options.databaseUrl !== undefined ||
       options.databaseHealthCheckMilliseconds !== undefined ||
@@ -70,7 +93,9 @@ export async function startRuntimeDaemon(options: {
       options.executionDispatch !== undefined ||
       options.hooks !== undefined ||
       options.onDurabilityState !== undefined ||
-      options.outboxMaxPending !== undefined)
+      options.outboxMaxPending !== undefined ||
+      options.ownerInstanceId !== undefined ||
+      options.ownerLeaseMilliseconds !== undefined)
   ) {
     throw new RuntimeError(
       "INVALID_REQUEST",
@@ -88,7 +113,35 @@ export async function startRuntimeDaemon(options: {
             ? {}
             : { maxPendingOutbox: options.outboxMaxPending }),
         });
+  const ownerRegistry =
+    options.databaseUrl === undefined
+      ? undefined
+      : new PostgresRuntimeOwnerRegistry(options.databaseUrl, {
+          ...(options.databaseStatementTimeoutMilliseconds === undefined
+            ? {}
+            : { statementTimeoutMilliseconds: options.databaseStatementTimeoutMilliseconds }),
+        });
   const ownerId = options.ownerId ?? runtimeOwnerIdForSocket(options.socketPath);
+  const ownerInstanceId = options.ownerInstanceId ?? `runtime_${randomUUID()}`;
+  const ownerLeaseMilliseconds = positiveInteger(
+    options.ownerLeaseMilliseconds ?? DEFAULT_OWNER_LEASE_MILLISECONDS,
+    "ownerLeaseMilliseconds",
+  );
+  const databaseHealthCheckMilliseconds = positiveInteger(
+    options.databaseHealthCheckMilliseconds ?? DEFAULT_DATABASE_HEALTH_CHECK_MILLISECONDS,
+    "databaseHealthCheckMilliseconds",
+  );
+  if (
+    ownerRegistry !== undefined &&
+    ownerLeaseMilliseconds <= databaseHealthCheckMilliseconds * 2
+  ) {
+    await Promise.all([durability?.close(), ownerRegistry.close()]);
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      "Runtime owner lease must exceed two database health-check intervals",
+      { databaseHealthCheckMilliseconds, ownerLeaseMilliseconds },
+    );
+  }
   const runtime =
     options.runtime ??
     new RuntimeService(new MemoryRuntimeStore(), new PtyShellExecutorFactory(), {
@@ -138,9 +191,18 @@ export async function startRuntimeDaemon(options: {
         durability,
         runtime,
         updateState: updateDurabilityState,
-        ...(options.databaseHealthCheckMilliseconds === undefined
+        ...(ownerRegistry === undefined
           ? {}
-          : { healthCheckMilliseconds: options.databaseHealthCheckMilliseconds }),
+          : {
+              ownership: {
+                endpoint: options.socketPath,
+                instanceId: ownerInstanceId,
+                leaseMilliseconds: ownerLeaseMilliseconds,
+                ownerId,
+                registry: ownerRegistry,
+              },
+            }),
+        healthCheckMilliseconds: databaseHealthCheckMilliseconds,
         ...(options.databaseReconnectInitialMilliseconds === undefined
           ? {}
           : { initialDelayMilliseconds: options.databaseReconnectInitialMilliseconds }),
@@ -157,10 +219,12 @@ export async function startRuntimeDaemon(options: {
     await supervisor?.close().catch(() => undefined);
     await rpc?.close().catch(() => undefined);
     await durability?.close().catch(() => undefined);
+    await ownerRegistry?.close().catch(() => undefined);
     throw error;
   }
   if (rpc === undefined) {
     await durability?.close().catch(() => undefined);
+    await ownerRegistry?.close().catch(() => undefined);
     throw new RuntimeError("RUNTIME_UNAVAILABLE", "Runtime RPC server did not start");
   }
   const rpcHandle = rpc;
@@ -168,6 +232,7 @@ export async function startRuntimeDaemon(options: {
   return {
     durable: durability !== undefined,
     durabilityState: () => durabilityState,
+    ownerRegistration: () => supervisor?.ownerRegistration(),
     runtime,
     socketPath: rpcHandle.socketPath,
     close: () => {
@@ -182,7 +247,15 @@ export async function startRuntimeDaemon(options: {
         for (const waiter of readyWaiters) waiter.reject(failure);
         readyWaiters.clear();
       }
-      closePromise ??= closeDaemon(rpcHandle, runtime, durability, supervisor, durabilityState);
+      closePromise ??= closeDaemon(
+        rpcHandle,
+        runtime,
+        durability,
+        ownerRegistry,
+        supervisor,
+        durabilityState,
+        ownerLeaseMilliseconds,
+      );
       return closePromise;
     },
     waitUntilReady: () => {
@@ -203,13 +276,28 @@ async function closeDaemon(
   rpc: RuntimeRpcServerHandle,
   runtime: RuntimeService,
   durability: PostgresRuntimeDurability | undefined,
+  ownerRegistry: PostgresRuntimeOwnerRegistry | undefined,
   supervisor: PostgresRecoverySupervisor | undefined,
   durabilityState: RuntimeDaemonDurabilityState,
+  ownerLeaseMilliseconds: number,
 ): Promise<void> {
   const errors: unknown[] = [];
+  const ownerRegistration = supervisor?.ownerRegistration();
+  let canPersistShutdown =
+    durabilityState.phase === "READY" &&
+    runtime.isDurabilityHealthy() &&
+    ownerRegistration !== undefined;
+  if (canPersistShutdown && ownerRegistry !== undefined && ownerRegistration !== undefined) {
+    await ownerRegistry
+      .beginOwnerDrain(ownerRegistration, ownerLeaseMilliseconds)
+      .catch((error: unknown) => {
+        errors.push(error);
+        runtime.reportDurabilityUnavailable(error);
+        canPersistShutdown = false;
+      });
+  }
   await rpc.close().catch((error: unknown) => errors.push(error));
-  await supervisor?.close().catch((error: unknown) => errors.push(error));
-  if (durabilityState.phase === "READY" && runtime.isDurabilityHealthy()) {
+  if (canPersistShutdown && runtime.isDurabilityHealthy()) {
     for (const session of runtime.listSessions()) {
       if (session.status !== "CLOSED" && session.status !== "BROKEN") {
         await runtime
@@ -220,10 +308,29 @@ async function closeDaemon(
   } else {
     runtime.shutdownLiveOwner("Runtime daemon stopped while PostgreSQL was unavailable");
   }
+  await supervisor?.close().catch((error: unknown) => errors.push(error));
+  if (
+    canPersistShutdown &&
+    runtime.isDurabilityHealthy() &&
+    ownerRegistry !== undefined &&
+    ownerRegistration !== undefined
+  ) {
+    await ownerRegistry.stopOwner(ownerRegistration).catch((error: unknown) => errors.push(error));
+  }
   await durability?.close().catch((error: unknown) => errors.push(error));
+  await ownerRegistry?.close().catch((error: unknown) => errors.push(error));
   if (errors.length > 0) {
     throw new AggregateError(errors, "Runtime daemon did not close cleanly");
   }
+}
+
+function positiveInteger(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new RuntimeError("INVALID_REQUEST", `${name} must be a positive integer`, {
+      [name]: value,
+    });
+  }
+  return value;
 }
 
 interface Deferred<T> {

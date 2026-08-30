@@ -1,4 +1,8 @@
-import type { RuntimeService } from "@iterminal/application";
+import type {
+  RuntimeOwnerRecord,
+  RuntimeOwnerRegistry,
+  RuntimeService,
+} from "@iterminal/application";
 import { RuntimeError } from "@iterminal/domain";
 import type { PostgresRuntimeDurability } from "@iterminal/persistence-postgres";
 
@@ -11,6 +15,7 @@ export interface RuntimeDaemonDurabilityState {
 
 export interface PostgresRecoverySupervisor {
   readonly firstAttempt: Promise<void>;
+  ownerRegistration(): RuntimeOwnerRecord | undefined;
   close(): Promise<void>;
 }
 
@@ -20,6 +25,13 @@ export function startPostgresRecoverySupervisor(options: {
   readonly initialDelayMilliseconds?: number;
   readonly jitterRatio?: number;
   readonly maxDelayMilliseconds?: number;
+  readonly ownership?: {
+    readonly endpoint: string;
+    readonly instanceId: string;
+    readonly leaseMilliseconds: number;
+    readonly ownerId: string;
+    readonly registry: RuntimeOwnerRegistry;
+  };
   readonly runtime: RuntimeService;
   readonly updateState: (state: RuntimeDaemonDurabilityState) => void;
 }): PostgresRecoverySupervisor {
@@ -55,6 +67,7 @@ export function startPostgresRecoverySupervisor(options: {
   });
   let firstAttemptFinished = false;
   let closePromise: Promise<void> | undefined;
+  let ownerRegistration: RuntimeOwnerRecord | undefined;
   const run = (async (): Promise<void> => {
     let attempt = 0;
     let recoveredOnce = false;
@@ -63,7 +76,14 @@ export function startPostgresRecoverySupervisor(options: {
         await abortableDelay(healthCheckMilliseconds, abortController.signal);
         if (abortController.signal.aborted) continue;
         try {
-          await options.durability.healthCheck();
+          if (options.ownership === undefined) {
+            await options.durability.healthCheck();
+          } else {
+            ownerRegistration = await options.ownership.registry.heartbeatOwner(
+              ownerRegistration ?? missingOwnerRegistration(),
+              options.ownership.leaseMilliseconds,
+            );
+          }
         } catch (error) {
           options.runtime.reportDurabilityUnavailable(error);
         }
@@ -73,6 +93,14 @@ export function startPostgresRecoverySupervisor(options: {
       options.updateState({ attempt, phase: "CONNECTING" });
       try {
         await options.durability.migrate();
+        if (options.ownership !== undefined) {
+          ownerRegistration = await options.ownership.registry.registerOwner({
+            endpoint: options.ownership.endpoint,
+            instanceId: options.ownership.instanceId,
+            leaseMilliseconds: options.ownership.leaseMilliseconds,
+            ownerId: options.ownership.ownerId,
+          });
+        }
         await options.runtime.recoverDurableOwner(
           recoveredOnce
             ? "PostgreSQL outage invalidated Runtime owner"
@@ -105,6 +133,7 @@ export function startPostgresRecoverySupervisor(options: {
   })();
   return {
     firstAttempt,
+    ownerRegistration: () => ownerRegistration,
     close: () => {
       closePromise ??= (async () => {
         abortController.abort();
@@ -113,6 +142,15 @@ export function startPostgresRecoverySupervisor(options: {
       return closePromise;
     },
   };
+}
+
+function missingOwnerRegistration(): never {
+  throw new RuntimeError(
+    "OWNER_LEASE_LOST",
+    "Runtime owner heartbeat has no registered owner identity",
+    {},
+    false,
+  );
 }
 
 function positiveInteger(value: number, name: string): number {

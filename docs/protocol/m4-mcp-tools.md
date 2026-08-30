@@ -11,6 +11,21 @@ The daemon has two explicit storage modes:
 
 In both modes the PTY remains process-local live truth. Restart recovery marks the previous stable owner generation `BROKEN` and ambiguous work `UNKNOWN`; a PostgreSQL-backed daemon may expose a bounded same-owner `BROKEN` rebuild projection, but it has no Executor, screen, or fake READY state.
 
+## Runtime owner registry boundary
+
+A PostgreSQL-backed daemon registers its stable logical `ownerId`, boot-unique `instanceId`, monotonic registry epoch, and absolute Unix socket before durable owner recovery. It then heartbeats with PostgreSQL time. A second live incarnation of the same logical owner remains unavailable and cannot reconcile or break the first daemon's Sessions. Graceful shutdown moves the row through `DRAINING` to `STOPPED`; losing the exact registry identity is an owner-wide durability failure that closes local PTYs and rejects RPC admission.
+
+The registry is M9.1 discovery and lifecycle state, not a Session lease. Registry epoch protects only registry-row updates. The central Router, cross-owner forwarding, generation-scoped Session fencing, and stale durable-write rejection remain later M9 work. Clients still connect directly to one configured Runtime socket in this slice.
+
+| Environment variable              | Default                         |
+| --------------------------------- | ------------------------------- |
+| `ITERM_RUNTIME_OWNER_ID`          | derived from the Runtime socket |
+| `ITERM_RUNTIME_OWNER_INSTANCE_ID` | random boot-unique UUID         |
+| `ITERM_RUNTIME_OWNER_LEASE_MS`    | `15000`                         |
+| `ITERM_DATABASE_HEALTH_CHECK_MS`  | `1000`                          |
+
+The owner lease must exceed two database health-check intervals. These settings are valid only with `ITERM_DATABASE_URL`.
+
 ## Actor configuration
 
 One bridge process represents one Agent Actor:

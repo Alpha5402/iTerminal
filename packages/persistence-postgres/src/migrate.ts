@@ -9,6 +9,7 @@ const migrations = [
   "004_interaction_guards.sql",
   "005_terminal_geometry.sql",
   "006_session_fork.sql",
+  "007_runtime_owner_registry.sql",
 ] as const;
 
 export async function migrateDatabase(pool: Pool): Promise<void> {

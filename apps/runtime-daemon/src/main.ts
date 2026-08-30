@@ -7,6 +7,8 @@ import {
 const socketPath = process.env.ITERM_RUNTIME_SOCKET ?? defaultRuntimeSocketPath();
 const databaseUrl = process.env.ITERM_DATABASE_URL;
 const ownerId = process.env.ITERM_RUNTIME_OWNER_ID;
+const ownerInstanceId = process.env.ITERM_RUNTIME_OWNER_INSTANCE_ID;
+const ownerLeaseMilliseconds = optionalPositiveInteger("ITERM_RUNTIME_OWNER_LEASE_MS");
 const executionDispatch = parseExecutionDispatch(process.env.ITERM_EXECUTION_DISPATCH);
 const checkpointEnvironmentKeys = optionalEnvironmentKeys("ITERM_CHECKPOINT_ENV_KEYS");
 const databaseStatementTimeoutMilliseconds = optionalPositiveInteger(
@@ -33,10 +35,12 @@ const daemon = await startRuntimeDaemon({
   ...(databaseReconnectMaxMilliseconds === undefined ? {} : { databaseReconnectMaxMilliseconds }),
   ...(databaseHealthCheckMilliseconds === undefined ? {} : { databaseHealthCheckMilliseconds }),
   ...(ownerId === undefined ? {} : { ownerId }),
+  ...(ownerInstanceId === undefined ? {} : { ownerInstanceId }),
+  ...(ownerLeaseMilliseconds === undefined ? {} : { ownerLeaseMilliseconds }),
   onDurabilityState: reportDurabilityState,
 });
 process.stderr.write(
-  `iTerminal Runtime daemon listening at ${daemon.socketPath} (${daemon.durable ? `postgres:${daemon.durabilityState().phase.toLowerCase()}` : "memory"})\n`,
+  `iTerminal Runtime daemon listening at ${daemon.socketPath} (${daemon.durable ? `postgres:${daemon.durabilityState().phase.toLowerCase()} owner_epoch=${daemon.ownerRegistration()?.epoch.toString() ?? "pending"}` : "memory"})\n`,
 );
 
 let closing = false;

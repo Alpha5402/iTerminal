@@ -24,6 +24,8 @@ These terms are protocol contracts. Avoid synonyms in code and public APIs unles
 | TerminalState      | Exact-generation advisory classification built from Runtime facts and bounded terminal signals. |
 | Interaction Guard  | Short-lived coordination policy that prevents semantically unsafe competing input.              |
 | Owner              | Worker/process that physically holds a generation's live PTY. It is not a Human/Agent role.     |
+| Owner instance     | One boot-unique Runtime process incarnation registered beneath a stable logical owner ID.       |
+| Registry epoch     | Monotonic owner-incarnation number; fences registry writes but is not a Session fencing token.  |
 | `UNKNOWN`          | The Runtime cannot prove whether a write or external side effect occurred/completed.            |
 | `BROKEN`           | The generation's PTY/Shell/owner/control protocol is lost or no longer trustworthy.             |
 

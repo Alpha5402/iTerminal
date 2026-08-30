@@ -89,7 +89,9 @@ describeAdmission("M8.4 admission outage and Outbox backpressure", () => {
       socketPath: fixture.socketPath,
     });
     daemons.push(replacement);
-    expect(replacement.runtime.listSessions()).toEqual([]);
+    expect(replacement.runtime.listSessions()).toContainEqual(
+      expect.objectContaining({ id: session.id, status: "BROKEN" }),
+    );
     expect(await admissionCounts(session.id)).toMatchObject({
       accepted_events: "0",
       actions: "0",
@@ -215,10 +217,12 @@ describeAdmission("M8.4 admission outage and Outbox backpressure", () => {
     const fixture = await createFixture("db-stall");
     const ownerId = "owner-m8-db-stall";
     const daemon = await startRuntimeDaemon({
+      databaseHealthCheckMilliseconds: 50,
       databaseStatementTimeoutMilliseconds: 200,
       databaseUrl: databaseUrl ?? "",
       executionDispatch: "external",
       ownerId,
+      ownerLeaseMilliseconds: 300,
       socketPath: fixture.socketPath,
     });
     daemons.push(daemon);
@@ -248,11 +252,17 @@ describeAdmission("M8.4 admission outage and Outbox backpressure", () => {
     await daemon.close().catch(() => undefined);
     daemons.splice(daemons.indexOf(daemon), 1);
     const replacement = await startRuntimeDaemon({
+      databaseHealthCheckMilliseconds: 50,
+      databaseReconnectInitialMilliseconds: 25,
+      databaseReconnectJitterRatio: 0,
+      databaseReconnectMaxMilliseconds: 25,
       databaseUrl: databaseUrl ?? "",
       ownerId,
+      ownerLeaseMilliseconds: 300,
       socketPath: fixture.socketPath,
     });
     daemons.push(replacement);
+    await replacement.waitUntilReady();
     expect((await admissionCounts(session.id)).session_status).toBe("BROKEN");
   }, 30_000);
 

@@ -171,6 +171,45 @@ export interface DurableOwnerRecoveryResult {
   readonly unknownExecutions: number;
 }
 
+export type RuntimeOwnerStatus = "ACTIVE" | "DRAINING" | "STOPPED";
+
+export interface RuntimeOwnerIdentity {
+  readonly epoch: number;
+  readonly instanceId: string;
+  readonly ownerId: string;
+}
+
+export interface RuntimeOwnerRecord extends RuntimeOwnerIdentity {
+  readonly activeSessionCount: number;
+  readonly endpoint: string;
+  readonly heartbeatAt: string;
+  readonly leaseExpiresAt: string;
+  readonly startedAt: string;
+  readonly status: RuntimeOwnerStatus;
+  readonly stoppedAt?: string;
+  readonly version: number;
+}
+
+export interface RuntimeOwnerRegistry {
+  registerOwner(input: {
+    readonly endpoint: string;
+    readonly instanceId: string;
+    readonly leaseMilliseconds: number;
+    readonly ownerId: string;
+  }): Promise<RuntimeOwnerRecord>;
+  heartbeatOwner(
+    identity: RuntimeOwnerIdentity,
+    leaseMilliseconds: number,
+  ): Promise<RuntimeOwnerRecord>;
+  beginOwnerDrain(
+    identity: RuntimeOwnerIdentity,
+    leaseMilliseconds: number,
+  ): Promise<RuntimeOwnerRecord>;
+  stopOwner(identity: RuntimeOwnerIdentity): Promise<RuntimeOwnerRecord>;
+  listAssignableOwners(): Promise<readonly RuntimeOwnerRecord[]>;
+  resolveLiveOwner(ownerId: string): Promise<RuntimeOwnerRecord | undefined>;
+}
+
 export interface RuntimeDurability {
   createSession(session: Session, events: readonly DurableSessionEvent[]): Promise<void>;
   markSessionReady(

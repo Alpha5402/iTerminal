@@ -1,10 +1,10 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
-> 状态：Implementation Baseline v6.0 — M5 shared path、M6.6 controlled geometry 与 M7.2 durable Human rebuild 已通过真实 Browser Human L3；M6.7 bounded TerminalState 与 M7.1 versioned checkpoint fork 已通过 real PTY/official MCP L2；M0–M4.1、M6.5 与 M8.9 后端路径保持 L2，M4 autonomous-model L3 仍待显式授权
+> 状态：Implementation Baseline v6.1 — M5 shared path、M6.6 controlled geometry 与 M7.2 durable Human rebuild 已通过真实 Browser Human L3；M6.7 bounded TerminalState、M7.1 versioned checkpoint fork 与 M9.1 Runtime owner registry 已通过 real PTY/PostgreSQL L2；M0–M4.1、M6.5 与 M8.9 后端路径保持 L2，M4 autonomous-model L3 仍待显式授权
 >
 > 基线日期：2026-08-30
 >
-> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live Runtime 已接入 PostgreSQL write-ahead journal、bounded ingest loop、versioned dynamic ANSI/VT Virtual Screen，以及 generation-scoped Input Policy/Interaction Guard。M5/M6.6 增加 loopback Human Console 与受控 ResizeAction：真实无头 Chrome Human 和 official MCP SDK Agent 已在同一 PostgreSQL/zsh Session 中共享 cwd/env/Python REPL，并分别驱动同一 PTY 的 SIGWINCH。M6.7 增加不可作为安全事实的 exact-generation `terminal_state`。M7.1 增加 Shell READY control-channel checkpoint、运维 exact allowlist env、version/hash/CAS/staleness、cwd containment、PostgreSQL `session_forks`/child lineage/idempotency 与 `session_checkpoint|session_fork` MCP；真实 bash/zsh 中 READY/RUNNING/BROKEN parent 可重建独立 child，不复制 process/REPL/editor/alias/function/trap，也不隔离共享 workspace 文件。M7.2 在同一 stable owner 的新 daemon 中 hydrate 最多 100 个只读历史 BROKEN projection；Human Console 明示 stale/non-copy 边界并重建新 Session/PTY，真实 Chrome 路径已在恢复 cwd/env 后运行 `git status`。M8.9 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放、DB/AMQP 恢复与真实三节点 RabbitMQ quorum leader failover。Autonomous model 授权、更广 TUI/跨浏览器/style parity、daemon restart 后 durable wait、Approval/secret、跨 owner/fencing、非对称分区、long soak、多 Worker 与完整 MVP/L4 仍未完成。
+> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live Runtime 已接入 PostgreSQL write-ahead journal、bounded ingest loop、versioned dynamic ANSI/VT Virtual Screen，以及 generation-scoped Input Policy/Interaction Guard。M5/M6.6 增加 loopback Human Console 与受控 ResizeAction：真实无头 Chrome Human 和 official MCP SDK Agent 已在同一 PostgreSQL/zsh Session 中共享 cwd/env/Python REPL，并分别驱动同一 PTY 的 SIGWINCH。M6.7 增加不可作为安全事实的 exact-generation `terminal_state`。M7.1 增加 Shell READY control-channel checkpoint、运维 exact allowlist env、version/hash/CAS/staleness、cwd containment、PostgreSQL `session_forks`/child lineage/idempotency 与 `session_checkpoint|session_fork` MCP；真实 bash/zsh 中 READY/RUNNING/BROKEN parent 可重建独立 child，不复制 process/REPL/editor/alias/function/trap，也不隔离共享 workspace 文件。M7.2 在同一 stable owner 的新 daemon 中 hydrate 最多 100 个只读历史 BROKEN projection；Human Console 明示 stale/non-copy 边界并重建新 Session/PTY，真实 Chrome 路径已在恢复 cwd/env 后运行 `git status`。M8.9 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放、DB/AMQP 恢复与真实三节点 RabbitMQ quorum leader failover。M9.1 新增 PostgreSQL Runtime owner registry：boot-unique instance、单调 registry epoch、heartbeat、drain、DB-time expiry 与 stale identity 拒绝；同 owner 冲突进程在 durable recovery 前 fail closed，失去 registry identity 的 daemon 会 owner-wide 熔断并关闭本地 PTY。中央 Unix Router、Session lease/fencing 与多 Worker chaos 仍未实现。Autonomous model 授权、更广 TUI/跨浏览器/style parity、daemon restart 后 durable wait、Approval/secret、跨 owner/fencing、非对称分区、long soak、多 Worker 与完整 MVP/L4 仍未完成。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -503,7 +503,8 @@ PTY bytes -> ANSI/VT parser -> versioned screen buffer -> full/diff/region/searc
 - [x] `outbox`：`ExecutionReady`、leased claim、confirm publish、mark/retry 与 publish Event。
 - [x] `consumer_inbox`：payload hash、processing lease、attempt/outcome 与完成去重。
 - [ ] `artifacts`：大输出 metadata/hash/size/retention 已完成；录制/导出待 M10。
-- [ ] `worker_registry` / `session_leases`：M9 才引入。
+- [x] `worker_registry`：M9.1 已持久化 owner/instance/epoch/endpoint、heartbeat/lease、ACTIVE/DRAINING/STOPPED 与 version，并以 PostgreSQL 时间判定可路由性。
+- [ ] `session_leases`：后续 M9 generation-scoped lease/fencing 单独引入；不得用 registry epoch 代替。
 
 ### 9.2 关键约束
 
@@ -561,13 +562,13 @@ Human Console                       Agent / Scheduler
 
 RabbitMQ 不负责 Action ordering，也不表达 exactly-once。`ExecutionReady` 是 wake-up；Worker 仍读取 PostgreSQL 状态并校验 generation/owner。
 
-多 Worker 必须先解决路由再谈 Lease：
+多 Worker 必须先解决路由再谈 Lease。ADR-0029 已选择方案 B；实现仍按 registry → Router → Session lease/fencing 的依赖顺序推进：
 
 - 方案 A：owner-specific queue/consumer routing。
 - 方案 B：central router RPC 到 owner Worker。
 - 方案 C：每个 Session Executor 是独立 supervisor process，Worker 只与 supervisor 通信。
 
-M9 spike/ADR 选型；不能让任意 Worker 消费后新建第二个“同 Session”PTY。
+M9.1 已完成 registry 与方案 ADR；中央 Router forwarding 尚未实现。不能让任意 Worker 消费后新建第二个“同 Session”PTY。
 
 ---
 
@@ -999,8 +1000,9 @@ Exit Gate：每个故障点有确定期望；不确定写入进入 UNKNOWN，文
 
 ### M9 — Multi-Worker Session Ownership、Lease 与 Router（目标：L4）
 
-- [ ] Worker registry、heartbeat、drain。
-- [ ] Session owner routing 方案 ADR 与实现。
+- [x] Worker registry、heartbeat、drain（M9.1 L2：PostgreSQL DB-time lease、boot instance、registry epoch、冲突注册与 stale heartbeat/drain/stop 拒绝）。
+- [x] Session owner routing 方案 ADR（ADR-0029 选择 central local Unix Router；registry epoch 明确不等于 Session fencing）。
+- [ ] Central Router 的 stable Unix RPC、owner 解析、转发与 fail-closed 实现。
 - [ ] generation-scoped Lease、renewal、fencing token。
 - [ ] 所有 Execution 状态提交校验 owner/generation/fencing。
 - [ ] 非 owner Worker 无法创建/写第二个同 Session PTY。
@@ -1166,5 +1168,8 @@ v1.0 还必须满足 M7–M10、fork 语义、故障矩阵、owner routing、mul
 11. [x] `feat(screen): add controlled resize and geometry ownership`：完成 canonical geometry owner、resize/reflow、CAS/UNKNOWN 与 Human/headless L3 fixture 对照。
 12. [x] `feat(screen): classify bounded terminal state evidence`：完成有 confidence/evidence/limitations 的 heuristic 与 real shell/REPL/TUI fixtures，不把 heuristic 当权限事实。
 13. [x] `feat(session): fork from versioned shell checkpoint`：M7.1 backend/PostgreSQL/RPC/MCP L2 + M7.2 Browser Human same-owner durable rebuild L3 已闭合；跨 owner/fencing 归 M9。
+14. [x] `feat(runtime): register durable owner instances`：M9.1 PostgreSQL registry、daemon register/heartbeat/drain/stop、冲突启动与 stale identity owner-wide shutdown 已闭合 L2；中央 Router 与 Session fencing 保持后续切片。
+15. [ ] `feat(router): route exact sessions to live owners`：stable Router Unix RPC 读取 durable Session owner 与 live registry route；缺失/过期/STOPPED route fail closed，不创建替代 PTY。
+16. [ ] `feat(runtime): fence generation-scoped session writes`：独立 Session lease/fencing token，并在所有 durable mutation 同事务校验 owner/instance/generation/token。
 
 M5 shared path 已闭合，但 M6 完整 L3 与其余 MVP Gate 未闭合前，不因为 M8 已有故障证据就宣称 MVP。
