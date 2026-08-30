@@ -27,6 +27,8 @@ M9.5 validates the same contracts with an independent Router process and three i
 
 M9.6 isolates one Runtime's PostgreSQL path behind a silent blackhole. Its query deadline trips only that owner's durability circuit, closes local PTYs, and lets its registry lease expire while the Router and healthy owners continue exact routing and placement. Recovery resets timed-out TCP streams before reconnecting; Pool and checked-out Client error listeners prevent late transport errors from terminating the process without changing query-rejection semantics. Re-registering the same boot incarnation may retain its registry epoch, but old Sessions remain `BROKEN`, ambiguous Executions remain `UNKNOWN`, and only a distinct new Session may own a new PTY.
 
+M9.7 makes two Router crash boundaries explicit. A placement claim committed before owner forwarding remains a consumed attempt even if no Session is created. A successful owner mutation whose Router response is lost remains owner-authoritative; the Router never retries it across owners. The client observes `DELIVERY_UNKNOWN` and may settle an idempotent operation such as `execution.start` only with its original identity and idempotency key. Root `session.create` has no client idempotency key, so post-forward response loss remains an open protocol gap.
+
 | Environment variable                | Default                         |
 | ----------------------------------- | ------------------------------- |
 | `ITERM_RUNTIME_OWNER_ID`            | derived from the Runtime socket |

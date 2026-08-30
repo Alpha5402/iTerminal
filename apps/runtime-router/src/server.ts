@@ -53,6 +53,14 @@ export interface RuntimeRouterHandle extends RuntimeRpcServerHandle {
   readonly gateway: CentralRuntimeRouterGateway;
 }
 
+export interface RuntimeRouterHooks {
+  readonly afterForward?: (input: {
+    readonly operation: string;
+    readonly owner: RuntimeOwnerRoute;
+  }) => Promise<void> | void;
+  readonly afterPlacementClaim?: (owner: RuntimeOwnerRoute) => Promise<void> | void;
+}
+
 type TargetKind = "execution" | "session";
 
 export class CentralRuntimeRouterGateway implements RuntimeGateway {
@@ -62,6 +70,7 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
     private readonly routes: RuntimeOwnerRegistry,
     private readonly clientFactory: (endpoint: string) => RuntimeGateway = (endpoint) =>
       new UnixRuntimeClient(endpoint),
+    private readonly hooks: RuntimeRouterHooks = {},
   ) {}
 
   public async createSession(request: CreateSessionRequest): Promise<Session> {
@@ -74,6 +83,7 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
         true,
       );
     }
+    await this.hooks.afterPlacementClaim?.(owner);
     const session = await this.#forward(owner, "session.create", (client) =>
       client.createSession(request),
     );
@@ -317,7 +327,9 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
     invoke: (client: RuntimeGateway) => Promise<T>,
   ): Promise<T> {
     try {
-      return await invoke(this.#client(owner.endpoint));
+      const result = await invoke(this.#client(owner.endpoint));
+      await this.hooks.afterForward?.({ operation, owner });
+      return result;
     } catch (error) {
       if (
         error instanceof RuntimeError &&
@@ -363,6 +375,7 @@ function isRuntimeConnectionFailure(error: RuntimeError): boolean {
 export async function startRuntimeRouter(options: {
   readonly databaseStatementTimeoutMilliseconds?: number;
   readonly databaseUrl: string;
+  readonly hooks?: RuntimeRouterHooks;
   readonly socketPath: string;
 }): Promise<RuntimeRouterHandle> {
   if (!isAbsolute(options.socketPath)) {
@@ -378,7 +391,7 @@ export async function startRuntimeRouter(options: {
   let rpc: RuntimeRpcServerHandle | undefined;
   try {
     await routes.migrate();
-    const gateway = new CentralRuntimeRouterGateway(routes);
+    const gateway = new CentralRuntimeRouterGateway(routes, undefined, options.hooks);
     rpc = await startRuntimeRpcServer({ gateway, socketPath: options.socketPath });
     const rpcHandle = rpc;
     let closePromise: Promise<void> | undefined;

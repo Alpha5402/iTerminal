@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import type { Session } from "@iterminal/domain";
@@ -19,7 +19,7 @@ interface ManagedChild {
   stderr: string;
 }
 
-describeDatabase("M9.5 independent-process multi-owner chaos", () => {
+describeDatabase("M9 independent-process multi-owner chaos", () => {
   const children: ManagedChild[] = [];
   const fixtures: string[] = [];
   const pool = new Pool({ connectionString: databaseUrl });
@@ -28,7 +28,7 @@ describeDatabase("M9.5 independent-process multi-owner chaos", () => {
   beforeAll(async () => {
     const database = await pool.query<{ current_database: string }>("SELECT current_database()");
     if (database.rows[0]?.current_database !== "iterminal_test") {
-      throw new Error("M9.5 tests refuse to mutate any database except iterminal_test");
+      throw new Error("M9 process tests refuse to mutate any database except iterminal_test");
     }
     const migrator = new PostgresRuntimeDurability(databaseUrl ?? "");
     await migrator.migrate();
@@ -369,6 +369,114 @@ describeDatabase("M9.5 independent-process multi-owner chaos", () => {
     expect((await client.getSession(victimSession.id)).status).toBe("BROKEN");
   }, 120_000);
 
+  it("preserves durable claim and idempotent mutation truth across in-flight Router SIGKILL", async () => {
+    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m97-crash-")));
+    fixtures.push(root);
+    const workspace = join(root, "workspace");
+    await mkdir(workspace, { recursive: true });
+    const owners = await Promise.all([
+      startRuntimeChild(
+        root,
+        "owner-router-crash-a",
+        "instance-router-crash-a",
+        join(root, "a.sock"),
+      ),
+      startRuntimeChild(
+        root,
+        "owner-router-crash-b",
+        "instance-router-crash-b",
+        join(root, "b.sock"),
+      ),
+    ]);
+    children.push(...owners);
+    const routerSocket = join(root, "router.sock");
+
+    const claimCrash = await startRouterChild(routerSocket, "after-placement-claim");
+    children.push(claimCrash);
+    let client = new UnixRuntimeClient(routerSocket);
+    await expect(
+      client.createSession({ shell: "zsh", workspaceRoot: workspace }),
+    ).rejects.toMatchObject({
+      code: "DELIVERY_UNKNOWN",
+      retryable: false,
+    });
+    await waitForExit(claimCrash);
+    expect(claimCrash.process.signalCode).toBe("SIGKILL");
+    const claimState = await pool.query<{
+      owner_id: string;
+      placement_count: string;
+      session_count: string;
+    }>(
+      `SELECT worker.owner_id, worker.placement_count::text,
+              count(session.id)::text AS session_count
+         FROM runtime_workers worker
+         LEFT JOIN sessions session ON session.owner_id = worker.owner_id
+        WHERE worker.owner_id LIKE 'owner-router-crash-%'
+        GROUP BY worker.owner_id, worker.placement_count
+        ORDER BY worker.owner_id`,
+    );
+    expect(claimState.rows).toEqual([
+      { owner_id: "owner-router-crash-a", placement_count: "1", session_count: "0" },
+      { owner_id: "owner-router-crash-b", placement_count: "0", session_count: "0" },
+    ]);
+
+    const steadyRouter = await startRouterChild(routerSocket);
+    children.push(steadyRouter);
+    client = new UnixRuntimeClient(routerSocket);
+    const session = await client.createSession({ shell: "zsh", workspaceRoot: workspace });
+    expect(session.ownerId).toBe("owner-router-crash-b");
+    const recoveredPlacement = await pool.query<{ owner_id: string; placement_count: string }>(
+      `SELECT owner_id, placement_count::text
+         FROM runtime_workers
+        WHERE owner_id LIKE 'owner-router-crash-%'
+        ORDER BY owner_id`,
+    );
+    expect(recoveredPlacement.rows).toEqual([
+      { owner_id: "owner-router-crash-a", placement_count: "1" },
+      { owner_id: "owner-router-crash-b", placement_count: "1" },
+    ]);
+    await stopChild(steadyRouter, "SIGTERM");
+
+    const mutationCrash = await startRouterChild(routerSocket, "after-execution-start-forward");
+    children.push(mutationCrash);
+    client = new UnixRuntimeClient(routerSocket);
+    const sideEffect = join(root, "router-mutation-side-effect.txt");
+    const request = {
+      actor: actor("router-crash-mutation"),
+      command: `printf 'm97-once\\n' >> ${shellQuote(sideEffect)}`,
+      idempotencyKey: "m97-router-crash-mutation",
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+    } as const;
+    await expect(client.startExecute(request)).rejects.toMatchObject({
+      code: "DELIVERY_UNKNOWN",
+      retryable: false,
+    });
+    await waitForExit(mutationCrash);
+    expect(mutationCrash.process.signalCode).toBe("SIGKILL");
+
+    const recoveredRouter = await startRouterChild(routerSocket);
+    children.push(recoveredRouter);
+    client = new UnixRuntimeClient(routerSocket);
+    const replay = await client.startExecute(request);
+    expect((await client.waitExecution(replay.execution.id)).status).toBe("COMPLETED");
+    expect(await readFile(sideEffect, "utf8")).toBe("m97-once\n");
+    const durableMutation = await pool.query<{
+      action_count: string;
+      execution_count: string;
+    }>(
+      `SELECT count(DISTINCT action.id)::text AS action_count,
+              count(DISTINCT execution.id)::text AS execution_count
+         FROM actions action
+         LEFT JOIN executions execution ON execution.action_id = action.id
+        WHERE action.session_id = $1
+          AND action.actor_id = $2
+          AND action.idempotency_key = $3`,
+      [session.id, request.actor.id, request.idempotencyKey],
+    );
+    expect(durableMutation.rows).toEqual([{ action_count: "1", execution_count: "1" }]);
+  }, 120_000);
+
   async function startRuntimeChild(
     root: string,
     ownerId: string,
@@ -394,11 +502,21 @@ describeDatabase("M9.5 independent-process multi-owner chaos", () => {
     return child;
   }
 
-  async function startRouterChild(socketPath: string): Promise<ManagedChild> {
-    const child = startChild("router", "apps/runtime-router/src/main.ts", {
-      ITERM_DATABASE_URL: databaseUrl ?? "",
-      ITERM_ROUTER_SOCKET: socketPath,
-    });
+  async function startRouterChild(
+    socketPath: string,
+    failpoint?: "after-execution-start-forward" | "after-placement-claim",
+  ): Promise<ManagedChild> {
+    const child = startChild(
+      failpoint === undefined ? "router" : `router-${failpoint}`,
+      failpoint === undefined
+        ? "apps/runtime-router/src/main.ts"
+        : "apps/runtime-router/src/fixtures/crash-router.ts",
+      {
+        ITERM_DATABASE_URL: databaseUrl ?? "",
+        ITERM_ROUTER_SOCKET: socketPath,
+        ...(failpoint === undefined ? {} : { ITERM_TEST_FAILPOINT: failpoint }),
+      },
+    );
     await waitForText(child, "Runtime Router listening", 15_000);
     return child;
   }
@@ -590,6 +708,10 @@ function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoExcepti
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 async function proxyFor(url: string): Promise<TcpFaultProxy> {
