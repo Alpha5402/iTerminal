@@ -1,8 +1,28 @@
+import type { RuntimeRouterDatabaseState } from "./postgres-recovery-supervisor.js";
 import { defaultRuntimeRouterSocketPath, startRuntimeRouter } from "./server.js";
 
 const router = await startRuntimeRouter({
   databaseUrl: requiredEnvironment("ITERM_DATABASE_URL"),
+  superviseDatabase: true,
+  onDatabaseState: reportDatabaseState,
   socketPath: process.env.ITERM_ROUTER_SOCKET ?? defaultRuntimeRouterSocketPath(),
+  ...(process.env.ITERM_DATABASE_HEALTH_CHECK_MS === undefined
+    ? {}
+    : {
+        databaseHealthCheckMilliseconds: positiveInteger("ITERM_DATABASE_HEALTH_CHECK_MS"),
+      }),
+  ...(process.env.ITERM_DATABASE_RECONNECT_INITIAL_MS === undefined
+    ? {}
+    : {
+        databaseReconnectInitialMilliseconds: positiveInteger(
+          "ITERM_DATABASE_RECONNECT_INITIAL_MS",
+        ),
+      }),
+  ...(process.env.ITERM_DATABASE_RECONNECT_MAX_MS === undefined
+    ? {}
+    : {
+        databaseReconnectMaxMilliseconds: positiveInteger("ITERM_DATABASE_RECONNECT_MAX_MS"),
+      }),
   ...(process.env.ITERM_DATABASE_STATEMENT_TIMEOUT_MS === undefined
     ? {}
     : {
@@ -28,6 +48,18 @@ process.on("SIGINT", () => {
 process.on("SIGTERM", () => {
   void shutdown("SIGTERM").then(() => process.exit(0));
 });
+
+function reportDatabaseState(state: RuntimeRouterDatabaseState): void {
+  if (state.phase === "READY") {
+    process.stderr.write("iTerminal Runtime Router PostgreSQL ready\n");
+    return;
+  }
+  if (state.phase === "UNAVAILABLE") {
+    process.stderr.write(
+      `iTerminal Runtime Router PostgreSQL unavailable; retrying in ${state.retryInMilliseconds?.toString() ?? "unknown"} ms\n`,
+    );
+  }
+}
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];

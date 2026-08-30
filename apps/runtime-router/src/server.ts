@@ -50,8 +50,16 @@ import {
   type StartedExecutionView,
 } from "@iterminal/runtime-rpc";
 
+import {
+  startRouterPostgresRecoverySupervisor,
+  type RouterPostgresRecoverySupervisor,
+  type RuntimeRouterDatabaseGate,
+  type RuntimeRouterDatabaseState,
+} from "./postgres-recovery-supervisor.js";
+
 export interface RuntimeRouterHandle extends RuntimeRpcServerHandle {
   readonly gateway: CentralRuntimeRouterGateway;
+  databaseState(): RuntimeRouterDatabaseState;
 }
 
 export interface RuntimeRouterHooks {
@@ -72,6 +80,7 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
     private readonly clientFactory: (endpoint: string) => RuntimeGateway = (endpoint) =>
       new UnixRuntimeClient(endpoint),
     private readonly hooks: RuntimeRouterHooks = {},
+    private readonly databaseGate?: RuntimeRouterDatabaseGate,
   ) {}
 
   public async createSession(request: CreateSessionRequest): Promise<Session> {
@@ -350,9 +359,11 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
 
   async #routeDatabase<T>(operation: string, query: () => Promise<T>): Promise<T> {
     try {
+      this.databaseGate?.assertReady(operation);
       return await query();
     } catch (error) {
       if (error instanceof RuntimeError) throw error;
+      this.databaseGate?.reportUnavailable();
       throw new RuntimeError(
         "RUNTIME_UNAVAILABLE",
         "Runtime Router durable route database is unavailable",
@@ -414,10 +425,15 @@ function isRuntimeConnectionFailure(error: RuntimeError): boolean {
 }
 
 export async function startRuntimeRouter(options: {
+  readonly databaseHealthCheckMilliseconds?: number;
+  readonly databaseReconnectInitialMilliseconds?: number;
+  readonly databaseReconnectMaxMilliseconds?: number;
   readonly databaseStatementTimeoutMilliseconds?: number;
   readonly databaseUrl: string;
   readonly hooks?: RuntimeRouterHooks;
+  readonly onDatabaseState?: (state: RuntimeRouterDatabaseState) => void;
   readonly socketPath: string;
+  readonly superviseDatabase?: boolean;
 }): Promise<RuntimeRouterHandle> {
   if (!isAbsolute(options.socketPath)) {
     throw new RuntimeError("INVALID_REQUEST", "Runtime Router socket path must be absolute", {
@@ -430,22 +446,47 @@ export async function startRuntimeRouter(options: {
       : { statementTimeoutMilliseconds: options.databaseStatementTimeoutMilliseconds }),
   });
   let rpc: RuntimeRpcServerHandle | undefined;
+  let supervisor: RouterPostgresRecoverySupervisor | undefined;
   try {
-    await routes.migrate();
-    const gateway = new CentralRuntimeRouterGateway(routes, undefined, options.hooks);
+    if (options.superviseDatabase === true) {
+      supervisor = startRouterPostgresRecoverySupervisor({
+        database: routes,
+        ...(options.databaseHealthCheckMilliseconds === undefined
+          ? {}
+          : { healthCheckMilliseconds: options.databaseHealthCheckMilliseconds }),
+        ...(options.databaseReconnectInitialMilliseconds === undefined
+          ? {}
+          : { initialDelayMilliseconds: options.databaseReconnectInitialMilliseconds }),
+        ...(options.databaseReconnectMaxMilliseconds === undefined
+          ? {}
+          : { maxDelayMilliseconds: options.databaseReconnectMaxMilliseconds }),
+        ...(options.onDatabaseState === undefined ? {} : { updateState: options.onDatabaseState }),
+      });
+    } else {
+      await routes.migrate();
+    }
+    const gateway = new CentralRuntimeRouterGateway(
+      routes,
+      undefined,
+      options.hooks,
+      supervisor?.gate,
+    );
     rpc = await startRuntimeRpcServer({ gateway, socketPath: options.socketPath });
     const rpcHandle = rpc;
+    const databaseSupervisor = supervisor;
     let closePromise: Promise<void> | undefined;
     return {
       gateway,
       socketPath: rpcHandle.socketPath,
+      databaseState: () => databaseSupervisor?.state() ?? { attempt: 0, phase: "READY" },
       close: () => {
-        closePromise ??= closeRuntimeRouter(rpcHandle, routes);
+        closePromise ??= closeRuntimeRouter(rpcHandle, routes, databaseSupervisor);
         return closePromise;
       },
     };
   } catch (error) {
     await rpc?.close().catch(() => undefined);
+    await supervisor?.close().catch(() => undefined);
     await routes.close().catch(() => undefined);
     throw error;
   }
@@ -462,9 +503,11 @@ export function defaultRuntimeRouterSocketPath(): string {
 async function closeRuntimeRouter(
   rpc: RuntimeRpcServerHandle,
   routes: PostgresRuntimeOwnerRegistry,
+  supervisor?: RouterPostgresRecoverySupervisor,
 ): Promise<void> {
   const errors: unknown[] = [];
   await rpc.close().catch((error: unknown) => errors.push(error));
+  await supervisor?.close().catch((error: unknown) => errors.push(error));
   await routes.close().catch((error: unknown) => errors.push(error));
   if (errors.length > 0) throw new AggregateError(errors, "Runtime Router did not close cleanly");
 }

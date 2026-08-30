@@ -711,6 +711,119 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
     expect(recoveredCompleted.output).toContain("m99-recovered-router");
   }, 120_000);
 
+  it("keeps a cold-start Router degraded until PostgreSQL becomes reachable", async () => {
+    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m910-router-cold-")));
+    fixtures.push(root);
+    const workspace = join(root, "workspace");
+    await mkdir(workspace, { recursive: true });
+    const owners = await Promise.all([
+      startRuntimeChild(
+        root,
+        "owner-router-cold-a",
+        "instance-router-cold-a",
+        join(root, "a.sock"),
+      ),
+      startRuntimeChild(
+        root,
+        "owner-router-cold-b",
+        "instance-router-cold-b",
+        join(root, "b.sock"),
+      ),
+    ]);
+    children.push(...owners);
+    const healthySocket = join(root, "router-healthy.sock");
+    children.push(await startRouterChild(healthySocket));
+    const healthy = new UnixRuntimeClient(healthySocket);
+    const baseline = await healthy.createSession({
+      idempotencyKey: "m910-baseline-session-create",
+      shell: "zsh",
+      workspaceRoot: workspace,
+    });
+
+    const proxy = await proxyFor(databaseUrl ?? "");
+    proxies.push(proxy);
+    proxy.setMode("BLACKHOLE");
+    const coldSocket = join(root, "router-cold.sock");
+    const coldRouter = await startRouterChild(
+      coldSocket,
+      undefined,
+      throughProxy(databaseUrl ?? "", proxy),
+      300,
+      false,
+    );
+    children.push(coldRouter);
+    const cold = new UnixRuntimeClient(coldSocket);
+    const coldCreate = {
+      idempotencyKey: "m910-cold-session-create",
+      shell: "zsh" as const,
+      workspaceRoot: workspace,
+    };
+    await expect(cold.createSession(coldCreate)).rejects.toMatchObject({
+      code: "RUNTIME_UNAVAILABLE",
+      details: {
+        component: "runtime-router",
+        operation: "session.create",
+        phase: "route_resolution",
+      },
+      retryable: true,
+    });
+    await waitForText(coldRouter, "Runtime Router PostgreSQL unavailable", 10_000);
+    expect(coldRouter.process.exitCode).toBeNull();
+    expect(
+      await pool.query("SELECT 1 FROM session_creation_requests WHERE idempotency_key = $1", [
+        coldCreate.idempotencyKey,
+      ]),
+    ).toMatchObject({ rowCount: 0 });
+
+    const healthyExecution = await healthy.startExecute({
+      actor: actor("router-cold-healthy"),
+      command: "printf m910-healthy-router",
+      idempotencyKey: "m910-healthy-router-execute",
+      sessionGeneration: baseline.generation,
+      sessionId: baseline.id,
+    });
+    expect((await healthy.waitExecution(healthyExecution.execution.id)).status).toBe("COMPLETED");
+    const duringColdStart = await healthy.createSession({
+      idempotencyKey: "m910-healthy-session-create",
+      shell: "zsh",
+      workspaceRoot: workspace,
+    });
+    expect(duringColdStart.id).not.toBe(baseline.id);
+
+    proxy.setMode("CUT");
+    proxy.setMode("FORWARD");
+    await waitForText(coldRouter, "Runtime Router PostgreSQL ready", 10_000);
+    const recovered = await cold.createSession(coldCreate);
+    const recoveredExecution = await cold.startExecute({
+      actor: actor("router-cold-recovered"),
+      command: "printf m910-recovered-router",
+      idempotencyKey: "m910-recovered-router-execute",
+      sessionGeneration: recovered.generation,
+      sessionId: recovered.id,
+    });
+    const completed = await cold.waitExecution(recoveredExecution.execution.id);
+    expect(completed.status).toBe("COMPLETED");
+    expect(completed.output).toContain("m910-recovered-router");
+    const durable = await pool.query<{
+      creation_count: string;
+      placement_count: string;
+      session_count: string;
+    }>(
+      `SELECT
+         (SELECT count(*)::text FROM session_creation_requests
+           WHERE idempotency_key = $1) AS creation_count,
+         (SELECT sum(placement_count)::text FROM runtime_workers
+           WHERE owner_id LIKE 'owner-router-cold-%') AS placement_count,
+         (SELECT count(*)::text FROM sessions
+           WHERE id IN (SELECT session_id FROM session_creation_requests
+                          WHERE idempotency_key = $1)) AS session_count`,
+      [coldCreate.idempotencyKey],
+    );
+    expect(durable.rows).toEqual([
+      { creation_count: "1", placement_count: "3", session_count: "1" },
+    ]);
+  }, 120_000);
+
   async function startRuntimeChild(
     root: string,
     ownerId: string,
@@ -742,6 +855,7 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
       "after-execution-start-forward" | "after-placement-claim" | "after-session-create-forward",
     connectionString = databaseUrl ?? "",
     databaseStatementTimeoutMilliseconds?: number,
+    waitForDatabaseReady = true,
   ): Promise<ManagedChild> {
     const child = startChild(
       failpoint === undefined ? "router" : `router-${failpoint}`,
@@ -749,6 +863,9 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
         ? "apps/runtime-router/src/main.ts"
         : "apps/runtime-router/src/fixtures/crash-router.ts",
       {
+        ITERM_DATABASE_HEALTH_CHECK_MS: "100",
+        ITERM_DATABASE_RECONNECT_INITIAL_MS: "50",
+        ITERM_DATABASE_RECONNECT_MAX_MS: "50",
         ITERM_DATABASE_URL: connectionString,
         ITERM_ROUTER_SOCKET: socketPath,
         ...(databaseStatementTimeoutMilliseconds === undefined
@@ -760,6 +877,9 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
       },
     );
     await waitForText(child, "Runtime Router listening", 15_000);
+    if (failpoint === undefined && waitForDatabaseReady) {
+      await waitForText(child, "Runtime Router PostgreSQL ready", 15_000);
+    }
     return child;
   }
 

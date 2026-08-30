@@ -27,20 +27,25 @@ M9.5 validates the same contracts with an independent Router process and three i
 
 M9.6 isolates one Runtime's PostgreSQL path behind a silent blackhole. Its query deadline trips only that owner's durability circuit, closes local PTYs, and lets its registry lease expire while the Router and healthy owners continue exact routing and placement. Recovery resets timed-out TCP streams before reconnecting; Pool and checked-out Client error listeners prevent late transport errors from terminating the process without changing query-rejection semantics. Re-registering the same boot incarnation may retain its registry epoch, but old Sessions remain `BROKEN`, ambiguous Executions remain `UNKNOWN`, and only a distinct new Session may own a new PTY.
 
-M9.7 makes two Router crash boundaries explicit. A placement claim committed before owner forwarding remains a consumed attempt even if no Session is created. A successful owner mutation whose Router response is lost remains owner-authoritative; the Router never retries it across owners. The client observes `DELIVERY_UNKNOWN` and may settle an idempotent operation such as `execution.start` only with its original identity and idempotency key. Root `session.create` has no client idempotency key, so post-forward response loss remains an open protocol gap.
+M9.7 makes two Router crash boundaries explicit. A placement claim committed before owner forwarding remains a consumed attempt even if no Session is created. A successful owner mutation whose Router response is lost remains owner-authoritative; the Router never retries it across owners. The client observes `DELIVERY_UNKNOWN` and may settle an idempotent operation such as `execution.start` only with its original identity and idempotency key.
 
-| Environment variable                | Default                         |
-| ----------------------------------- | ------------------------------- |
-| `ITERM_RUNTIME_OWNER_ID`            | derived from the Runtime socket |
-| `ITERM_RUNTIME_OWNER_INSTANCE_ID`   | random boot-unique UUID         |
-| `ITERM_RUNTIME_OWNER_LEASE_MS`      | `15000`                         |
-| `ITERM_SESSION_LEASE_MS`            | `15000`                         |
-| `ITERM_DATABASE_HEALTH_CHECK_MS`    | `1000`                          |
-| `ITERM_ACTOR_ACTION_RATE_LIMIT`     | `120`                           |
-| `ITERM_SESSION_ACTION_RATE_LIMIT`   | `240`                           |
-| `ITERM_ACTION_RATE_LIMIT_WINDOW_MS` | `1000`                          |
+M9.8 gives root `session.create` its own global idempotency key and durable placement intent. M9.9 keeps a database-partitioned Router fail closed without cached routing. M9.10 lets the production Router bind its local socket in `CONNECTING`, retry migration in the background, and expose route-phase `RUNTIME_UNAVAILABLE` until PostgreSQL is READY. A raw route-query failure returns the gate to `UNAVAILABLE`; healthy Routers and owners remain independent.
 
-The owner and Session leases must each exceed two database health-check intervals. Session expiry is capped at the current owner lease expiry. These settings are valid only with `ITERM_DATABASE_URL`.
+| Environment variable                  | Default                         |
+| ------------------------------------- | ------------------------------- |
+| `ITERM_RUNTIME_OWNER_ID`              | derived from the Runtime socket |
+| `ITERM_RUNTIME_OWNER_INSTANCE_ID`     | random boot-unique UUID         |
+| `ITERM_RUNTIME_OWNER_LEASE_MS`        | `15000`                         |
+| `ITERM_SESSION_LEASE_MS`              | `15000`                         |
+| `ITERM_DATABASE_HEALTH_CHECK_MS`      | `1000`                          |
+| `ITERM_DATABASE_RECONNECT_INITIAL_MS` | `250`                           |
+| `ITERM_DATABASE_RECONNECT_MAX_MS`     | `30000`                         |
+| `ITERM_DATABASE_STATEMENT_TIMEOUT_MS` | `30000`                         |
+| `ITERM_ACTOR_ACTION_RATE_LIMIT`       | `120`                           |
+| `ITERM_SESSION_ACTION_RATE_LIMIT`     | `240`                           |
+| `ITERM_ACTION_RATE_LIMIT_WINDOW_MS`   | `1000`                          |
+
+The owner and Session leases must each exceed two database health-check intervals. Session expiry is capped at the current owner lease expiry. The production Runtime Router uses the health/reconnect/statement-timeout values for degraded startup and recovery. These settings are valid only with `ITERM_DATABASE_URL`.
 
 ## Actor configuration
 

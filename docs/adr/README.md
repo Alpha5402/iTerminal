@@ -41,6 +41,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0035](./0035-router-in-flight-crash-boundaries.md)               | Preserve durable truth across Router in-flight crashes   | Accepted for M9.7        |
 | [0036](./0036-durable-root-session-idempotency.md)                | Bind root creation to a durable idempotency intent       | Accepted for M9.8        |
 | [0037](./0037-router-database-partition-isolation.md)             | Fail a database-partitioned Router closed                | Accepted for M9.9        |
+| [0038](./0038-router-cold-start-database-supervision.md)          | Keep Router alive through database cold-start failure    | Accepted for M9.10       |
 
 Statuses:
 

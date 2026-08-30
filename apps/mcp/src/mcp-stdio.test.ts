@@ -240,7 +240,7 @@ describe("M4 stdio MCP bridge", () => {
     expect(pythonCompleted.output).toContain("42");
 
     const sleeping = await callTool<StartedResult>(second, "execute", {
-      command: "sleep 10",
+      command: "sleep 30",
       generation: session.generation,
       idempotencyKey: "m4-sleep-start",
       sessionId: session.id,
