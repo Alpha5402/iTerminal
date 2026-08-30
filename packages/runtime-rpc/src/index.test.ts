@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createConnection } from "node:net";
 
-import type { RuntimeError } from "@iterminal/domain";
+import type { RuntimeError, SecretInputAction } from "@iterminal/domain";
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { randomBytes } from "node:crypto";
 import { describe, expect, it } from "vitest";
@@ -306,6 +306,89 @@ describe("UnixRuntimeClient delivery classification", () => {
 });
 
 describe("Runtime RPC signed grants", () => {
+  it("authenticates the Human-only secret operation before gateway dispatch", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "it-rpc-secret-auth-"));
+    const secret = randomBytes(32);
+    const human = {
+      capabilities: ACTOR_CAPABILITY_PROFILES.human,
+      client: "human-console-web",
+      id: "human_console_secret-auth",
+      principal: "local-console:secret-auth",
+      type: "human",
+    } as const;
+    let calls = 0;
+    const gateway: RuntimeGateway = {
+      ...stubGateway(),
+      beginSecretInput: (request) => {
+        calls += 1;
+        return Promise.resolve({
+          acceptedAt: "2026-08-31T00:00:00.000Z",
+          actionSequence: 1,
+          actor: request.actor,
+          id: "act_secret_auth",
+          idempotencyKey: request.idempotencyKey,
+          requestHash: "a".repeat(64),
+          sensitiveInputId: "sec_secret_auth",
+          sessionGeneration: request.sessionGeneration,
+          sessionId: request.sessionId,
+          status: "DELIVERED",
+          targetExecutionId: request.targetExecutionId,
+          type: "secret_input",
+        } satisfies SecretInputAction);
+      },
+    };
+    const server = await startRuntimeRpcServer({
+      authentication: { audience: "runtime-rpc-test", secret },
+      gateway,
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    const issuedAt = Math.floor(Date.now() / 1_000);
+    const token = signRuntimeRpcGrant(secret, {
+      actor: {
+        capabilities: ACTOR_CAPABILITY_PROFILES.human,
+        client: "human-console-web",
+        idPrefix: "human_console_",
+        kind: "paired_prefix",
+        principalPrefix: "local-console:",
+        type: "human",
+      },
+      audience: "runtime-rpc-test",
+      expiresAt: issuedAt + 60,
+      grantId: "secret-console-prefix-test",
+      issuedAt,
+      operations: ["secret.input.begin"],
+      version: 1,
+    });
+    const client = new UnixRuntimeClient(server.socketPath, { authorization: token });
+    try {
+      await expect(
+        client.beginSecretInput({
+          actor: human,
+          data: "TRANSIENT_TEST_VALUE\r",
+          idempotencyKey: "secret-auth-test",
+          sessionGeneration: 1,
+          sessionId: "session-secret-auth",
+          targetExecutionId: "execution-secret-auth",
+        }),
+      ).resolves.toMatchObject({ sensitiveInputId: "sec_secret_auth" });
+      expect(calls).toBe(1);
+      await expect(
+        client.beginSecretInput({
+          actor: { ...human, id: "human_console_mismatch", principal: "local-console:other" },
+          data: "MUST_NOT_DISPATCH\r",
+          idempotencyKey: "secret-auth-mismatch",
+          sessionGeneration: 1,
+          sessionId: "session-secret-auth",
+          targetExecutionId: "execution-secret-auth",
+        }),
+      ).rejects.toMatchObject({ code: "POLICY_DENIED" });
+      expect(calls).toBe(1);
+    } finally {
+      await server.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
   it("requires a valid unexpired grant and enforces its operation allowlist", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-auth-"));
     const secret = randomBytes(32);
@@ -536,6 +619,7 @@ function stubGateway(): RuntimeGateway {
     throw new Error("Unexpected gateway operation");
   };
   return {
+    beginSecretInput: unsupported,
     decideApproval: unsupported,
     getApproval: unsupported,
     listApprovals: unsupported,
@@ -543,6 +627,7 @@ function stubGateway(): RuntimeGateway {
     closeSession: unsupported,
     createSession: unsupported,
     forkSession: unsupported,
+    finishSensitiveInput: unsupported,
     dispatchExecution: unsupported,
     acquireInteractionGuard: unsupported,
     getExecution: unsupported,
@@ -551,6 +636,7 @@ function stubGateway(): RuntimeGateway {
     getScreenCells: unsupported,
     getScreenDiff: unsupported,
     getScreenRegion: unsupported,
+    getSensitiveInput: unsupported,
     getTerminalState: unsupported,
     getSession: unsupported,
     getSessionCheckpoint: unsupported,

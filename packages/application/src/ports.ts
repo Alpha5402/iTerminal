@@ -10,6 +10,8 @@ import type {
   InputAction,
   InteractionState,
   ResizeAction,
+  SecretInputAction,
+  SensitiveInput,
   Session,
   SessionAction,
   SessionEvent,
@@ -43,6 +45,8 @@ export interface ShellExecutor {
   }>;
   execute(command: string, callbacks: ShellExecuteCallbacks): Promise<ShellExecutionResult>;
   writeInput(data: string): void;
+  writeSecret(data: string): void;
+  finishSensitiveOutput(): void;
   sendControl(delivery: ControlDelivery): void;
   resize(columns: number, rows: number): void;
   close(): void;
@@ -378,14 +382,25 @@ export interface RuntimeDurability {
     action: InputAction | ControlAction,
     event: DurableSessionEvent,
   ): Promise<void>;
+  acceptSecretInput(
+    fence: SessionFence,
+    action: SecretInputAction,
+    sensitiveInput: SensitiveInput,
+    event: DurableSessionEvent,
+  ): Promise<void>;
   markInteractionWriteAttempted(
     fence: SessionFence,
-    action: InputAction | ControlAction,
+    action: InputAction | SecretInputAction | ControlAction,
     event: DurableSessionEvent,
   ): Promise<void>;
   finishInteraction(
     fence: SessionFence,
-    action: InputAction | ControlAction,
+    action: InputAction | SecretInputAction | ControlAction,
+    event: DurableSessionEvent,
+  ): Promise<void>;
+  finishSensitiveInput(
+    fence: SessionFence,
+    sensitiveInput: SensitiveInput,
     event: DurableSessionEvent,
   ): Promise<void>;
   acceptResize(
@@ -432,6 +447,7 @@ export interface RuntimeServiceOptions {
     readonly afterControlWrite?: (action: ControlAction) => void;
     readonly afterExecutionWrite?: (execution: Execution) => void;
     readonly afterInputWrite?: (action: InputAction) => void;
+    readonly afterSecretInputWrite?: (action: SecretInputAction) => void;
     readonly afterResizeWrite?: (action: ResizeAction) => void;
     readonly beforeExecutionFinishPersist?: (execution: Execution) => void;
   }>;

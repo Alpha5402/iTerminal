@@ -84,6 +84,18 @@ interface Approval {
   readonly version: number;
 }
 
+interface SensitiveInput {
+  readonly actor: Actor;
+  readonly id: string;
+  readonly sessionGeneration: number;
+  readonly sessionId: string;
+  readonly startedAt: string;
+  readonly status: "ACTIVE" | "COMPLETED" | "CANCELLED" | "UNKNOWN";
+  readonly targetExecutionId: string;
+  readonly version: number;
+  readonly finishedAt?: string;
+}
+
 interface ScreenSnapshot {
   readonly columns: number;
   readonly cursor: { readonly column: number; readonly row: number };
@@ -161,6 +173,8 @@ function App(): React.JSX.Element {
   const [timeline, setTimeline] = useState<readonly SessionEvent[]>([]);
   const [approvals, setApprovals] = useState<readonly Approval[]>([]);
   const [approvalReason, setApprovalReason] = useState("Reviewed in Human Console");
+  const [sensitiveInput, setSensitiveInput] = useState<SensitiveInput>();
+  const [secret, setSecret] = useState("");
   const [cursor, setCursor] = useState(0);
   const latestCursor = useRef(0);
   const [streamState, setStreamState] = useState<"offline" | "connecting" | "live" | "gap">(
@@ -194,6 +208,9 @@ function App(): React.JSX.Element {
   const selectedGeneration = sessions.find((candidate) => candidate.id === selectedId)?.generation;
   const approvalRevision = timeline.findLast((event) =>
     event.type.startsWith("approval."),
+  )?.sequence;
+  const sensitiveInputRevision = timeline.findLast((event) =>
+    event.type.startsWith("sensitive_input."),
   )?.sequence;
 
   useEffect(() => {
@@ -450,6 +467,26 @@ function App(): React.JSX.Element {
   }, [approvalRevision, session?.generation, session?.id, session?.status]);
 
   useEffect(() => {
+    if (session === undefined || session.status === "CLOSED" || session.status === "BROKEN") {
+      setSensitiveInput(undefined);
+      return;
+    }
+    let disposed = false;
+    void api<SensitiveInput | undefined>(
+      `/api/sessions/${encodeURIComponent(session.id)}/secret-input?generation=${session.generation.toString()}`,
+    )
+      .then((next) => {
+        if (!disposed) setSensitiveInput(next);
+      })
+      .catch((reason: unknown) => {
+        if (!disposed) setError(normalizeClientError(reason));
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [sensitiveInputRevision, session?.generation, session?.id, session?.status]);
+
+  useEffect(() => {
     if (session?.status !== "RUNNING") setInteractive(false);
   }, [session?.status]);
 
@@ -477,6 +514,53 @@ function App(): React.JSX.Element {
         })
         .catch((reason: unknown) => setError(normalizeClientError(reason)));
     }, INPUT_BATCH_MS);
+  };
+
+  const beginSecretInput = async (event: React.FormEvent): Promise<void> => {
+    event.preventDefault();
+    const currentSession = requiredRunningSession();
+    const transientSecret = secret;
+    setSecret("");
+    try {
+      await api(`/api/sessions/${encodeURIComponent(currentSession.id)}/secret-input`, {
+        body: {
+          data: `${transientSecret}\r`,
+          generation: currentSession.generation,
+          idempotencyKey: crypto.randomUUID(),
+          targetExecutionId: requiredExecution(currentSession),
+        },
+        method: "POST",
+      });
+      setSensitiveInput(
+        await api<SensitiveInput>(
+          `/api/sessions/${encodeURIComponent(currentSession.id)}/secret-input?generation=${currentSession.generation.toString()}`,
+        ),
+      );
+    } catch (reason) {
+      setError(normalizeClientError(reason));
+    }
+  };
+
+  const finishSecretInput = async (outcome: "completed" | "cancelled"): Promise<void> => {
+    if (session === undefined || sensitiveInput === undefined) return;
+    try {
+      setSensitiveInput(
+        await api<SensitiveInput>(
+          `/api/sessions/${encodeURIComponent(session.id)}/secret-input/${encodeURIComponent(sensitiveInput.id)}/finish`,
+          {
+            body: {
+              expectedVersion: sensitiveInput.version,
+              generation: session.generation,
+              idempotencyKey: crypto.randomUUID(),
+              outcome,
+            },
+            method: "POST",
+          },
+        ),
+      );
+    } catch (reason) {
+      setError(normalizeClientError(reason));
+    }
   };
 
   const ensureGuard = async (): Promise<void> => {
@@ -914,7 +998,23 @@ function App(): React.JSX.Element {
             {browserTerminalMirror}
           </pre>
           <div className="mode-panel">
-            {session?.status === "READY" ? (
+            {sensitiveInput?.status === "ACTIVE" ? (
+              <div className="secret-channel active" aria-live="polite">
+                <strong>Sensitive output redaction is active.</strong>
+                <span>Finish only after the foreground program can no longer echo the secret.</span>
+                <div>
+                  <button onClick={() => void sendControl("CTRL_C")} type="button">
+                    Send TTY Ctrl+C while redacted
+                  </button>
+                  <button onClick={() => void finishSecretInput("completed")} type="button">
+                    Complete and stop redaction
+                  </button>
+                  <button onClick={() => void finishSecretInput("cancelled")} type="button">
+                    Cancel and stop redaction
+                  </button>
+                </div>
+              </div>
+            ) : session?.status === "READY" ? (
               <form className="composer" onSubmit={(event) => void execute(event)}>
                 <label htmlFor="command">READY command composer</label>
                 <div>
@@ -930,22 +1030,43 @@ function App(): React.JSX.Element {
                 </div>
               </form>
             ) : session?.status === "RUNNING" ? (
-              <div className="interactive-controls">
-                <button
-                  aria-pressed={interactive}
-                  onClick={() => {
-                    setInteractive((value) => !value);
-                    terminal.current?.focus();
-                  }}
-                  type="button"
-                >
-                  {interactive ? "Leave interactive focus" : "Enter interactive focus"}
-                </button>
-                <button onClick={() => void sendControl("CTRL_C")} type="button">
-                  Send TTY Ctrl+C
-                </button>
-                <span>Raw keys become 20 ms InputAction batches.</span>
-              </div>
+              <>
+                <div className="interactive-controls">
+                  <button
+                    aria-pressed={interactive}
+                    onClick={() => {
+                      setInteractive((value) => !value);
+                      terminal.current?.focus();
+                    }}
+                    type="button"
+                  >
+                    {interactive ? "Leave interactive focus" : "Enter interactive focus"}
+                  </button>
+                  <button onClick={() => void sendControl("CTRL_C")} type="button">
+                    Send TTY Ctrl+C
+                  </button>
+                  <span>Raw keys become 20 ms InputAction batches.</span>
+                </div>
+                <form className="secret-channel" onSubmit={(event) => void beginSecretInput(event)}>
+                  <label htmlFor="secret-input">Human-only secret input</label>
+                  <div>
+                    <input
+                      autoComplete="off"
+                      id="secret-input"
+                      onChange={(event) => setSecret(event.target.value)}
+                      required
+                      spellCheck={false}
+                      type="password"
+                      value={secret}
+                    />
+                    <button type="submit">Send once and redact output</button>
+                  </div>
+                  <small>
+                    The value is transient and is not stored in Action, Event, screen, or recording
+                    data.
+                  </small>
+                </form>
+              </>
             ) : (
               <p className="mode-note">
                 {session?.status === "BROKEN"

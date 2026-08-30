@@ -7,11 +7,14 @@ import { isAbsolute, join } from "node:path";
 import type {
   AcquireInteractionGuardRequest,
   ControlRequest,
+  BeginSecretInputRequest,
   CreateSessionRequest,
   DecideApprovalRequest,
   ExecuteRequest,
   GetApprovalRequest,
   InputRequest,
+  FinishSensitiveInputRequest,
+  GetSensitiveInputRequest,
   ForkSessionRequest,
   ListApprovalsRequest,
   RequestExecuteApprovalRequest,
@@ -36,6 +39,8 @@ import type {
   InputAction,
   InteractionState,
   ResizeAction,
+  SecretInputAction,
+  SensitiveInput,
   Session,
   SessionForkResult,
   ShellCheckpointView,
@@ -98,6 +103,8 @@ const runtimeErrorCodes = new Set<RuntimeError["code"]>([
   "APPROVAL_NOT_FOUND",
   "APPROVAL_CHANGED",
   "APPROVAL_REQUIRED",
+  "SENSITIVE_INPUT_ACTIVE",
+  "SENSITIVE_INPUT_CHANGED",
   "RUNTIME_UNAVAILABLE",
   "RESYNC_REQUIRED",
   "INVALID_REQUEST",
@@ -213,6 +220,24 @@ const operationSchemas = {
     idempotencyKey: z.string().min(1).max(256),
     targetExecutionId: z.string().min(1).max(256),
   }),
+  "secret.input.begin": sessionIdentitySchema.extend({
+    actor: actorSchema,
+    data: z
+      .string()
+      .min(1)
+      .max(64 * 1024),
+    expectedScreenVersion: z.number().int().nonnegative().optional(),
+    idempotencyKey: z.string().min(1).max(256),
+    targetExecutionId: z.string().min(1).max(256),
+  }),
+  "secret.input.finish": sessionIdentitySchema.extend({
+    actor: actorSchema,
+    expectedVersion: z.number().int().positive(),
+    idempotencyKey: z.string().min(1).max(256),
+    outcome: z.enum(["completed", "cancelled"]),
+    sensitiveInputId: z.string().min(1).max(256),
+  }),
+  "secret.input.get": sessionIdentitySchema.extend({ actor: actorSchema }),
   "interaction.get": sessionIdentitySchema,
   "interaction.guard.acquire": sessionIdentitySchema.extend({
     actor: actorSchema,
@@ -330,6 +355,9 @@ export interface RuntimeGateway {
   getExecution(executionId: string): Promise<Execution>;
   waitExecution(executionId: string): Promise<Execution>;
   sendInput(request: InputRequest): Promise<InputAction>;
+  beginSecretInput(request: BeginSecretInputRequest): Promise<SecretInputAction>;
+  getSensitiveInput(request: GetSensitiveInputRequest): Promise<SensitiveInput | undefined>;
+  finishSensitiveInput(request: FinishSensitiveInputRequest): Promise<SensitiveInput>;
   sendControl(request: ControlRequest): Promise<ControlAction>;
   resizeTerminal(request: ResizeRequest): Promise<ResizeAction>;
   getInteractionState(sessionId: string, generation: number): Promise<InteractionState>;
@@ -439,6 +467,18 @@ export class LocalRuntimeGateway implements RuntimeGateway {
 
   public sendInput(request: InputRequest): Promise<InputAction> {
     return this.runtime.sendInput(request);
+  }
+
+  public beginSecretInput(request: BeginSecretInputRequest): Promise<SecretInputAction> {
+    return this.runtime.beginSecretInput(request);
+  }
+
+  public getSensitiveInput(request: GetSensitiveInputRequest): Promise<SensitiveInput | undefined> {
+    return Promise.resolve(this.runtime.getSensitiveInput(request));
+  }
+
+  public finishSensitiveInput(request: FinishSensitiveInputRequest): Promise<SensitiveInput> {
+    return this.runtime.finishSensitiveInput(request);
   }
 
   public sendControl(request: ControlRequest): Promise<ControlAction> {
@@ -746,6 +786,40 @@ export class UnixRuntimeClient implements RuntimeGateway {
       ...(request.expectedScreenVersion === undefined
         ? {}
         : { expectedScreenVersion: request.expectedScreenVersion }),
+    });
+  }
+
+  public beginSecretInput(request: BeginSecretInputRequest): Promise<SecretInputAction> {
+    return this.#request("secret.input.begin", {
+      actor: request.actor,
+      data: request.data,
+      generation: request.sessionGeneration,
+      idempotencyKey: request.idempotencyKey,
+      sessionId: request.sessionId,
+      targetExecutionId: request.targetExecutionId,
+      ...(request.expectedScreenVersion === undefined
+        ? {}
+        : { expectedScreenVersion: request.expectedScreenVersion }),
+    });
+  }
+
+  public getSensitiveInput(request: GetSensitiveInputRequest): Promise<SensitiveInput | undefined> {
+    return this.#request("secret.input.get", {
+      actor: request.actor,
+      generation: request.sessionGeneration,
+      sessionId: request.sessionId,
+    });
+  }
+
+  public finishSensitiveInput(request: FinishSensitiveInputRequest): Promise<SensitiveInput> {
+    return this.#request("secret.input.finish", {
+      actor: request.actor,
+      expectedVersion: request.expectedVersion,
+      generation: request.sessionGeneration,
+      idempotencyKey: request.idempotencyKey,
+      outcome: request.outcome,
+      sensitiveInputId: request.sensitiveInputId,
+      sessionId: request.sessionId,
     });
   }
 
@@ -1152,6 +1226,40 @@ async function dispatch(
         ...(request.expectedScreenVersion === undefined
           ? {}
           : { expectedScreenVersion: request.expectedScreenVersion }),
+      });
+    }
+    case "secret.input.begin": {
+      const request = operationSchemas[operation].parse(input);
+      return gateway.beginSecretInput({
+        actor: request.actor,
+        data: request.data,
+        idempotencyKey: request.idempotencyKey,
+        sessionGeneration: request.generation,
+        sessionId: request.sessionId,
+        targetExecutionId: request.targetExecutionId,
+        ...(request.expectedScreenVersion === undefined
+          ? {}
+          : { expectedScreenVersion: request.expectedScreenVersion }),
+      });
+    }
+    case "secret.input.get": {
+      const request = operationSchemas[operation].parse(input);
+      return gateway.getSensitiveInput({
+        actor: request.actor,
+        sessionGeneration: request.generation,
+        sessionId: request.sessionId,
+      });
+    }
+    case "secret.input.finish": {
+      const request = operationSchemas[operation].parse(input);
+      return gateway.finishSensitiveInput({
+        actor: request.actor,
+        expectedVersion: request.expectedVersion,
+        idempotencyKey: request.idempotencyKey,
+        outcome: request.outcome,
+        sensitiveInputId: request.sensitiveInputId,
+        sessionGeneration: request.generation,
+        sessionId: request.sessionId,
       });
     }
     case "control.send": {

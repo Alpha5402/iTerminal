@@ -213,6 +213,101 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     expect(durable.rows[0]?.guarded_rejected_actions).toBe("0");
   }, 60_000);
 
+  it("keeps Browser Human secret input out of Console, MCP, screen, and PostgreSQL observations", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "it-m10-sec-")));
+    fixtures.push(root);
+    const workspace = join(root, "workspace");
+    await mkdir(workspace, { recursive: true });
+    daemon = await startRuntimeDaemon({
+      databaseUrl: databaseUrl ?? "",
+      ownerId: "owner-m10-secret-browser",
+      socketPath: join(root, "runtime.sock"),
+    });
+    await daemon.waitUntilReady();
+    const runtime = new UnixRuntimeClient(daemon.socketPath);
+    consoleServer = await startHumanConsole({ gateway: runtime, port: 0, staticRoot });
+    mcp = await connectAgent(daemon.socketPath);
+    browser = await chromium.launch({
+      args: ["--disable-background-networking", "--no-first-run"],
+      executablePath: browserExecutable,
+      headless: true,
+    });
+    page = await browser.newPage({ viewport: { height: 1_100, width: 1_600 } });
+    await page.goto(consoleServer.url, { waitUntil: "networkidle" });
+
+    await page.getByLabel("Workspace root").fill(workspace);
+    await page.getByRole("button", { name: "Create persistent shell" }).click();
+    await waitForPageText(page, ".status-strip", "READY");
+    const [session] = await callTool<readonly SessionResult[]>(mcp, "session_list", {});
+    if (session === undefined) throw new Error("Browser secret Session was not created");
+    const tools = await mcp.listTools();
+    expect(tools.tools.map((tool) => tool.name).filter((name) => name.includes("secret"))).toEqual(
+      [],
+    );
+
+    await page
+      .getByLabel("READY command composer")
+      .fill(`IFS= read -r ITERM_SECRET; printf 'ECHO:%s\\n' "$ITERM_SECRET"; sleep 30`);
+    await page.getByRole("button", { name: "Execute Action" }).click();
+    await waitForPageText(page, ".status-strip", "RUNNING");
+    const secret = "BROWSER_SECRET_SENTINEL_752c";
+    await page.getByLabel("Human-only secret input").fill(secret);
+    await page.getByRole("button", { name: "Send once and redact output" }).click();
+    await waitForPageText(page, ".secret-channel.active", "Sensitive output redaction is active");
+    await waitForPageText(
+      page,
+      '[data-testid="screen-reader-output"]',
+      "sensitive terminal output redacted",
+    );
+    expect(await page.locator("body").textContent()).not.toContain(secret);
+    const screen = await callTool<ScreenResult>(mcp, "screen_get", {
+      generation: session.generation,
+      sessionId: session.id,
+    });
+    expect(screen.lines.join("\n")).not.toContain(secret);
+    const blockedInput = await mcp.callTool({
+      arguments: {
+        data: "AGENT_INTERFERENCE_MUST_NOT_WRITE\n",
+        generation: session.generation,
+        idempotencyKey: "m10-browser-agent-sensitive-blocked",
+        sessionId: session.id,
+        targetExecutionId: required((await runtime.getSession(session.id)).activeExecutionId),
+      },
+      name: "input",
+    });
+    expect(blockedInput.isError).toBe(true);
+    expect(textContent(blockedInput)).toContain('"code":"SENSITIVE_INPUT_ACTIVE"');
+
+    await page.getByRole("button", { name: "Send TTY Ctrl+C while redacted" }).click();
+    await waitForPageText(page, ".status-strip", "READY");
+    await page.getByRole("button", { name: "Complete and stop redaction" }).click();
+    await page.waitForFunction(
+      () => document.querySelector(".secret-channel.active") === null,
+      undefined,
+      { timeout: 10_000 },
+    );
+    await page.getByLabel("READY command composer").fill("printf 'VISIBLE_AFTER_SECRET\\n'");
+    await page.getByRole("button", { name: "Execute Action" }).click();
+    await waitForPageText(page, '[data-testid="screen-reader-output"]', "VISIBLE_AFTER_SECRET");
+
+    const durable = await pool.query<{
+      action_payloads: string;
+      artifact_content: string;
+      event_payloads: string;
+      event_search: string;
+      sensitive_rows: string;
+    }>(
+      `SELECT
+         coalesce((SELECT string_agg(payload::text, ' ') FROM actions WHERE session_id = $1), '') AS action_payloads,
+         coalesce((SELECT string_agg(encode(content, 'escape'), ' ') FROM artifacts WHERE session_id = $1), '') AS artifact_content,
+         coalesce((SELECT string_agg(payload::text, ' ') FROM session_events WHERE session_id = $1), '') AS event_payloads,
+         coalesce((SELECT string_agg(search_text, ' ') FROM session_events WHERE session_id = $1), '') AS event_search,
+         coalesce((SELECT string_agg(row_to_json(sensitive)::text, ' ') FROM sensitive_inputs sensitive WHERE session_id = $1), '') AS sensitive_rows`,
+      [session.id],
+    );
+    expect(JSON.stringify(durable.rows[0])).not.toContain(secret);
+  }, 60_000);
+
   it("keeps Human and Agent resize on one versioned PTY geometry and browser render", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "iterminal-m6-resize-")));
     fixtures.push(root);
@@ -579,6 +674,7 @@ interface ApprovalResult {
 interface ScreenResult {
   readonly columns: number;
   readonly geometryVersion: number;
+  readonly lines: readonly string[];
   readonly rows: number;
   readonly screenVersion: number;
 }

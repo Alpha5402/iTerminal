@@ -19,6 +19,9 @@ import type {
   InteractionGuard,
   InteractionState,
   ResizeAction,
+  SecretInputAction,
+  SensitiveInput,
+  SensitiveInputOutcome,
   Session,
   SessionAction,
   SessionEvent,
@@ -162,6 +165,29 @@ export interface InputRequest {
   readonly data: string;
   readonly expectedScreenVersion?: number;
   readonly idempotencyKey: string;
+}
+
+export interface BeginSecretInputRequest {
+  readonly actor: Actor;
+  readonly data: string;
+  readonly expectedScreenVersion?: number;
+  readonly idempotencyKey: string;
+  readonly sessionGeneration: number;
+  readonly sessionId: string;
+  readonly targetExecutionId: string;
+}
+
+export interface GetSensitiveInputRequest {
+  readonly actor: Actor;
+  readonly sessionGeneration: number;
+  readonly sessionId: string;
+}
+
+export interface FinishSensitiveInputRequest extends GetSensitiveInputRequest {
+  readonly expectedVersion: number;
+  readonly idempotencyKey: string;
+  readonly outcome: SensitiveInputOutcome;
+  readonly sensitiveInputId: string;
 }
 
 export interface ControlRequest {
@@ -329,6 +355,7 @@ export class RuntimeService {
   readonly #agentExecuteApproval: AgentExecuteApprovalPolicy;
   readonly #mutationTails = new Map<string, Promise<void>>();
   readonly #interactionStates = new Map<string, InteractionState>();
+  readonly #sensitiveInputs = new Map<string, SensitiveInput>();
   readonly #sessionLeases = new Map<string, SessionLease>();
   readonly #sessionCreations = new Map<string, SessionCreationReplay>();
   readonly #checkpoints = new Map<string, ShellCheckpoint>();
@@ -1364,6 +1391,14 @@ export class RuntimeService {
     }
 
     const session = this.#requireGeneration(request.sessionId, request.sessionGeneration);
+    const sensitiveInput = this.#sensitiveInputs.get(session.id);
+    if (sensitiveInput?.status === "ACTIVE") {
+      throw new RuntimeError(
+        "SENSITIVE_INPUT_ACTIVE",
+        "Finish the active sensitive input period before starting another ExecuteAction",
+        { sensitiveInputId: sensitiveInput.id, version: sensitiveInput.version },
+      );
+    }
     this.#requireExecutor(session.id);
     if (request.approvalId !== undefined && this.#durability !== undefined) {
       const durableApproval = await this.#durability.getApproval(
@@ -1981,6 +2016,219 @@ export class RuntimeService {
     return this.#withMutationLock(request.sessionId, () => this.#sendInputLocked(request));
   }
 
+  public beginSecretInput(request: BeginSecretInputRequest): Promise<SecretInputAction> {
+    return this.#withMutationLock(request.sessionId, () => this.#beginSecretInputLocked(request));
+  }
+
+  async #beginSecretInputLocked(request: BeginSecretInputRequest): Promise<SecretInputAction> {
+    if (request.data.length === 0 || request.data.includes("\0")) {
+      throw new RuntimeError(
+        "INVALID_REQUEST",
+        "Secret input must be non-empty and contain no NUL bytes",
+      );
+    }
+    await this.#flushDurable(request.sessionId);
+    const requestHash = hashRequest({
+      expectedScreenVersion: request.expectedScreenVersion,
+      targetExecutionId: request.targetExecutionId,
+      type: "secret_input",
+    });
+    const scope = `${request.sessionId}:${request.actor.id}`;
+    const replay = this.#idempotentReplay(scope, request.idempotencyKey, requestHash);
+    if (replay !== undefined) {
+      if (replay.type !== "secret_input") {
+        throw new RuntimeError("IDEMPOTENCY_KEY_REUSED", "Idempotency key changed action type");
+      }
+      return replay;
+    }
+    const currentSession = this.#requireGeneration(request.sessionId, request.sessionGeneration);
+    const currentSensitiveInput = this.#sensitiveInputs.get(currentSession.id);
+    if (currentSensitiveInput?.status === "ACTIVE") {
+      throw new RuntimeError(
+        "SENSITIVE_INPUT_ACTIVE",
+        "Session generation already has an active sensitive input period",
+        { sensitiveInputId: currentSensitiveInput.id, version: currentSensitiveInput.version },
+      );
+    }
+    const session = this.#requireInteractionTarget(
+      request.sessionId,
+      request.sessionGeneration,
+      request.targetExecutionId,
+      request.expectedScreenVersion,
+    );
+    await this.#assertInteractionAllowed(session, request.actor, "secret", false);
+    const acceptedAt = this.#timestamp();
+    const sensitiveInputId = `sec_${randomUUID()}`;
+    const action: SecretInputAction = {
+      acceptedAt,
+      actionSequence: this.store.nextActionSequence(session.id, session.generation),
+      actor: request.actor,
+      id: `act_${randomUUID()}`,
+      idempotencyKey: request.idempotencyKey,
+      requestHash,
+      sensitiveInputId,
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+      status: "ACCEPTED",
+      targetExecutionId: request.targetExecutionId,
+      type: "secret_input",
+      ...(request.expectedScreenVersion === undefined
+        ? {}
+        : { expectedScreenVersion: request.expectedScreenVersion }),
+    };
+    const sensitiveInput: SensitiveInput = {
+      actionId: action.id,
+      actor: cloneActor(request.actor),
+      id: sensitiveInputId,
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+      startedAt: acceptedAt,
+      status: "ACTIVE",
+      targetExecutionId: request.targetExecutionId,
+      version: 1,
+    };
+    const acceptedEvent = this.#eventDraft(
+      session,
+      "sensitive_input.started",
+      { sensitiveInputId, targetExecutionId: request.targetExecutionId, version: 1 },
+      action,
+      this.#requireExecution(request.targetExecutionId),
+    );
+    try {
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.acceptSecretInput(
+          this.#requireSessionFence(session),
+          action,
+          sensitiveInput,
+          acceptedEvent,
+        ),
+      );
+    } catch (error) {
+      this.store.rollbackActionSequence(session.id, session.generation, action.actionSequence);
+      if (isDurabilityFatal(error)) this.#tripDurability(session.id, error);
+      throw error instanceof RuntimeError ? error : durabilityError(error);
+    }
+    this.store.saveAction(action);
+    this.store.bindIdempotency(scope, request.idempotencyKey, action.id);
+    this.#sensitiveInputs.set(session.id, sensitiveInput);
+    this.store.appendEvent(session.id, session.generation, acceptedEvent);
+    await this.#recordInteractionWriteAttempt(session, action, {
+      interactionType: action.type,
+      sensitiveInputId,
+    });
+    try {
+      this.#requireExecutor(session.id).writeSecret(request.data);
+      this.#hooks.afterSecretInputWrite?.(action);
+      action.status = "DELIVERED";
+      const deliveredEvent = this.#event(
+        session,
+        "sensitive_input.delivered",
+        { sensitiveInputId },
+        { action, persist: false },
+      );
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.finishInteraction(
+          this.#requireSessionFence(session),
+          action,
+          deliveredEvent,
+        ),
+      );
+      return action;
+    } catch {
+      action.status = "UNKNOWN";
+      const unknownEvent = this.#event(
+        session,
+        "sensitive_input.delivery_unknown",
+        { sensitiveInputId },
+        { action, persist: false },
+      );
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.finishInteraction(
+          this.#requireSessionFence(session),
+          action,
+          unknownEvent,
+        ),
+      ).catch((durableFailure: unknown) => this.#tripDurability(session.id, durableFailure));
+      throw new RuntimeError(
+        "DELIVERY_UNKNOWN",
+        "Secret input delivery is uncertain; output redaction remains active",
+        { actionId: action.id, sensitiveInputId },
+        false,
+      );
+    }
+  }
+
+  public getSensitiveInput(request: GetSensitiveInputRequest): SensitiveInput | undefined {
+    const session = this.#requireGeneration(request.sessionId, request.sessionGeneration);
+    this.#requireSecretActor(request.actor);
+    const sensitiveInput = this.#sensitiveInputs.get(session.id);
+    return sensitiveInput === undefined ? undefined : cloneSensitiveInput(sensitiveInput);
+  }
+
+  public finishSensitiveInput(request: FinishSensitiveInputRequest): Promise<SensitiveInput> {
+    return this.#withMutationLock(request.sessionId, async () => {
+      await this.#flushDurable(request.sessionId);
+      const session = this.#requireGeneration(request.sessionId, request.sessionGeneration);
+      this.#requireSecretActor(request.actor);
+      const sensitiveInput = this.#sensitiveInputs.get(session.id);
+      if (sensitiveInput === undefined || sensitiveInput.id !== request.sensitiveInputId) {
+        throw new RuntimeError("SENSITIVE_INPUT_CHANGED", "Sensitive input period is not current", {
+          sensitiveInputId: request.sensitiveInputId,
+        });
+      }
+      const finishRequestHash = hashRequest({ outcome: request.outcome });
+      if (sensitiveInput.status !== "ACTIVE") {
+        if (
+          sensitiveInput.finishIdempotencyKey === request.idempotencyKey &&
+          sensitiveInput.finishRequestHash === finishRequestHash
+        ) {
+          return cloneSensitiveInput(sensitiveInput);
+        }
+        throw new RuntimeError("SENSITIVE_INPUT_CHANGED", "Sensitive input period already ended", {
+          status: sensitiveInput.status,
+          version: sensitiveInput.version,
+        });
+      }
+      if (!sameActor(sensitiveInput.actor, request.actor)) {
+        throw new RuntimeError(
+          "POLICY_DENIED",
+          "Only the Human who started the period may finish it",
+        );
+      }
+      if (request.expectedVersion !== sensitiveInput.version) {
+        throw new RuntimeError("SENSITIVE_INPUT_CHANGED", "Sensitive input version changed", {
+          currentVersion: sensitiveInput.version,
+          expectedVersion: request.expectedVersion,
+        });
+      }
+      validateIdempotencyKey(request.idempotencyKey);
+      const finishedAt = this.#timestamp();
+      const next: SensitiveInput = {
+        ...sensitiveInput,
+        finishIdempotencyKey: request.idempotencyKey,
+        finishRequestHash,
+        finishedAt,
+        status: request.outcome === "completed" ? "COMPLETED" : "CANCELLED",
+        version: sensitiveInput.version + 1,
+      };
+      const event = this.#eventDraft(
+        session,
+        request.outcome === "completed" ? "sensitive_input.completed" : "sensitive_input.cancelled",
+        { sensitiveInputId: next.id, version: next.version },
+        undefined,
+        this.#requireExecution(next.targetExecutionId),
+        request.actor,
+      );
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.finishSensitiveInput(this.#requireSessionFence(session), next, event),
+      );
+      this.#requireExecutor(session.id).finishSensitiveOutput();
+      this.#sensitiveInputs.set(session.id, next);
+      this.store.appendEvent(session.id, session.generation, event);
+      return cloneSensitiveInput(next);
+    });
+  }
+
   async #sendInputLocked(request: InputRequest): Promise<InputAction> {
     if (request.data.includes("\0")) {
       throw new RuntimeError("INVALID_REQUEST", "Input data cannot contain NUL bytes");
@@ -1999,6 +2247,12 @@ export class RuntimeService {
       }
       return replay;
     }
+    this.#assertSensitiveInteraction(
+      request.sessionId,
+      request.sessionGeneration,
+      request.actor,
+      "input",
+    );
     const session = this.#requireInteractionTarget(
       request.sessionId,
       request.sessionGeneration,
@@ -2307,6 +2561,12 @@ export class RuntimeService {
       }
       return replay;
     }
+    this.#assertSensitiveInteraction(
+      request.sessionId,
+      request.sessionGeneration,
+      request.actor,
+      "control",
+    );
     const session = this.#requireInteractionTarget(
       request.sessionId,
       request.sessionGeneration,
@@ -2404,7 +2664,7 @@ export class RuntimeService {
 
   async #recordInteractionWriteAttempt(
     session: Session,
-    action: InputAction | ControlAction,
+    action: InputAction | SecretInputAction | ControlAction,
     payload: Readonly<Record<string, unknown>>,
   ): Promise<void> {
     const event = this.#eventDraft(
@@ -2477,6 +2737,7 @@ export class RuntimeService {
       const activeExecution =
         activeExecutionState === undefined ? undefined : executionVersion(activeExecutionState);
       this.#markActiveDispatchUnknown(session, "Session closed before Execution outcome");
+      this.#markSensitiveInputUnknown(sessionId);
       this.#executors.get(sessionId)?.close();
       this.#executors.delete(sessionId);
       this.#screens.get(sessionId)?.dispose();
@@ -2733,16 +2994,18 @@ export class RuntimeService {
   async #assertInteractionAllowed(
     session: Session,
     actor: Actor,
-    interactionType: "input" | "control" | "resize",
+    interactionType: "input" | "secret" | "control" | "resize",
     bypassGuard: boolean,
   ): Promise<void> {
     const state = await this.#reconcileExpiredGuard(session);
     const capability: ActorCapability =
-      interactionType === "input"
-        ? "terminal.input"
-        : interactionType === "control"
-          ? "terminal.control"
-          : "terminal.resize";
+      interactionType === "secret"
+        ? "secret.input"
+        : interactionType === "input"
+          ? "terminal.input"
+          : interactionType === "control"
+            ? "terminal.control"
+            : "terminal.resize";
     if (!this.#actorHasCapability(actor, capability)) {
       await this.#rejectInteraction(
         session,
@@ -2752,6 +3015,16 @@ export class RuntimeService {
         `Actor lacks ${capability} capability`,
         interactionType,
         { capability },
+      );
+    }
+    if (interactionType === "secret" && actor.type !== "human") {
+      await this.#rejectInteraction(
+        session,
+        state,
+        actor,
+        "interaction.policy_denied",
+        "Secret input is Human-only",
+        interactionType,
       );
     }
     if (bypassGuard && actor.type !== "human") {
@@ -2799,6 +3072,39 @@ export class RuntimeService {
   #actorHasCapability(actor: Actor, capability: ActorCapability): boolean {
     this.#validateActor(actor);
     return actorHasCapability(actor, capability);
+  }
+
+  #requireSecretActor(actor: Actor): void {
+    this.#requireActorCapability(actor, "secret.input");
+    if (actor.type !== "human") {
+      throw new RuntimeError("POLICY_DENIED", "Secret input is Human-only", {
+        actorId: actor.id,
+        actorType: actor.type,
+      });
+    }
+  }
+
+  #assertSensitiveInteraction(
+    sessionId: string,
+    generation: number,
+    actor: Actor,
+    interactionType: "input" | "control",
+  ): void {
+    this.#requireGeneration(sessionId, generation);
+    const sensitiveInput = this.#sensitiveInputs.get(sessionId);
+    if (sensitiveInput?.status !== "ACTIVE") return;
+    if (
+      interactionType === "control" &&
+      actor.type === "human" &&
+      sameActor(sensitiveInput.actor, actor)
+    ) {
+      return;
+    }
+    throw new RuntimeError(
+      "SENSITIVE_INPUT_ACTIVE",
+      "Ordinary input is blocked during the Human sensitive input period",
+      { sensitiveInputId: sensitiveInput.id, version: sensitiveInput.version },
+    );
   }
 
   #approvalForExecute(request: ExecuteRequest, session: Session): Approval | undefined {
@@ -3360,6 +3666,7 @@ export class RuntimeService {
 
   #breakLiveSession(session: Session, reason: string): void {
     this.#markActiveDispatchUnknown(session, reason);
+    this.#markSensitiveInputUnknown(session.id);
     this.#executors.get(session.id)?.close();
     this.#executors.delete(session.id);
     this.#screens.get(session.id)?.dispose();
@@ -3367,6 +3674,14 @@ export class RuntimeService {
     if (session.status !== "CLOSED" && session.status !== "BROKEN") {
       this.store.breakSession(session.id, session.generation);
     }
+  }
+
+  #markSensitiveInputUnknown(sessionId: string): void {
+    const sensitiveInput = this.#sensitiveInputs.get(sessionId);
+    if (sensitiveInput?.status !== "ACTIVE") return;
+    sensitiveInput.status = "UNKNOWN";
+    sensitiveInput.version += 1;
+    sensitiveInput.finishedAt = this.#timestamp();
   }
 
   #requireOwnerDurability(): void {
@@ -3814,6 +4129,10 @@ function approvalRequestReplayScope(request: RequestExecuteApprovalRequest): str
 
 function cloneActor(actor: Actor): Actor {
   return { ...actor, capabilities: [...actor.capabilities] };
+}
+
+function cloneSensitiveInput(sensitiveInput: SensitiveInput): SensitiveInput {
+  return { ...sensitiveInput, actor: cloneActor(sensitiveInput.actor) };
 }
 
 function cloneApproval(approval: Approval): Approval {

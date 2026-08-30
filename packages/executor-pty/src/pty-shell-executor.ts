@@ -37,6 +37,7 @@ import { BoundedByteRing } from "./bounded-byte-ring.js";
 import { ControlFrameDecoder, type ControlEvent } from "./control-protocol.js";
 import type { ShellProcessGuardian } from "./pty-process-guardian.js";
 import { createShellLaunchProfile } from "./shell-profile.js";
+import { SensitiveOutputSanitizer } from "./sensitive-output-sanitizer.js";
 
 const START_TIMEOUT_MS = 5_000;
 const EXECUTE_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
@@ -89,6 +90,7 @@ export class PtyShellExecutor implements ShellExecutor {
   readonly #pty: IPty;
   readonly #processGuardian: ShellProcessGuardian | undefined;
   readonly #sessionOutput = new BoundedByteRing(SESSION_RING_BYTES);
+  readonly #sensitiveOutput = new SensitiveOutputSanitizer();
   readonly #onOutput: (data: string) => void;
 
   #pending: PendingExecution | undefined;
@@ -238,6 +240,24 @@ export class PtyShellExecutor implements ShellExecutor {
   public writeInput(data: string): void {
     this.#assertInteractive();
     this.#pty.write(data);
+  }
+
+  public writeSecret(data: string): void {
+    this.#assertInteractive();
+    const notice = this.#sensitiveOutput.start();
+    this.#emitObservedPty(notice);
+    if (this.#fatalError !== undefined) {
+      throw this.#fatalError;
+    }
+    this.#pty.write(data);
+  }
+
+  public finishSensitiveOutput(): void {
+    // The PTY barrier parser may retain a partial prefix across callbacks. Bytes observed while
+    // redaction is active must never become visible merely because the Human ends the period.
+    this.#sensitiveOutput.push(this.#pendingPtyText);
+    this.#pendingPtyText = "";
+    this.#sensitiveOutput.finish();
   }
 
   public sendControl(delivery: ControlDelivery): void {
@@ -391,9 +411,11 @@ export class PtyShellExecutor implements ShellExecutor {
   }
 
   #emitPty(data: string): void {
-    if (data.length === 0) {
-      return;
-    }
+    this.#emitObservedPty(this.#sensitiveOutput.push(data));
+  }
+
+  #emitObservedPty(data: string): void {
+    if (data.length === 0) return;
     this.#sessionOutput.append(data);
     this.#pending?.capture.append(data);
     try {

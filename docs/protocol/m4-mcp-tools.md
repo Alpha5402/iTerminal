@@ -102,6 +102,11 @@ M10.2 requires the bridge to present an expiring exact-Actor Runtime RPC grant. 
 | `screen_wait`        | Reactively waits for text, version, stability, or an exact Execution's terminal state |
 | `terminal_state`     | Classifies one exact-generation live frame with bounded evidence and limitations      |
 
+The MCP Agent surface intentionally exposes no secret-input begin, finish, or state tool. A
+`terminal_state` password guess is advisory and never activates redaction or authorizes secret
+delivery. Only the authenticated Human Console path can open a sensitive input period; MCP reads
+observe the same sanitized Screen/Event stream while it is active.
+
 Every successful tool result contains a JSON text block and `structuredContent: { result }`. Domain failures are tool-level errors with a JSON text envelope:
 
 ```json
@@ -120,7 +125,7 @@ Every successful tool result contains a JSON text block and `structuredContent: 
 
 `session_create` requires a caller-generated global creation idempotency key. After `DELIVERY_UNKNOWN`, repeat the exact key, shell, and workspace to retrieve the original durable Session; a changed request returns `IDEMPOTENCY_KEY_REUSED`. Concurrent Routers converge on one placement and Session for that key. The database defaults to retaining at most 100,000 requests for a minimum of 24 hours and cleaning at most 1,000 eligible rows during one new admission. Operators change the singleton `session_creation_policies` row, not individual Router environment variables. Completed active Sessions and unfinished requests whose exact owner is live are not eligible. Once terminal/stale retention expires and cleanup removes a key, using it again is explicitly a new creation request and may produce a different Session/PTTY. Development-only in-memory mode retains settled keys for the process lifetime and is not a hostile-client boundary.
 
-`execute`, `input`, `control`, and `terminal_resize` also require caller-generated idempotency keys. Their namespace is one Session + Actor across all Action kinds, so reusing a key for another kind or payload returns `IDEMPOTENCY_KEY_REUSED`. A transport disconnect after a mutating RPC returns `DELIVERY_UNKNOWN`; inspect state using the same idempotency key or Events before any deliberate retry.
+`execute`, `input`, `control`, and `terminal_resize` also require caller-generated idempotency keys. Their namespace is one Session + Actor across all Action kinds, so reusing a key for another kind or payload returns `IDEMPOTENCY_KEY_REUSED`. A transport disconnect after a mutating RPC returns `DELIVERY_UNKNOWN`; inspect state using the same idempotency key or Events before any deliberate retry. Human-only SecretInputAction uses the same metadata idempotency rule but is not an MCP tool: replay returns the original metadata and never writes secret bytes again.
 
 `approval_request` binds one future `execute` to the exact Session generation, canonical Agent identity and capabilities, command, and Action idempotency key. TTL defaults to five minutes and is bounded to 30 seconds–30 minutes. The MCP bridge can request/get/list only its own records; it never exposes `approval.decide`. A Human decides through an authenticated Runtime/Console path using the expected Approval version. After `APPROVED`, the Agent must call `execute` with the same bound fields plus `approvalId`. PostgreSQL atomically admits the Action and changes the Approval to `CONSUMED`; an exact admitted Action replay still returns the original result, but a second Action cannot reuse the Approval. `ITERM_AGENT_EXECUTE_APPROVAL=required` enforces this for every new Agent Execute; `optional` accepts unapproved Agent Execute while still validating any supplied Approval. Approval Events omit command content.
 

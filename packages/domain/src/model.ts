@@ -56,6 +56,8 @@ export type ExecuteActionStatus =
   | "UNKNOWN"
   | "CANCELLED";
 export type InteractionActionStatus = "ACCEPTED" | "DELIVERED" | "REJECTED" | "UNKNOWN";
+export type SensitiveInputStatus = "ACTIVE" | "COMPLETED" | "CANCELLED" | "UNKNOWN";
+export type SensitiveInputOutcome = "completed" | "cancelled";
 export type InputPolicyMode = "common" | "human_guarded" | "human_only" | "agent_only";
 export type AgentExecuteApprovalPolicy = "optional" | "required";
 export type ApprovalDecision = "approve" | "deny";
@@ -384,6 +386,14 @@ export interface InputAction extends ActionBase {
   status: InteractionActionStatus;
 }
 
+export interface SecretInputAction extends ActionBase {
+  readonly type: "secret_input";
+  readonly sensitiveInputId: string;
+  readonly targetExecutionId: string;
+  readonly expectedScreenVersion?: number;
+  status: InteractionActionStatus;
+}
+
 export interface ControlAction extends ActionBase {
   readonly type: "control";
   readonly targetExecutionId: string;
@@ -400,7 +410,23 @@ export interface ResizeAction extends ActionBase {
   status: InteractionActionStatus;
 }
 
-export type SessionAction = ExecuteAction | InputAction | ControlAction | ResizeAction;
+export type SessionAction =
+  ExecuteAction | InputAction | SecretInputAction | ControlAction | ResizeAction;
+
+export interface SensitiveInput {
+  readonly actor: Actor;
+  readonly actionId: string;
+  readonly id: string;
+  readonly sessionGeneration: number;
+  readonly sessionId: string;
+  readonly startedAt: string;
+  readonly targetExecutionId: string;
+  status: SensitiveInputStatus;
+  version: number;
+  finishIdempotencyKey?: string;
+  finishRequestHash?: string;
+  finishedAt?: string;
+}
 
 export interface Approval {
   readonly actionIdempotencyKey: string;

@@ -4,7 +4,7 @@
 >
 > 基线日期：2026-08-31
 >
-> 当前仓库状态：M0–M9 的既有实现与证据保持不变。M10.1 已完成 closed/canonical Actor capability 与 immutable durable identity；M10.2 已完成 signed/expiring operation + Actor scoped Runtime RPC grant。M10.3b 已实现 optional/required Agent Execute Approval：精确绑定 generation/Actor/capabilities/command/Action idempotency，PostgreSQL DB-time TTL、Human-only versioned decision，以及 Approval 消费与 Action/Execution/Outbox 接纳同事务；Runtime RPC/Router/MCP/Human Console 均已接入，真实 Chrome Human + official MCP Agent 路径与故障回滚已验证。完整跨操作 Capability/Policy/Approval 矩阵和 secret/redaction 仍未完成。真正整机/VM fencing、跨主机/跨平台 soak、autonomous model 授权、daemon restart 后 durable wait 与 repository release L4 仍未证明。
+> 当前仓库状态：M0–M9 的既有实现与证据保持不变。M10.1 已完成 closed/canonical Actor capability 与 immutable durable identity；M10.2 已完成 signed/expiring operation + Actor scoped Runtime RPC grant；M10.3b 已完成 durable Agent Execute Approval；M10.4 已完成 metadata-only Human SecretInputAction、显式敏感期、Executor-first 全量输出抑制、PostgreSQL/RPC/Router/Console 接入，以及真实 Chrome Human + official MCP 只读观察的无明文抽检。完整跨操作 Capability/Policy/Approval 矩阵、其他 hostile-input 安全项与 release/dogfood 仍未完成。真正整机/VM fencing、跨主机/跨平台 soak、autonomous model 授权、daemon restart 后 durable wait 与 repository release L4 仍未证明。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -203,10 +203,10 @@ Agent MCP ─────┘                         |
 
 ## 5. Action、Execution 与 Session 状态模型
 
-### 5.1 三类核心 Action
+### 5.1 五类核心 Action
 
 ```text
-SessionAction = ExecuteAction | InputAction | ControlAction
+SessionAction = ExecuteAction | InputAction | SecretInputAction | ControlAction | ResizeAction
 ```
 
 #### ExecuteAction
@@ -256,6 +256,16 @@ ACCEPTED -> DELIVERED
 ```
 
 `DELIVERED` 只表示 Runtime 成功调用 PTY write；不表示 foreground application 已理解、接受或完成该输入。
+
+#### SecretInputAction
+
+语义：由 Human 向当前 foreground Execution 一次性提交 transient secret，并开启显式敏感输出期。
+
+- Action 只保存 `sensitive_input_id`、`target_execution_id` 与可选 screen precondition；不保存 secret、hash、长度或 preview。
+- 仅 authenticated Human + `secret.input` 可调用；仍服从 generation、Execution、Input Policy 与 Guard。
+- 敏感期内普通 Input 全部拒绝；只有开启该敏感期的 Human 可以显式 Control，且 Control 不自动结束脱敏。
+- `completed | cancelled` 由同一 Human 按 version 显式提交；disconnect/timeout/Execution exit 不自动结束。
+- Executor 在 secret PTY write 前同步开启全量输出抑制；Action/Event/Execution output/Artifact/search/screen 只收到固定 notice 或后续安全流。
 
 #### ControlAction
 
@@ -670,7 +680,7 @@ WebSocket 只承载 live event/screen/action transport，不是真相源。重�
 - [x] command composer、Input、Control、stream wait、PTY_BUSY allowed-next-action 建议。
 - [x] Human/Agent/System Action 标签与 bounded Timeline。
 - [x] event cursor 重连、screen resync、live/event gap 提示。
-- [x] Approval pending/history、exact command/reason、approve-once/deny 状态与交互（M10.3b）；secret prompt/脱敏仍待后续 M10。
+- [x] Approval pending/history、exact command/reason、approve-once/deny 状态与交互（M10.3b）；Human-only secret prompt/显式敏感期/脱敏（M10.4）。
 - [x] Runtime-owned canonical geometry：默认 120×40、显式 ResizeAction、viewer 不自动 fit/抢占 ownership。
 - [x] 基本键盘可达、焦点边界、文本状态与非纯颜色提示。
 
@@ -689,8 +699,8 @@ MVP 假设单机受信用户；Agent 可能犯错或受提示注入影响，但 
 - [x] workspace root 与 fork cwd 使用 realpath/containment 校验（M7.1 reconstruction boundary）。
 - [x] 明确声明：workspace containment 只校验重建起点，不阻止后续 Shell command 访问 root 外路径。
 - [x] 不继承完整宿主 env；Runtime env、Shell env、checkpoint env 分开定义。
-- [ ] Secret 不进入 Action payload、Event、Snapshot、Checkpoint、MCP result、普通 log/recording。
-- [ ] Human-only secret channel 直接写 PTY，只记录完成/取消 metadata；敏感期间暂停/脱敏 screen/event recording。
+- [x] Secret 不进入 Action payload、Event、Snapshot、Checkpoint、MCP result、普通 log/recording（M10.4 sentinel 抽检覆盖 Action/Event/search/Artifact/Execution/Screen/sensitive state 与 MCP 观察；Snapshot/Checkpoint schema 不承载输入或 raw PTY output；OS swap/core/browser devtools 不在此声明）。
+- [x] Human-only secret channel 直接写 PTY，只记录 lifecycle metadata；敏感期间 Executor-first 抑制 screen/event/recording 原始输出（M10.4）。
 - [ ] Approval 绑定 immutable Action request hash + session generation + actor + expiry；任何变化使批准失效。
 - [ ] PTY/Shell 独立 process group/session；close/timeout 使用可配置 Control -> SIGTERM -> SIGKILL，并验证子进程回收。
 - [ ] 限制 Session、event bytes、artifact bytes、单次返回、WS backlog、screen geometry、Action rate。
@@ -855,7 +865,7 @@ Exit Gate：L2 协议/Runtime/持久化路径已完成；官方 SDK Client 已�
 - [x] React/xterm.js、Fastify HTTP/WS、Session 页面。
 - [x] READY command composer 与 RUNNING interactive focus 分离；READY raw input 在 transport 层拒绝。
 - [x] current execution、Action actor label、bounded Timeline、PTY_BUSY allowed-next-action UI。
-- [x] Input/Control 与 actor/policy/guard 状态 UI；M10.3b 增加 Human Approval 列表与一次性 approve/deny，secret 仍待 M10。
+- [x] Input/Control 与 actor/policy/guard 状态 UI；M10.3b 增加 Human Approval，M10.4 增加 password field、敏感期警示、Human Ctrl+C 与显式 complete/cancel。
 - [x] durable event cursor reconnect、full screen resync、live/event gap 提示与慢消费者上限。
 - [x] 默认 120×40、受控 dynamic geometry、多 viewer 独立 stream、基本键盘/焦点/非颜色可访问性。
 
@@ -1037,8 +1047,8 @@ Exit Gate：已通过 8 Worker 持续 chaos/pressure；每个 generation 最多�
 - [x] M10.3a Approval contract：ADR-0049 冻结 Agent Execute 的 optional/required policy、exact proposed-Action identity、PENDING→APPROVED/DENIED/EXPIRED→CONSUMED 状态机、Human-only decision、DB-time TTL 与 Action admission 同事务一次性消费；实现证据见 M10.3b。
 - [x] M10.3b durable Agent Execute Approval：domain/Application/PostgreSQL/Runtime RPC/Router/MCP/Human Console；真实 PostgreSQL 原子回滚/单次消费、required policy、真实 Chrome Human + official MCP Agent 路径（L3）。
 - [ ] Capability/Policy/Approval 完整矩阵。
-- [ ] secret channel、敏感期 recording redaction、审计抽检。
-- [ ] Human-only secret input 与敏感期交互；Human Console Approval 已在 M10.3b 完成。
+- [x] M10.4 secret channel、敏感期 recording redaction、Action/Event/search/Artifact/Execution/Screen/sensitive state 自动抽检（L3 local Browser Human + official MCP observation；不等于 OS memory/swap/core protection）。
+- [x] M10.4 Human-only secret input 与敏感期交互：metadata-only Action、exact Human finish、普通 Input 阻断、Human Control 保留、disconnect/Execution exit fail-closed。
 - [ ] origin/DNS rebinding/WS hijack/token/log/marker/path/resource exhaustion 测试。
 - [ ] event/artifact retention/export/cleanup 与磁盘上限。
 - [ ] 一条命令启动 PostgreSQL + Runtime + Web；MCP 配置可复制。
@@ -1163,7 +1173,7 @@ Exit Gate：已通过 8 Worker 持续 chaos/pressure；每个 generation 最多�
 - [ ] Shell Integration 不猜 prompt/静默时间；marker/control channel 有 spoof/chunk 测试。
 - [ ] PTY merged output 与 Agent bounded observation 语义一致。
 - [x] Runtime crash/owner reconciliation 后旧 generation 明确 BROKEN/UNKNOWN；历史 hydration 只有 rebuild projection，不伪恢复 PTY。
-- [ ] Secret 不出现在 Action/Event/Snapshot/Checkpoint/MCP result/普通 log 抽检中。
+- [x] Secret 不出现在 Action/Event/Snapshot/Checkpoint/MCP result/普通 log 抽检中（M10.4 sentinel 抽检覆盖当前 Runtime 持久化/观察面与 MCP；Snapshot/Checkpoint 由 schema 边界保证不承载输入或 raw PTY output；操作系统级内存取证不在范围）。
 - [ ] README 明确安全假设、非沙箱、支持 Shell/平台与未完成项。
 
 v1.0 还必须满足 M7–M10、fork 语义、故障矩阵、owner routing、multi-worker chaos、安全审阅和持续 dogfood。

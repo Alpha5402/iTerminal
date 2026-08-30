@@ -465,6 +465,12 @@ class InteractiveExecutor implements ShellExecutor {
     this.inputs.push(data);
   }
 
+  public writeSecret(data: string): void {
+    this.inputs.push(data);
+  }
+
+  public finishSensitiveOutput(): void {}
+
   public sendControl(delivery: ControlDelivery): void {
     this.controls.push(delivery);
   }

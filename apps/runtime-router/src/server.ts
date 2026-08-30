@@ -5,12 +5,15 @@ import {
   sessionCreationRequestHash,
   type AcquireInteractionGuardRequest,
   type ControlRequest,
+  type BeginSecretInputRequest,
   type CreateSessionRequest,
   type DecideApprovalRequest,
   type ExecuteRequest,
   type ForkSessionRequest,
   type GetApprovalRequest,
   type InputRequest,
+  type FinishSensitiveInputRequest,
+  type GetSensitiveInputRequest,
   type ListApprovalsRequest,
   type RequestExecuteApprovalRequest,
   type ReleaseInteractionGuardRequest,
@@ -34,6 +37,8 @@ import type {
   InputAction,
   InteractionState,
   ResizeAction,
+  SecretInputAction,
+  SensitiveInput,
   Session,
   SessionForkResult,
   ShellCheckpointView,
@@ -292,6 +297,24 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
   public sendInput(request: InputRequest): Promise<InputAction> {
     return this.#withSession(request.sessionId, "input.send", (client) =>
       client.sendInput(request),
+    );
+  }
+
+  public beginSecretInput(request: BeginSecretInputRequest): Promise<SecretInputAction> {
+    return this.#withSession(request.sessionId, "secret.input.begin", (client) =>
+      client.beginSecretInput(request),
+    );
+  }
+
+  public getSensitiveInput(request: GetSensitiveInputRequest): Promise<SensitiveInput | undefined> {
+    return this.#withSession(request.sessionId, "secret.input.get", (client) =>
+      client.getSensitiveInput(request),
+    );
+  }
+
+  public finishSensitiveInput(request: FinishSensitiveInputRequest): Promise<SensitiveInput> {
+    return this.#withSession(request.sessionId, "secret.input.finish", (client) =>
+      client.finishSensitiveInput(request),
     );
   }
 

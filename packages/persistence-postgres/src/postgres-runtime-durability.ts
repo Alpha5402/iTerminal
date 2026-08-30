@@ -25,6 +25,8 @@ import type {
   InputPolicyMode,
   InteractionState,
   ResizeAction,
+  SecretInputAction,
+  SensitiveInput,
   Session,
   SessionAction,
   SessionStatus,
@@ -629,6 +631,12 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
         activeExecution,
         "session closed while active",
       );
+      await client.query(
+        `UPDATE sensitive_inputs
+            SET status = 'UNKNOWN', version = version + 1, finished_at = now()
+          WHERE session_id = $1 AND session_generation = $2 AND status = 'ACTIVE'`,
+        [session.id, session.generation],
+      );
       await expectOne(
         client,
         `UPDATE sessions
@@ -1027,12 +1035,17 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
         input_policy: InputPolicyMode;
         next_action_sequence: string;
         screen_version: string;
+        sensitive_actor_id: string | null;
         status: SessionStatus;
       }>(
         `SELECT session.current_generation, session.status, session.active_execution_id,
                 session.next_action_sequence, session.screen_version,
                 interaction.input_policy, interaction.guard_actor_id,
-                interaction.guard_expires_at, now() AS database_now
+                interaction.guard_expires_at, now() AS database_now,
+                (SELECT sensitive.actor_id FROM sensitive_inputs sensitive
+                  WHERE sensitive.session_id = session.id
+                    AND sensitive.session_generation = session.current_generation
+                    AND sensitive.status = 'ACTIVE' LIMIT 1) AS sensitive_actor_id
            FROM sessions AS session
            JOIN interaction_guards AS interaction
              ON interaction.session_id = session.id
@@ -1112,7 +1125,7 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
 
   public async finishInteraction(
     fence: SessionFence,
-    action: InputAction | ControlAction,
+    action: InputAction | SecretInputAction | ControlAction,
     event: DurableSessionEvent,
   ): Promise<void> {
     await this.#transaction(async (client) => {
@@ -1125,6 +1138,189 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
         [action.id, action.status],
         "Interaction Action did not reach its delivery state",
       );
+      await insertEvents(client, [event]);
+    });
+  }
+
+  public async acceptSecretInput(
+    fence: SessionFence,
+    action: SecretInputAction,
+    sensitiveInput: SensitiveInput,
+    event: DurableSessionEvent,
+  ): Promise<void> {
+    await this.#transaction(async (client) => {
+      await assertSessionFence(client, fence);
+      assertFenceScope(fence, action.sessionId, action.sessionGeneration);
+      const replay = await findReplay(
+        client,
+        action.sessionId,
+        action.actor.id,
+        action.idempotencyKey,
+      );
+      if (replay !== undefined) {
+        if (replay.requestHash !== action.requestHash || replay.actionId !== action.id) {
+          throw new RuntimeError(
+            "IDEMPOTENCY_KEY_REUSED",
+            "Secret input idempotency key already exists",
+            { actionId: replay.actionId },
+          );
+        }
+        return;
+      }
+      const session = await client.query<{
+        active_execution_id: string | null;
+        current_generation: number;
+        database_now: Date;
+        guard_actor_id: string | null;
+        guard_expires_at: Date | null;
+        input_policy: InputPolicyMode;
+        next_action_sequence: string;
+        screen_version: string;
+        status: SessionStatus;
+      }>(
+        `SELECT session.current_generation, session.status, session.active_execution_id,
+                session.next_action_sequence, session.screen_version,
+                interaction.input_policy, interaction.guard_actor_id,
+                interaction.guard_expires_at, now() AS database_now
+           FROM sessions AS session
+           JOIN interaction_guards AS interaction
+             ON interaction.session_id = session.id
+            AND interaction.session_generation = session.current_generation
+          WHERE session.id = $1
+          FOR UPDATE OF session, interaction`,
+        [action.sessionId],
+      );
+      const current = session.rows[0];
+      if (current === undefined) {
+        throw new RuntimeError("SESSION_NOT_FOUND", `Session not found: ${action.sessionId}`);
+      }
+      if (current.current_generation !== action.sessionGeneration) {
+        throw new RuntimeError("SESSION_GENERATION_CHANGED", "Session generation changed", {
+          currentGeneration: current.current_generation,
+        });
+      }
+      if (
+        current.status !== "RUNNING" ||
+        current.active_execution_id !== action.targetExecutionId
+      ) {
+        throw new RuntimeError("EXECUTION_CHANGED", "Secret input target is no longer active", {
+          activeExecutionId: current.active_execution_id,
+          targetExecutionId: action.targetExecutionId,
+        });
+      }
+      if (
+        action.expectedScreenVersion !== undefined &&
+        Number.parseInt(current.screen_version, 10) !== action.expectedScreenVersion
+      ) {
+        throw new RuntimeError("SCREEN_CHANGED", "Expected screen version is stale", {
+          currentScreenVersion: Number.parseInt(current.screen_version, 10),
+          expectedScreenVersion: action.expectedScreenVersion,
+        });
+      }
+      assertDurableInteractionAllowed(action, current);
+      if (action.actor.type !== "human" || !action.actor.capabilities.includes("secret.input")) {
+        throw new RuntimeError("POLICY_DENIED", "Secret input is Human-only");
+      }
+      const active = await client.query(
+        `SELECT 1 FROM sensitive_inputs
+          WHERE session_id = $1 AND session_generation = $2 AND status = 'ACTIVE'
+          FOR UPDATE`,
+        [action.sessionId, action.sessionGeneration],
+      );
+      if (active.rowCount !== 0) {
+        throw new RuntimeError(
+          "SENSITIVE_INPUT_ACTIVE",
+          "Session generation already has an active sensitive input period",
+        );
+      }
+      const durableSequence = Number.parseInt(current.next_action_sequence, 10) + 1;
+      if (durableSequence !== action.actionSequence) {
+        throw new RuntimeError("DELIVERY_UNKNOWN", "Live and durable Action sequence diverged", {
+          durableActionSequence: durableSequence,
+          liveActionSequence: action.actionSequence,
+        });
+      }
+      await client.query(
+        `UPDATE sessions SET next_action_sequence = $2, updated_at = now() WHERE id = $1`,
+        [action.sessionId, action.actionSequence],
+      );
+      await upsertActor(client, action.actor);
+      await consumeActionRateLimit(
+        client,
+        this.#actionRateLimits,
+        action.actor.id,
+        action.sessionId,
+      );
+      await client.query(
+        `INSERT INTO actions
+          (id, session_id, session_generation, actor_id, kind, action_sequence,
+           idempotency_key, request_hash, payload, status, accepted_at)
+         VALUES ($1, $2, $3, $4, 'secret_input', $5, $6, $7, $8, 'ACCEPTED', $9)`,
+        [
+          action.id,
+          action.sessionId,
+          action.sessionGeneration,
+          action.actor.id,
+          action.actionSequence,
+          action.idempotencyKey,
+          action.requestHash,
+          JSON.stringify(actionPayload(action)),
+          action.acceptedAt,
+        ],
+      );
+      await client.query(
+        `INSERT INTO sensitive_inputs
+          (id, session_id, session_generation, action_id, actor_id, target_execution_id,
+           status, version, started_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'ACTIVE', 1, $7)`,
+        [
+          sensitiveInput.id,
+          sensitiveInput.sessionId,
+          sensitiveInput.sessionGeneration,
+          sensitiveInput.actionId,
+          sensitiveInput.actor.id,
+          sensitiveInput.targetExecutionId,
+          sensitiveInput.startedAt,
+        ],
+      );
+      await insertEvents(client, [event]);
+    });
+  }
+
+  public async finishSensitiveInput(
+    fence: SessionFence,
+    sensitiveInput: SensitiveInput,
+    event: DurableSessionEvent,
+  ): Promise<void> {
+    await this.#transaction(async (client) => {
+      await assertSessionFence(client, fence);
+      assertFenceScope(fence, sensitiveInput.sessionId, sensitiveInput.sessionGeneration);
+      const updated = await client.query(
+        `UPDATE sensitive_inputs
+            SET status = $2, version = $3, finished_at = $4,
+                finish_idempotency_key = $5, finish_request_hash = $6
+          WHERE id = $1 AND session_id = $7 AND session_generation = $8
+            AND actor_id = $9 AND status = 'ACTIVE' AND version = $10`,
+        [
+          sensitiveInput.id,
+          sensitiveInput.status,
+          sensitiveInput.version,
+          sensitiveInput.finishedAt,
+          sensitiveInput.finishIdempotencyKey,
+          sensitiveInput.finishRequestHash,
+          sensitiveInput.sessionId,
+          sensitiveInput.sessionGeneration,
+          sensitiveInput.actor.id,
+          sensitiveInput.version - 1,
+        ],
+      );
+      if (updated.rowCount !== 1) {
+        throw new RuntimeError(
+          "SENSITIVE_INPUT_CHANGED",
+          "Durable sensitive input period is no longer active",
+          { sensitiveInputId: sensitiveInput.id },
+        );
+      }
       await insertEvents(client, [event]);
     });
   }
@@ -1358,7 +1554,7 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
 
   public async markInteractionWriteAttempted(
     fence: SessionFence,
-    action: InputAction | ControlAction,
+    action: InputAction | SecretInputAction | ControlAction,
     event: DurableSessionEvent,
   ): Promise<void> {
     await this.#transaction(async (client) => {
@@ -1498,6 +1694,14 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
         `UPDATE actions a SET status = 'UNKNOWN', updated_at = now()
           FROM executions e
          WHERE e.action_id = a.id AND e.owner_id = $1 AND e.status = 'UNKNOWN'`,
+        [owner.ownerId],
+      );
+      await client.query(
+        `UPDATE sensitive_inputs sensitive
+            SET status = 'UNKNOWN', version = sensitive.version + 1, finished_at = now()
+           FROM sessions session
+          WHERE sensitive.session_id = session.id AND session.owner_id = $1
+            AND sensitive.status = 'ACTIVE'`,
         [owner.ownerId],
       );
       await client.query(
@@ -1753,14 +1957,29 @@ async function upsertActor(client: PoolClient, actor: Actor): Promise<void> {
 }
 
 function assertDurableInteractionAllowed(
-  action: InputAction | ControlAction | ResizeAction,
+  action: InputAction | SecretInputAction | ControlAction | ResizeAction,
   state: Readonly<{
     database_now: Date;
     guard_actor_id: string | null;
     guard_expires_at: Date | null;
     input_policy: InputPolicyMode;
+    sensitive_actor_id?: string | null;
   }>,
 ): void {
+  if (
+    state.sensitive_actor_id !== undefined &&
+    state.sensitive_actor_id !== null &&
+    !(
+      action.type === "control" &&
+      action.actor.type === "human" &&
+      action.actor.id === state.sensitive_actor_id
+    )
+  ) {
+    throw new RuntimeError(
+      "SENSITIVE_INPUT_ACTIVE",
+      "Ordinary input is blocked during the Human sensitive input period",
+    );
+  }
   if (action.type === "control" && action.bypassGuard && action.actor.type !== "human") {
     throw new RuntimeError("POLICY_DENIED", "Only Human Control may request Guard bypass", {
       policy: state.input_policy,
@@ -1974,7 +2193,7 @@ async function upsertCheckpoint(client: PoolClient, checkpoint: ShellCheckpoint)
 }
 
 function actionPayload(
-  action: InputAction | ControlAction | ResizeAction,
+  action: InputAction | SecretInputAction | ControlAction | ResizeAction,
 ): Readonly<Record<string, unknown>> {
   if (action.type === "input") {
     return {
@@ -1990,6 +2209,15 @@ function actionPayload(
       bypassGuard: action.bypassGuard,
       delivery: action.delivery,
       targetExecutionId: action.targetExecutionId,
+    };
+  }
+  if (action.type === "secret_input") {
+    return {
+      sensitiveInputId: action.sensitiveInputId,
+      targetExecutionId: action.targetExecutionId,
+      ...(action.expectedScreenVersion === undefined
+        ? {}
+        : { expectedScreenVersion: action.expectedScreenVersion }),
     };
   }
   return {

@@ -185,6 +185,36 @@ textarea:focus-visible,
   gap: 0.5rem;
 }
 
+.secret-channel {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 0.75rem;
+  padding: 0.7rem;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: #0b1220;
+}
+
+.secret-channel.active {
+  border-color: #f59e0b;
+  color: #fef3c7;
+}
+
+.secret-channel > div {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.secret-channel input {
+  flex: 1;
+  min-width: 12rem;
+}
+
+.secret-channel small,
+.secret-channel span {
+  color: #94a3b8;
+}
+
 .section-title {
   justify-content: space-between;
   gap: 0.6rem;

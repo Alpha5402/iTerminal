@@ -230,6 +230,88 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
     expect(JSON.stringify(events.events)).not.toContain("READY_BYPASS");
   }, 30_000);
 
+  it("keeps Console secret bytes transient and requires an explicit Human finish", async () => {
+    const fixture = await createFixture(fixtures);
+    daemon = await startRuntimeDaemon({ socketPath: join(fixture.root, "runtime.sock") });
+    const runtime = new UnixRuntimeClient(daemon.socketPath);
+    consoleServer = await startHumanConsole({ gateway: runtime, port: 0 });
+    const bootstrapResponse = await fetch(`${consoleServer.url}/api/bootstrap`);
+    const cookie = required(bootstrapResponse.headers.get("set-cookie")).split(";", 1)[0] ?? "";
+    const bootstrap = await bodyResult<{ readonly actor: Actor }>(bootstrapResponse);
+    const session = await requestResult<SessionResult>(consoleServer, cookie, "/api/sessions", {
+      body: {
+        idempotencyKey: "console-secret-session-create",
+        shell: "zsh",
+        workspaceRoot: fixture.workspace,
+      },
+      method: "POST",
+    });
+    const started = await requestResult<StartedResult>(
+      consoleServer,
+      cookie,
+      `/api/sessions/${session.id}/execute`,
+      {
+        body: {
+          command: `IFS= read -r ITERM_SECRET; printf 'ECHO:%s\\n' "$ITERM_SECRET"`,
+          generation: session.generation,
+          idempotencyKey: "console-secret-reader",
+        },
+        method: "POST",
+      },
+    );
+    await waitUntilRunning(runtime, started.execution.id);
+    const secret = "CONSOLE_SECRET_SENTINEL_10da";
+    const action = await requestResult<{ readonly sensitiveInputId: string }>(
+      consoleServer,
+      cookie,
+      `/api/sessions/${session.id}/secret-input`,
+      {
+        body: {
+          data: `${secret}\r`,
+          generation: session.generation,
+          idempotencyKey: "console-secret-submit",
+          targetExecutionId: started.execution.id,
+        },
+        method: "POST",
+      },
+    );
+    const completed = await runtime.waitExecution(started.execution.id);
+    expect(completed.output).not.toContain(secret);
+    const active = await requestResult<{
+      readonly actor: Actor;
+      readonly id: string;
+      readonly status: string;
+      readonly version: number;
+    }>(
+      consoleServer,
+      cookie,
+      `/api/sessions/${session.id}/secret-input?generation=${session.generation.toString()}`,
+    );
+    expect(active).toMatchObject({
+      actor: bootstrap.actor,
+      id: action.sensitiveInputId,
+      status: "ACTIVE",
+      version: 1,
+    });
+    const finished = await requestResult<{ readonly status: string; readonly version: number }>(
+      consoleServer,
+      cookie,
+      `/api/sessions/${session.id}/secret-input/${action.sensitiveInputId}/finish`,
+      {
+        body: {
+          expectedVersion: active.version,
+          generation: session.generation,
+          idempotencyKey: "console-secret-finish",
+          outcome: "completed",
+        },
+        method: "POST",
+      },
+    );
+    expect(finished).toMatchObject({ status: "COMPLETED", version: 2 });
+    const events = await runtime.queryEvents(session.id, session.generation, 0, 500);
+    expect(JSON.stringify(events.events)).not.toContain(secret);
+  }, 30_000);
+
   it("exposes checkpoint inspection and attributes an explicit fork to the Human Actor", async () => {
     const fixture = await createFixture(fixtures);
     daemon = await startRuntimeDaemon({ socketPath: join(fixture.root, "runtime.sock") });

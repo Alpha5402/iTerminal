@@ -64,6 +64,51 @@ export const inputRequestSchema = {
   type: "object",
 } as const;
 
+export const beginSecretInputRequestSchema = {
+  additionalProperties: false,
+  properties: {
+    actor: executeRequestSchema.properties.actor,
+    data: { maxLength: 64 * 1024, minLength: 1, type: "string" },
+    expectedScreenVersion: { minimum: 0, type: "integer" },
+    idempotencyKey: { minLength: 1, type: "string" },
+    sessionGeneration: { minimum: 1, type: "integer" },
+    sessionId: { minLength: 1, type: "string" },
+    targetExecutionId: { minLength: 1, type: "string" },
+  },
+  required: [
+    "sessionId",
+    "sessionGeneration",
+    "actor",
+    "targetExecutionId",
+    "data",
+    "idempotencyKey",
+  ],
+  type: "object",
+} as const;
+
+export const finishSensitiveInputRequestSchema = {
+  additionalProperties: false,
+  properties: {
+    actor: executeRequestSchema.properties.actor,
+    expectedVersion: { minimum: 1, type: "integer" },
+    idempotencyKey: { minLength: 1, type: "string" },
+    outcome: { enum: ["completed", "cancelled"] },
+    sensitiveInputId: { minLength: 1, type: "string" },
+    sessionGeneration: { minimum: 1, type: "integer" },
+    sessionId: { minLength: 1, type: "string" },
+  },
+  required: [
+    "sessionId",
+    "sessionGeneration",
+    "actor",
+    "sensitiveInputId",
+    "expectedVersion",
+    "outcome",
+    "idempotencyKey",
+  ],
+  type: "object",
+} as const;
+
 export const controlRequestSchema = {
   additionalProperties: false,
   properties: {

@@ -30,4 +30,4 @@ If the Runtime dies after step 2, stable-owner recovery marks the live generatio
 - A process loss after the write attempt is intentionally non-retryable and requires human reconciliation or a new generation.
 - Ordinary in-process adapter errors still attempt to persist an explicit `interaction.*_unknown` outcome.
 - Clients must treat `UNKNOWN` as a terminal uncertainty state, not as permission to reuse the same intent automatically.
-- Secret-channel redaction, approval policy, hostile timing fuzzing, and rebuild UX remain M10 work.
+- Secret-channel redaction is specified by ADR-0050; broader Approval policy, hostile timing fuzzing, and rebuild UX remain M10 work.

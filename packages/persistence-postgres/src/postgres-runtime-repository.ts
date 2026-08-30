@@ -698,6 +698,14 @@ export class PostgresRuntimeRepository {
           WHERE e.action_id = a.id AND e.owner_id = $1 AND e.status = 'UNKNOWN'`,
         [ownerId],
       );
+      await client.query(
+        `UPDATE sensitive_inputs sensitive
+            SET status = 'UNKNOWN', version = sensitive.version + 1, finished_at = now()
+           FROM sessions session
+          WHERE sensitive.session_id = session.id AND session.owner_id = $1
+            AND sensitive.status = 'ACTIVE'`,
+        [ownerId],
+      );
       const sessions = await client.query<{ id: string; current_generation: number }>(
         `UPDATE sessions
             SET status = 'BROKEN', active_execution_id = NULL, updated_at = now()

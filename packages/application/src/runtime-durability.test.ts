@@ -280,6 +280,12 @@ class RecordingExecutor implements ShellExecutor {
     this.inputs.push(data);
   }
 
+  public writeSecret(data: string): void {
+    this.inputs.push(data);
+  }
+
+  public finishSensitiveOutput(): void {}
+
   public sendControl(): void {}
 
   public resize(): void {}
@@ -400,7 +406,15 @@ class ControlledDurability implements RuntimeDurability {
     return this.failInteraction ? Promise.reject(unavailable()) : Promise.resolve();
   }
 
+  public acceptSecretInput(): Promise<void> {
+    return this.failInteraction ? Promise.reject(unavailable()) : Promise.resolve();
+  }
+
   public finishInteraction(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  public finishSensitiveInput(): Promise<void> {
     return Promise.resolve();
   }
 

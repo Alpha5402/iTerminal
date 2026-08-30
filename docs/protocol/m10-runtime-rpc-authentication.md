@@ -64,9 +64,15 @@ pnpm --silent rpc:grant -- \
   --scope paired-prefix \
   --id-prefix human_console_ \
   --principal-prefix local-console: \
-  --operations approval.decide,approval.get,approval.list,control.send,events.query,execution.get,execution.start,execution.wait,input.send,interaction.get,interaction.guard.acquire,interaction.guard.release,interaction.guard.renew,interaction.policy.set,screen.cells,screen.diff,screen.get,screen.region,screen.search,screen.wait,session.checkpoint.get,session.close,session.create,session.fork,session.get,session.list,terminal.resize,terminal.state.get \
+  --operations approval.decide,approval.get,approval.list,control.send,events.query,execution.get,execution.start,execution.wait,input.send,interaction.get,interaction.guard.acquire,interaction.guard.release,interaction.guard.renew,interaction.policy.set,screen.cells,screen.diff,screen.get,screen.region,screen.search,screen.wait,secret.input.begin,secret.input.finish,secret.input.get,session.checkpoint.get,session.close,session.create,session.fork,session.get,session.list,terminal.resize,terminal.state.get \
   > .iterminal/credentials/console.grant
 ```
+
+The three `secret.input.*` operations are intentionally absent from the MCP Agent example. They
+require a Human Actor whose canonical capability set contains `secret.input`; the owner repeats the
+paired-prefix identity check before Application admission. A grant never makes the secret durable:
+the begin request body remains transient and must not be logged, while the Action, Events, and
+sensitive state contain lifecycle metadata only.
 
 The Execution Worker requires only dispatch authority. Its exact service Actor scope is an authenticated service identity; `execution.dispatch` has no request-body Actor to persist:
 

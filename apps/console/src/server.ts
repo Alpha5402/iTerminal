@@ -72,6 +72,23 @@ const inputSchema = identitySchema.extend({
   idempotencyKey: z.string().min(1).max(256),
   targetExecutionId: z.string().min(1).max(256),
 });
+const secretInputSchema = identitySchema.extend({
+  data: z
+    .string()
+    .min(1)
+    .max(64 * 1_024),
+  expectedScreenVersion: z.number().int().nonnegative().optional(),
+  idempotencyKey: z.string().min(1).max(256),
+  targetExecutionId: z.string().min(1).max(256),
+});
+const finishSecretInputSchema = identitySchema.extend({
+  expectedVersion: z.number().int().positive(),
+  idempotencyKey: z.string().min(1).max(256),
+  outcome: z.enum(["completed", "cancelled"]),
+});
+const sensitiveInputParamsSchema = sessionParamsSchema.extend({
+  sensitiveInputId: z.string().min(1).max(256),
+});
 const controlSchema = identitySchema.extend({
   bypassGuard: z.boolean().default(false),
   delivery: z.discriminatedUnion("mode", [
@@ -345,6 +362,64 @@ export async function createHumanConsoleApp(
       ),
     );
   });
+
+  app.get("/api/sessions/:sessionId/secret-input", async (request, reply) => {
+    const actor = actorForRequest(request, reply, actors, now);
+    const { sessionId } = sessionParamsSchema.parse(request.params);
+    const { generation } = eventQuerySchema.pick({ generation: true }).parse(request.query);
+    return success(
+      request,
+      await options.gateway.getSensitiveInput({
+        actor,
+        sessionGeneration: generation,
+        sessionId,
+      }),
+    );
+  });
+
+  app.post("/api/sessions/:sessionId/secret-input", async (request, reply) => {
+    const actor = actorForRequest(request, reply, actors, now);
+    const { sessionId } = sessionParamsSchema.parse(request.params);
+    const body = secretInputSchema.parse(request.body);
+    await requireRunningTarget(options.gateway, sessionId, body.generation, body.targetExecutionId);
+    return reply.status(202).send(
+      success(
+        request,
+        await options.gateway.beginSecretInput({
+          actor,
+          data: body.data,
+          idempotencyKey: body.idempotencyKey,
+          sessionGeneration: body.generation,
+          sessionId,
+          targetExecutionId: body.targetExecutionId,
+          ...(body.expectedScreenVersion === undefined
+            ? {}
+            : { expectedScreenVersion: body.expectedScreenVersion }),
+        }),
+      ),
+    );
+  });
+
+  app.post(
+    "/api/sessions/:sessionId/secret-input/:sensitiveInputId/finish",
+    async (request, reply) => {
+      const actor = actorForRequest(request, reply, actors, now);
+      const { sensitiveInputId, sessionId } = sensitiveInputParamsSchema.parse(request.params);
+      const body = finishSecretInputSchema.parse(request.body);
+      return success(
+        request,
+        await options.gateway.finishSensitiveInput({
+          actor,
+          expectedVersion: body.expectedVersion,
+          idempotencyKey: body.idempotencyKey,
+          outcome: body.outcome,
+          sensitiveInputId,
+          sessionGeneration: body.generation,
+          sessionId,
+        }),
+      );
+    },
+  );
 
   app.post("/api/sessions/:sessionId/control", async (request, reply) => {
     const actor = actorForRequest(request, reply, actors, now);
@@ -1021,6 +1096,10 @@ function allowedNextActions(code: string): readonly string[] {
       return ["request_approval", "wait_for_human_decision", "retry_exact_approved_action"];
     case "APPROVAL_CHANGED":
       return ["refresh_approval", "decide_current_version"];
+    case "SENSITIVE_INPUT_ACTIVE":
+      return ["review_sensitive_input", "human_control_or_finish_sensitive_period"];
+    case "SENSITIVE_INPUT_CHANGED":
+      return ["refresh_sensitive_input"];
     case "BACKPRESSURE":
       return ["wait_and_retry_same_idempotency_key"];
     case "RATE_LIMITED":
