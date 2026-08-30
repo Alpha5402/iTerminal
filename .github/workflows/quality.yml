@@ -79,3 +79,6 @@ jobs:
       - run: pnpm test:m8:postgres-outage
         env:
           ITERM_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+      - run: pnpm test:m8:postgres-loops
+        env:
+          ITERM_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}

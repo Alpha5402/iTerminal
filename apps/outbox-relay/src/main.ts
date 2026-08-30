@@ -1,46 +1,69 @@
-import { randomUUID } from "node:crypto";
+import type { PostgresConnectionState } from "@iterminal/persistence-postgres";
+import type { RabbitMqConnectionState } from "@iterminal/queue-rabbitmq";
 
-import { OutboxRelay } from "@iterminal/messaging";
-import { PostgresMessagingRepository } from "@iterminal/persistence-postgres";
-import {
-  runtimeQueueTopology,
-  SupervisedRabbitMqPublisher,
-  type RabbitMqConnectionState,
-} from "@iterminal/queue-rabbitmq";
+import { startOutboxRelay } from "./server.js";
 
 const databaseUrl = requiredEnvironment("ITERM_DATABASE_URL");
 const rabbitMqUrl = requiredEnvironment("ITERM_RABBITMQ_URL");
-const publisherId = process.env.ITERM_PUBLISHER_ID ?? `publisher_${randomUUID()}`;
-const topology = runtimeQueueTopology(process.env.ITERM_QUEUE_PREFIX ?? "iterminal");
-const repository = new PostgresMessagingRepository(databaseUrl);
-await repository.migrate();
-const publisher = new SupervisedRabbitMqPublisher(rabbitMqUrl, topology, {
+const relay = await startOutboxRelay({
+  databaseUrl,
+  rabbitMqUrl,
+  ...(process.env.ITERM_PUBLISHER_ID === undefined
+    ? {}
+    : { publisherId: process.env.ITERM_PUBLISHER_ID }),
+  ...(process.env.ITERM_QUEUE_PREFIX === undefined
+    ? {}
+    : { queuePrefix: process.env.ITERM_QUEUE_PREFIX }),
   ...(process.env.ITERM_RABBITMQ_RECONNECT_INITIAL_MS === undefined
     ? {}
     : {
-        initialDelayMilliseconds: positiveInteger("ITERM_RABBITMQ_RECONNECT_INITIAL_MS"),
+        rabbitMqReconnectInitialMilliseconds: positiveInteger(
+          "ITERM_RABBITMQ_RECONNECT_INITIAL_MS",
+        ),
       }),
   ...(process.env.ITERM_RABBITMQ_RECONNECT_MAX_MS === undefined
     ? {}
-    : { maxDelayMilliseconds: positiveInteger("ITERM_RABBITMQ_RECONNECT_MAX_MS") }),
-  onConnectionState: reportRabbitMqState,
+    : {
+        rabbitMqReconnectMaxMilliseconds: positiveInteger("ITERM_RABBITMQ_RECONNECT_MAX_MS"),
+      }),
+  ...(process.env.ITERM_DATABASE_HEALTH_CHECK_MS === undefined
+    ? {}
+    : { databaseHealthCheckMilliseconds: positiveInteger("ITERM_DATABASE_HEALTH_CHECK_MS") }),
+  ...(process.env.ITERM_DATABASE_RECONNECT_INITIAL_MS === undefined
+    ? {}
+    : {
+        databaseReconnectInitialMilliseconds: positiveInteger(
+          "ITERM_DATABASE_RECONNECT_INITIAL_MS",
+        ),
+      }),
+  ...(process.env.ITERM_DATABASE_RECONNECT_MAX_MS === undefined
+    ? {}
+    : {
+        databaseReconnectMaxMilliseconds: positiveInteger("ITERM_DATABASE_RECONNECT_MAX_MS"),
+      }),
+  onPostgresConnectionState: reportPostgresState,
+  onRabbitMqConnectionState: reportRabbitMqState,
 });
-const relay = new OutboxRelay(publisherId, repository, publisher);
-const abortController = new AbortController();
 
-const stop = (): void => abortController.abort();
-process.once("SIGINT", stop);
-process.once("SIGTERM", stop);
-process.stderr.write(`iTerminal Outbox relay started as ${publisherId}\n`);
+let signalExitCode: number | undefined;
+const stop = (exitCode: number): void => {
+  signalExitCode ??= exitCode;
+  void relay.close().catch(() => undefined);
+};
+const stopForInterrupt = (): void => stop(130);
+const stopForTermination = (): void => stop(0);
+process.once("SIGINT", stopForInterrupt);
+process.once("SIGTERM", stopForTermination);
+process.stderr.write("iTerminal Outbox relay started\n");
 
 try {
-  await relay.run(abortController.signal);
+  await relay.waitUntilClosed();
 } finally {
-  process.off("SIGINT", stop);
-  process.off("SIGTERM", stop);
-  await publisher.close();
-  await repository.close();
+  process.off("SIGINT", stopForInterrupt);
+  process.off("SIGTERM", stopForTermination);
+  await relay.close();
 }
+if (signalExitCode !== undefined) process.exitCode = signalExitCode;
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -59,6 +82,16 @@ function positiveInteger(name: string): number {
 function reportRabbitMqState(state: RabbitMqConnectionState): void {
   process.stderr.write(
     `iTerminal Outbox relay RabbitMQ ${state.state.toLowerCase()} attempt=${state.attempt.toString()}${
+      state.retryInMilliseconds === undefined
+        ? ""
+        : ` retry_ms=${state.retryInMilliseconds.toString()}`
+    }${state.error === undefined ? "" : ` error=${JSON.stringify(state.error)}`}\n`,
+  );
+}
+
+function reportPostgresState(state: PostgresConnectionState): void {
+  process.stderr.write(
+    `iTerminal Outbox relay PostgreSQL ${state.state.toLowerCase()} attempt=${state.attempt.toString()}${
       state.retryInMilliseconds === undefined
         ? ""
         : ` retry_ms=${state.retryInMilliseconds.toString()}`

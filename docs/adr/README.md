@@ -19,6 +19,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0013](./0013-admission-outbox-backpressure.md)         | Bound admission during durable delivery backlog          | Accepted for M8.4        |
 | [0014](./0014-rabbitmq-reconnect-supervision.md)        | Supervise AMQP reconnect without hiding ambiguity        | Accepted for M8.5        |
 | [0015](./0015-postgres-owner-circuit-reconciliation.md) | Trip owner and reconcile before PostgreSQL recovery      | Accepted for M8.6        |
+| [0016](./0016-messaging-loop-postgres-supervision.md)   | Pause messaging loops and resume from durable leases     | Accepted for M8.7        |
 
 Statuses:
 

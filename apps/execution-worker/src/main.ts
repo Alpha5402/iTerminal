@@ -1,4 +1,5 @@
 import type { RabbitMqConnectionState } from "@iterminal/queue-rabbitmq";
+import type { PostgresConnectionState } from "@iterminal/persistence-postgres";
 
 import { startExecutionWorker } from "./server.js";
 
@@ -30,18 +31,49 @@ const worker = await startExecutionWorker({
     : {
         rabbitMqReconnectMaxMilliseconds: positiveInteger("ITERM_RABBITMQ_RECONNECT_MAX_MS"),
       }),
+  ...(process.env.ITERM_DATABASE_HEALTH_CHECK_MS === undefined
+    ? {}
+    : { databaseHealthCheckMilliseconds: positiveInteger("ITERM_DATABASE_HEALTH_CHECK_MS") }),
+  ...(process.env.ITERM_DATABASE_RECONNECT_INITIAL_MS === undefined
+    ? {}
+    : {
+        databaseReconnectInitialMilliseconds: positiveInteger(
+          "ITERM_DATABASE_RECONNECT_INITIAL_MS",
+        ),
+      }),
+  ...(process.env.ITERM_DATABASE_RECONNECT_MAX_MS === undefined
+    ? {}
+    : {
+        databaseReconnectMaxMilliseconds: positiveInteger("ITERM_DATABASE_RECONNECT_MAX_MS"),
+      }),
+  onPostgresConnectionState: reportPostgresState,
   onRabbitMqConnectionState: reportRabbitMqState,
 });
 
 let closing = false;
+let signalExitCode: number | undefined;
 const shutdown = async (): Promise<void> => {
   if (closing) return;
   closing = true;
   await worker.close();
 };
-process.once("SIGINT", () => void shutdown().then(() => process.exit(130)));
-process.once("SIGTERM", () => void shutdown().then(() => process.exit(0)));
+const stop = (exitCode: number): void => {
+  signalExitCode ??= exitCode;
+  void shutdown().catch(() => undefined);
+};
+const stopForInterrupt = (): void => stop(130);
+const stopForTermination = (): void => stop(0);
+process.once("SIGINT", stopForInterrupt);
+process.once("SIGTERM", stopForTermination);
 process.stderr.write("iTerminal Execution worker started\n");
+try {
+  await worker.waitUntilClosed();
+} finally {
+  process.off("SIGINT", stopForInterrupt);
+  process.off("SIGTERM", stopForTermination);
+  await worker.close();
+}
+if (signalExitCode !== undefined) process.exitCode = signalExitCode;
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -60,6 +92,16 @@ function positiveInteger(name: string): number {
 function reportRabbitMqState(state: RabbitMqConnectionState): void {
   process.stderr.write(
     `iTerminal Execution worker RabbitMQ ${state.state.toLowerCase()} attempt=${state.attempt.toString()}${
+      state.retryInMilliseconds === undefined
+        ? ""
+        : ` retry_ms=${state.retryInMilliseconds.toString()}`
+    }${state.error === undefined ? "" : ` error=${JSON.stringify(state.error)}`}\n`,
+  );
+}
+
+function reportPostgresState(state: PostgresConnectionState): void {
+  process.stderr.write(
+    `iTerminal Execution worker PostgreSQL ${state.state.toLowerCase()} attempt=${state.attempt.toString()}${
       state.retryInMilliseconds === undefined
         ? ""
         : ` retry_ms=${state.retryInMilliseconds.toString()}`

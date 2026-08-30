@@ -36,6 +36,10 @@ export class PostgresMessagingRepository
     await migrateDatabase(this.#pool);
   }
 
+  public async healthCheck(): Promise<void> {
+    await this.#pool.query("SELECT 1");
+  }
+
   public async close(): Promise<void> {
     await this.#pool.end();
   }

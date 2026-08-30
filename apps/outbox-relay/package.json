@@ -3,6 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "exports": "./src/server.ts",
   "dependencies": {
     "@iterminal/messaging": "workspace:*",
     "@iterminal/persistence-postgres": "workspace:*",
