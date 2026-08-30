@@ -7,6 +7,7 @@ import {
   runtimeQueueTopology,
   SupervisedRabbitMqExecutionReadyConsumer,
   type RabbitMqConnectionState,
+  type RabbitMqEndpoints,
 } from "@iterminal/queue-rabbitmq";
 import { runtimeOwnerIdForSocket, UnixRuntimeClient } from "@iterminal/runtime-rpc";
 
@@ -34,7 +35,7 @@ export interface ExecutionWorkerOptions {
   readonly ownerId?: string;
   readonly prefetch?: number;
   readonly queuePrefix?: string;
-  readonly rabbitMqUrl: string;
+  readonly rabbitMqUrl: RabbitMqEndpoints;
   readonly rabbitMqHeartbeatSeconds?: number;
   readonly rabbitMqReconnectInitialMilliseconds?: number;
   readonly rabbitMqReconnectJitterRatio?: number;

@@ -5,7 +5,7 @@ import { startExecutionWorker } from "./server.js";
 
 const worker = await startExecutionWorker({
   databaseUrl: requiredEnvironment("ITERM_DATABASE_URL"),
-  rabbitMqUrl: requiredEnvironment("ITERM_RABBITMQ_URL"),
+  rabbitMqUrl: rabbitMqEndpoints(),
   runtimeSocketPath: requiredEnvironment("ITERM_RUNTIME_SOCKET"),
   ...(process.env.ITERM_CONSUMER_ID === undefined
     ? {}
@@ -106,9 +106,21 @@ function positiveInteger(name: string): number {
   return value;
 }
 
+function rabbitMqEndpoints(): readonly string[] {
+  const configured = process.env.ITERM_RABBITMQ_URLS;
+  if (configured === undefined) return [requiredEnvironment("ITERM_RABBITMQ_URL")];
+  const endpoints = configured.split(",").map((value) => value.trim());
+  if (endpoints.length === 0 || endpoints.some((value) => value.length === 0)) {
+    throw new Error("ITERM_RABBITMQ_URLS must be a comma-separated list of non-empty URLs");
+  }
+  return endpoints;
+}
+
 function reportRabbitMqState(state: RabbitMqConnectionState): void {
   process.stderr.write(
     `iTerminal Execution worker RabbitMQ ${state.state.toLowerCase()} attempt=${state.attempt.toString()}${
+      state.endpointIndex === undefined ? "" : ` endpoint_index=${state.endpointIndex.toString()}`
+    }${
       state.retryInMilliseconds === undefined
         ? ""
         : ` retry_ms=${state.retryInMilliseconds.toString()}`

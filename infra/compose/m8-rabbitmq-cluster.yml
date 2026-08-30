@@ -1,0 +1,43 @@
+name: iterminal-m8-cluster
+
+x-rabbitmq-common: &rabbitmq-common
+  image: rabbitmq:4.3-alpine
+  environment:
+    RABBITMQ_DEFAULT_PASS: guest
+    RABBITMQ_DEFAULT_USER: guest
+    RABBITMQ_ERLANG_COOKIE: iterminal-m8-quorum-test-cookie
+  healthcheck:
+    test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+    interval: 3s
+    timeout: 5s
+    retries: 40
+
+services:
+  rabbitmq1:
+    <<: *rabbitmq-common
+    hostname: rabbitmq1
+    ports:
+      - "127.0.0.1:5674:5672"
+    volumes:
+      - rabbitmq1-data:/var/lib/rabbitmq
+
+  rabbitmq2:
+    <<: *rabbitmq-common
+    hostname: rabbitmq2
+    ports:
+      - "127.0.0.1:5675:5672"
+    volumes:
+      - rabbitmq2-data:/var/lib/rabbitmq
+
+  rabbitmq3:
+    <<: *rabbitmq-common
+    hostname: rabbitmq3
+    ports:
+      - "127.0.0.1:5676:5672"
+    volumes:
+      - rabbitmq3-data:/var/lib/rabbitmq
+
+volumes:
+  rabbitmq1-data:
+  rabbitmq2-data:
+  rabbitmq3-data:

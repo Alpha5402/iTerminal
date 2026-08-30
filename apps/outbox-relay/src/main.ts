@@ -4,7 +4,7 @@ import type { RabbitMqConnectionState } from "@iterminal/queue-rabbitmq";
 import { startOutboxRelay } from "./server.js";
 
 const databaseUrl = requiredEnvironment("ITERM_DATABASE_URL");
-const rabbitMqUrl = requiredEnvironment("ITERM_RABBITMQ_URL");
+const rabbitMqUrl = rabbitMqEndpoints();
 const relay = await startOutboxRelay({
   databaseUrl,
   rabbitMqUrl,
@@ -96,9 +96,21 @@ function positiveInteger(name: string): number {
   return value;
 }
 
+function rabbitMqEndpoints(): readonly string[] {
+  const configured = process.env.ITERM_RABBITMQ_URLS;
+  if (configured === undefined) return [requiredEnvironment("ITERM_RABBITMQ_URL")];
+  const endpoints = configured.split(",").map((value) => value.trim());
+  if (endpoints.length === 0 || endpoints.some((value) => value.length === 0)) {
+    throw new Error("ITERM_RABBITMQ_URLS must be a comma-separated list of non-empty URLs");
+  }
+  return endpoints;
+}
+
 function reportRabbitMqState(state: RabbitMqConnectionState): void {
   process.stderr.write(
     `iTerminal Outbox relay RabbitMQ ${state.state.toLowerCase()} attempt=${state.attempt.toString()}${
+      state.endpointIndex === undefined ? "" : ` endpoint_index=${state.endpointIndex.toString()}`
+    }${
       state.retryInMilliseconds === undefined
         ? ""
         : ` retry_ms=${state.retryInMilliseconds.toString()}`

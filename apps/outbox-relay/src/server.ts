@@ -10,6 +10,7 @@ import {
   runtimeQueueTopology,
   SupervisedRabbitMqPublisher,
   type RabbitMqConnectionState,
+  type RabbitMqEndpoints,
 } from "@iterminal/queue-rabbitmq";
 
 export interface OutboxRelayHandle {
@@ -36,7 +37,7 @@ export interface StartOutboxRelayOptions extends RelayOptions {
   readonly rabbitMqReconnectInitialMilliseconds?: number;
   readonly rabbitMqReconnectJitterRatio?: number;
   readonly rabbitMqReconnectMaxMilliseconds?: number;
-  readonly rabbitMqUrl: string;
+  readonly rabbitMqUrl: RabbitMqEndpoints;
 }
 
 export async function startOutboxRelay(

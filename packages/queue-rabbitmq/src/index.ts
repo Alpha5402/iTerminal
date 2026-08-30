@@ -20,6 +20,8 @@ import amqp, {
 
 export const DEFAULT_RABBITMQ_HEARTBEAT_SECONDS = 5;
 
+export type RabbitMqEndpoints = string | readonly string[];
+
 export interface RabbitMqTopology {
   readonly deadLetterExchange: string;
   readonly deadLetterQueue: string;
@@ -135,6 +137,7 @@ export interface RabbitMqConsumerOptions {
 
 export interface RabbitMqConnectionState {
   readonly attempt: number;
+  readonly endpointIndex?: number;
   readonly error?: string;
   readonly retryInMilliseconds?: number;
   readonly state: "CONNECTING" | "CONNECTED" | "DISCONNECTED";
@@ -304,19 +307,22 @@ export class RabbitMqExecutionReadyConsumer {
 
 export class SupervisedRabbitMqPublisher implements DurableMessagePublisher {
   readonly #reconnect: NormalizedReconnectOptions;
+  readonly #urls: readonly string[];
   #attempt = 0;
   #closePromise: Promise<void> | undefined;
   #closed = false;
   #lastError: Error | undefined;
   #nextConnectAt = 0;
+  #endpointIndex = 0;
   #publisher: RabbitMqPublisher | undefined;
   #tail: Promise<void> = Promise.resolve();
 
   public constructor(
-    private readonly url: string,
+    endpoints: RabbitMqEndpoints,
     private readonly topology: RabbitMqTopology = runtimeQueueTopology(),
     options: RabbitMqReconnectOptions = {},
   ) {
+    this.#urls = normalizeEndpoints(endpoints);
     this.#reconnect = normalizeReconnectOptions(options);
   }
 
@@ -365,40 +371,47 @@ export class SupervisedRabbitMqPublisher implements DurableMessagePublisher {
       );
     }
     const attempt = this.#attempt + 1;
-    notifyConnectionState(this.#reconnect, { attempt, state: "CONNECTING" });
+    const endpointIndex = this.#endpointIndex;
+    notifyConnectionState(this.#reconnect, { attempt, endpointIndex, state: "CONNECTING" });
     try {
-      const publisher = await RabbitMqPublisher.connect(this.url, this.topology, {
-        ...(this.#reconnect.heartbeatSeconds === undefined
-          ? {}
-          : { heartbeatSeconds: this.#reconnect.heartbeatSeconds }),
-      });
+      const publisher = await RabbitMqPublisher.connect(
+        this.#urls[endpointIndex] ?? "",
+        this.topology,
+        {
+          ...(this.#reconnect.heartbeatSeconds === undefined
+            ? {}
+            : { heartbeatSeconds: this.#reconnect.heartbeatSeconds }),
+        },
+      );
       if (this.#closed) {
         await publisher.close();
         throw new Error("RabbitMQ publisher is closed");
       }
       this.#publisher = publisher;
-      notifyConnectionState(this.#reconnect, { attempt, state: "CONNECTED" });
+      notifyConnectionState(this.#reconnect, { attempt, endpointIndex, state: "CONNECTED" });
       return publisher;
     } catch (error) {
-      this.#recordFailure(error, attempt);
+      this.#recordFailure(error, attempt, endpointIndex);
       throw error;
     }
   }
 
   async #invalidate(publisher: RabbitMqPublisher, error: unknown): Promise<void> {
     if (this.#publisher === publisher) this.#publisher = undefined;
-    this.#recordFailure(error, this.#attempt + 1);
+    this.#recordFailure(error, this.#attempt + 1, this.#endpointIndex);
     await publisher.close().catch(() => undefined);
   }
 
-  #recordFailure(error: unknown, attempt: number): void {
+  #recordFailure(error: unknown, attempt: number, endpointIndex: number): void {
     const failure = asError(error);
     this.#attempt = attempt;
     this.#lastError = failure;
     const retryInMilliseconds = reconnectDelay(attempt, this.#reconnect);
     this.#nextConnectAt = this.#reconnect.now() + retryInMilliseconds;
+    this.#endpointIndex = (endpointIndex + 1) % this.#urls.length;
     notifyConnectionState(this.#reconnect, {
       attempt,
+      endpointIndex,
       error: failure.message,
       retryInMilliseconds,
       state: "DISCONNECTED",
@@ -410,25 +423,27 @@ export class SupervisedRabbitMqExecutionReadyConsumer {
   readonly #abortController = new AbortController();
   readonly #reconnect: NormalizedReconnectOptions;
   readonly #runPromise: Promise<void>;
+  readonly #urls: readonly string[];
   #active: RabbitMqExecutionReadyConsumer | undefined;
   #closePromise: Promise<void> | undefined;
   #closed = false;
 
   private constructor(
-    private readonly url: string,
+    endpoints: RabbitMqEndpoints,
     private readonly processor: ExecutionReadyProcessor,
     private readonly options: SupervisedRabbitMqConsumerOptions,
   ) {
+    this.#urls = normalizeEndpoints(endpoints);
     this.#reconnect = normalizeReconnectOptions(options);
     this.#runPromise = this.#run();
   }
 
   public static start(
-    url: string,
+    endpoints: RabbitMqEndpoints,
     processor: ExecutionReadyProcessor,
     options: SupervisedRabbitMqConsumerOptions = {},
   ): SupervisedRabbitMqExecutionReadyConsumer {
-    return new SupervisedRabbitMqExecutionReadyConsumer(url, processor, options);
+    return new SupervisedRabbitMqExecutionReadyConsumer(endpoints, processor, options);
   }
 
   public close(): Promise<void> {
@@ -446,29 +461,34 @@ export class SupervisedRabbitMqExecutionReadyConsumer {
 
   async #run(): Promise<void> {
     let attempt = 0;
+    let endpointIndex = 0;
     while (!this.#abortController.signal.aborted) {
       attempt += 1;
-      notifyConnectionState(this.#reconnect, { attempt, state: "CONNECTING" });
+      notifyConnectionState(this.#reconnect, { attempt, endpointIndex, state: "CONNECTING" });
       try {
-        const consumer = await RabbitMqExecutionReadyConsumer.connect(this.url, this.processor, {
-          ...(this.#reconnect.heartbeatSeconds === undefined
-            ? {}
-            : { heartbeatSeconds: this.#reconnect.heartbeatSeconds }),
-          ...(this.options.prefetch === undefined ? {} : { prefetch: this.options.prefetch }),
-          ...(this.options.retryPublishFailureBackoffMilliseconds === undefined
-            ? {}
-            : {
-                retryPublishFailureBackoffMilliseconds:
-                  this.options.retryPublishFailureBackoffMilliseconds,
-              }),
-          ...(this.options.topology === undefined ? {} : { topology: this.options.topology }),
-        });
+        const consumer = await RabbitMqExecutionReadyConsumer.connect(
+          this.#urls[endpointIndex] ?? "",
+          this.processor,
+          {
+            ...(this.#reconnect.heartbeatSeconds === undefined
+              ? {}
+              : { heartbeatSeconds: this.#reconnect.heartbeatSeconds }),
+            ...(this.options.prefetch === undefined ? {} : { prefetch: this.options.prefetch }),
+            ...(this.options.retryPublishFailureBackoffMilliseconds === undefined
+              ? {}
+              : {
+                  retryPublishFailureBackoffMilliseconds:
+                    this.options.retryPublishFailureBackoffMilliseconds,
+                }),
+            ...(this.options.topology === undefined ? {} : { topology: this.options.topology }),
+          },
+        );
         if (this.#abortController.signal.aborted) {
           await consumer.close();
           break;
         }
         this.#active = consumer;
-        notifyConnectionState(this.#reconnect, { attempt, state: "CONNECTED" });
+        notifyConnectionState(this.#reconnect, { attempt, endpointIndex, state: "CONNECTED" });
         attempt = 0;
         const closeError = await consumer.waitUntilClosed();
         this.#active = undefined;
@@ -477,20 +497,24 @@ export class SupervisedRabbitMqExecutionReadyConsumer {
         const retryInMilliseconds = reconnectDelay(1, this.#reconnect);
         notifyConnectionState(this.#reconnect, {
           attempt: 1,
+          endpointIndex,
           error: closeError?.message ?? "RabbitMQ consumer connection closed",
           retryInMilliseconds,
           state: "DISCONNECTED",
         });
+        endpointIndex = (endpointIndex + 1) % this.#urls.length;
         await abortableDelay(retryInMilliseconds, this.#abortController.signal);
       } catch (error) {
         if (this.#abortController.signal.aborted) break;
         const retryInMilliseconds = reconnectDelay(attempt, this.#reconnect);
         notifyConnectionState(this.#reconnect, {
           attempt,
+          endpointIndex,
           error: asError(error).message,
           retryInMilliseconds,
           state: "DISCONNECTED",
         });
+        endpointIndex = (endpointIndex + 1) % this.#urls.length;
         await abortableDelay(retryInMilliseconds, this.#abortController.signal);
       }
     }
@@ -617,6 +641,14 @@ function withHeartbeat(url: string, heartbeatSeconds?: number): string {
     );
   }
   return parsed.toString();
+}
+
+function normalizeEndpoints(endpoints: RabbitMqEndpoints): readonly string[] {
+  const values = typeof endpoints === "string" ? [endpoints] : [...endpoints];
+  if (values.length === 0 || values.some((value) => value.length === 0)) {
+    throw new Error("At least one non-empty RabbitMQ endpoint is required");
+  }
+  return values;
 }
 
 function reconnectDelay(attempt: number, options: NormalizedReconnectOptions): number {

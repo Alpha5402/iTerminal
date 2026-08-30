@@ -1,10 +1,10 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
-> 状态：Implementation Baseline v4.9 — M0–M4.1 与 M8.8 silent network blackhole recovery 已通过 L2，M4 L3 待真实模型调用
+> 状态：Implementation Baseline v5.0 — M0–M4.1 与 M8.9 RabbitMQ quorum leader failover 已通过 L2，M4 L3 待真实模型调用
 >
 > 基线日期：2026-08-30
 >
-> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live MCP daemon 已接入 PostgreSQL write-ahead journal 与 bounded ingest loop。M8.8 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放、DB pre-commit crash/lock timeout/Outbox backlog admission、单节点 RabbitMQ/PostgreSQL 自动重连、standalone relay/Worker 恢复，以及通过真实 TCP byte-drop proxy 注入的 PostgreSQL/RabbitMQ 双向 silent blackhole。非对称/多跳 network partition、RabbitMQ quorum leader failover、long soak、M9 fencing、多 Worker 与完整 M8 L4 仍未完成；M4 的模型驱动 Agent 验收、M5 Human Console 及其后的 L3/L4 路径也仍未完成。
+> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live MCP daemon 已接入 PostgreSQL write-ahead journal 与 bounded ingest loop。M8.9 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放、DB pre-commit crash/lock timeout/Outbox backlog admission、单节点 RabbitMQ/PostgreSQL 自动重连、standalone relay/Worker 恢复、真实 TCP byte-drop silent blackhole，以及三节点 RabbitMQ quorum 的实际 leader 停机、重新选举与多端点客户端恢复。非对称/多跳 network partition、minority partition、相关性故障、long soak、M9 fencing、多 Worker 与完整 M8 L4 仍未完成；M4 的模型驱动 Agent 验收、M5 Human Console 及其后的 L3/L4 路径也仍未完成。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -891,7 +891,8 @@ Exit Gate：parent busy 时 fork 后可独立 `git status`；child 继承可复�
   - [x] Runtime PostgreSQL 进程 stop/start：health probe 打开 owner-wide circuit，Pool reconnect 后先 durable reconciliation，再允许新 Session。
   - [x] standalone Outbox relay/Execution Worker 的 PostgreSQL stop/start supervision：真实子进程暂停 loop/consumer，并在数据库恢复后继续服务。
   - [x] 本机双向 silent TCP blackhole：真实 PostgreSQL/RabbitMQ socket 不关闭但丢弃字节，deadline/heartbeat 有界检测并恢复。
-  - [ ] 非对称/多跳 network partition、RabbitMQ quorum leader failover 与长时间 soak。
+  - [x] 三节点 RabbitMQ quorum：查询并停止实际 queue leader；relay/Worker 轮换端点，在旧 leader 保持停机时完成 pending Outbox 且不重复写 PTY。
+  - [ ] 非对称/多跳 network partition、minority partition、相关性 DB/MQ 故障与长时间 soak。
 
 故障矩阵：
 
@@ -1063,4 +1064,4 @@ v1.0 还必须满足 M7–M10、fork 语义、故障矩阵、owner routing、mul
 7. `feat(persistence): persist actions executions and events`：PostgreSQL、CAS、idempotency、unknown recovery。
 8. `feat(observation): add bounded event queries`：完成 M3 后再开始 MCP adapter。
 
-当前已完成建议切片 1–8，并追加 M4.1 live durable journal、M8.1 reliable messaging、M8.2 owner-local queue dispatch、M8.3 Interaction/retry outage crash semantics、M8.4 admission/backpressure、M8.5 RabbitMQ process reconnect、M8.6 PostgreSQL owner recovery、M8.7 messaging-loop PostgreSQL recovery 与 M8.8 silent network blackhole recovery；后续仍严格按里程碑 Exit Gate 与 `docs/verification/` 证据推进。
+当前已完成建议切片 1–8，并追加 M4.1 live durable journal、M8.1 reliable messaging、M8.2 owner-local queue dispatch、M8.3 Interaction/retry outage crash semantics、M8.4 admission/backpressure、M8.5 RabbitMQ process reconnect、M8.6 PostgreSQL owner recovery、M8.7 messaging-loop PostgreSQL recovery、M8.8 silent network blackhole recovery 与 M8.9 RabbitMQ quorum leader failover；后续仍严格按里程碑 Exit Gate 与 `docs/verification/` 证据推进。

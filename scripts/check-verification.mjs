@@ -17,6 +17,7 @@ const requiredReports = [
   "docs/verification/M8/2026-08-30-postgres-process-recovery.md",
   "docs/verification/M8/2026-08-30-postgres-loop-recovery.md",
   "docs/verification/M8/2026-08-30-network-blackhole-recovery.md",
+  "docs/verification/M8/2026-08-30-rabbitmq-quorum-failover.md",
 ];
 
 for (const report of requiredReports) {

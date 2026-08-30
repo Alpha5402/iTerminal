@@ -33,6 +33,7 @@
     "test:m8:postgres-outage": "vitest run apps/runtime-daemon/src/postgres-outage.test.ts",
     "test:m8:postgres-loops": "vitest run apps/execution-worker/src/postgres-recovery.test.ts",
     "test:m8:network": "vitest run apps/execution-worker/src/network-partition.test.ts",
+    "test:m8:quorum": "vitest run apps/execution-worker/src/quorum-failover.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm verify:docs && pnpm build",
     "verify:docs": "node scripts/check-verification.mjs"
