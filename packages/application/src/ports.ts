@@ -6,6 +6,7 @@ import type {
   Execution,
   InputAction,
   InteractionState,
+  ResizeAction,
   Session,
   SessionAction,
   SessionEvent,
@@ -34,6 +35,7 @@ export interface ShellExecutor {
   execute(command: string, callbacks: ShellExecuteCallbacks): Promise<ShellExecutionResult>;
   writeInput(data: string): void;
   sendControl(delivery: ControlDelivery): void;
+  resize(columns: number, rows: number): void;
   close(): void;
 }
 
@@ -62,6 +64,7 @@ export interface TerminalScreenProjection {
     readonly startColumn: number;
     readonly startRow: number;
   }): Promise<TerminalScreenRegionResult>;
+  resize(columns: number, rows: number, screenVersion: number): Promise<TerminalScreenSnapshot>;
   search(input: {
     readonly caseSensitive: boolean;
     readonly maxMatches: number;
@@ -174,6 +177,18 @@ export interface RuntimeDurability {
     ownerId: string,
   ): Promise<void>;
   finishInteraction(action: InputAction | ControlAction, event: DurableSessionEvent): Promise<void>;
+  acceptResize(action: ResizeAction, event: DurableSessionEvent, ownerId: string): Promise<void>;
+  markResizeWriteAttempted(
+    action: ResizeAction,
+    event: DurableSessionEvent,
+    ownerId: string,
+  ): Promise<void>;
+  finishResize(input: {
+    readonly action: ResizeAction;
+    readonly event: DurableSessionEvent;
+    readonly session: Session;
+    readonly brokenEvent?: DurableSessionEvent;
+  }): Promise<void>;
   saveInteractionState(
     state: InteractionState,
     expectedVersion: number,
@@ -202,6 +217,7 @@ export interface RuntimeServiceOptions {
     readonly afterControlWrite?: (action: ControlAction) => void;
     readonly afterExecutionWrite?: (execution: Execution) => void;
     readonly afterInputWrite?: (action: InputAction) => void;
+    readonly afterResizeWrite?: (action: ResizeAction) => void;
     readonly beforeExecutionFinishPersist?: (execution: Execution) => void;
   }>;
   readonly ownerId?: string;

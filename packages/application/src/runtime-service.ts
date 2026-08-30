@@ -11,6 +11,7 @@ import type {
   InputPolicyMode,
   InteractionGuard,
   InteractionState,
+  ResizeAction,
   Session,
   SessionAction,
   SessionEvent,
@@ -23,12 +24,14 @@ import type {
   TerminalScreenWaitResult,
 } from "@iterminal/domain";
 import {
-  CANONICAL_TERMINAL_COLUMNS,
-  CANONICAL_TERMINAL_ROWS,
   DEFAULT_INTERACTION_GUARD_TTL_MS,
   MAX_INTERACTION_GUARD_RENEWALS,
   MAX_INTERACTION_GUARD_TTL_MS,
   MIN_INTERACTION_GUARD_TTL_MS,
+  MAX_TERMINAL_COLUMNS,
+  MAX_TERMINAL_ROWS,
+  MIN_TERMINAL_COLUMNS,
+  MIN_TERMINAL_ROWS,
   RuntimeError,
 } from "@iterminal/domain";
 
@@ -86,6 +89,16 @@ export interface ControlRequest {
   readonly delivery: ControlDelivery;
   readonly bypassGuard?: boolean;
   readonly idempotencyKey: string;
+}
+
+export interface ResizeRequest {
+  readonly actor: Actor;
+  readonly columns: number;
+  readonly expectedGeometryVersion: number;
+  readonly idempotencyKey: string;
+  readonly rows: number;
+  readonly sessionGeneration: number;
+  readonly sessionId: string;
 }
 
 export interface SetInputPolicyRequest {
@@ -1168,6 +1181,184 @@ export class RuntimeService {
     return this.#withMutationLock(request.sessionId, () => this.#sendControlLocked(request));
   }
 
+  public resizeTerminal(request: ResizeRequest): Promise<ResizeAction> {
+    return this.#withMutationLock(request.sessionId, () => this.#resizeTerminalLocked(request));
+  }
+
+  async #resizeTerminalLocked(request: ResizeRequest): Promise<ResizeAction> {
+    validateTerminalGeometry(request.columns, request.rows);
+    if (
+      !Number.isSafeInteger(request.expectedGeometryVersion) ||
+      request.expectedGeometryVersion < 1
+    ) {
+      throw new RuntimeError(
+        "INVALID_REQUEST",
+        "Resize expectedGeometryVersion must be a positive integer",
+      );
+    }
+    await this.#flushDurable(request.sessionId);
+    const requestHash = hashRequest({
+      columns: request.columns,
+      expectedGeometryVersion: request.expectedGeometryVersion,
+      rows: request.rows,
+    });
+    const scope = `${request.sessionId}:${request.actor.id}`;
+    const replay = this.#idempotentReplay(scope, request.idempotencyKey, requestHash);
+    if (replay !== undefined) {
+      if (replay.type !== "resize") {
+        throw new RuntimeError("IDEMPOTENCY_KEY_REUSED", "Idempotency key changed action type");
+      }
+      return replay;
+    }
+    const session = this.#requireGeneration(request.sessionId, request.sessionGeneration);
+    if (session.status === "STARTING") {
+      throw new RuntimeError("SESSION_NOT_READY", "Terminal resize requires a ready live PTY", {
+        status: session.status,
+      });
+    }
+    const screen = this.#requireScreen(session.id, session.generation);
+    const current = await screen.snapshot();
+    this.#requireGeneration(session.id, session.generation);
+    if (current.geometryVersion !== request.expectedGeometryVersion) {
+      throw new RuntimeError(
+        "GEOMETRY_CHANGED",
+        "Expected terminal geometry version is stale",
+        {
+          currentColumns: current.columns,
+          currentGeometryVersion: current.geometryVersion,
+          currentRows: current.rows,
+          expectedGeometryVersion: request.expectedGeometryVersion,
+        },
+        true,
+      );
+    }
+    if (current.columns === request.columns && current.rows === request.rows) {
+      throw new RuntimeError("INVALID_REQUEST", "Terminal already has the requested geometry", {
+        columns: current.columns,
+        geometryVersion: current.geometryVersion,
+        rows: current.rows,
+      });
+    }
+    await this.#assertInteractionAllowed(session, request.actor, "resize", false);
+    const action: ResizeAction = {
+      acceptedAt: this.#timestamp(),
+      actionSequence: this.store.nextActionSequence(session.id, session.generation),
+      actor: request.actor,
+      columns: request.columns,
+      expectedGeometryVersion: request.expectedGeometryVersion,
+      id: `act_${randomUUID()}`,
+      idempotencyKey: request.idempotencyKey,
+      requestHash,
+      rows: request.rows,
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+      status: "ACCEPTED",
+      type: "resize",
+    };
+    const acceptedEvent = this.#eventDraft(session, "action.accepted", {}, action);
+    try {
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.acceptResize(action, acceptedEvent, this.#ownerId),
+      );
+    } catch (error) {
+      this.store.rollbackActionSequence(session.id, session.generation, action.actionSequence);
+      if (isDurabilityFatal(error)) this.#tripDurability(session.id, error);
+      throw error instanceof RuntimeError ? error : durabilityError(error);
+    }
+    this.store.saveAction(action);
+    this.store.bindIdempotency(scope, request.idempotencyKey, action.id);
+    this.store.appendEvent(session.id, session.generation, acceptedEvent);
+
+    const attemptedEvent = this.#eventDraft(
+      session,
+      "terminal.resize_write_attempted",
+      {
+        columns: action.columns,
+        fromColumns: current.columns,
+        fromGeometryVersion: current.geometryVersion,
+        fromRows: current.rows,
+        rows: action.rows,
+      },
+      action,
+    );
+    try {
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.markResizeWriteAttempted(action, attemptedEvent, this.#ownerId),
+      );
+    } catch (error) {
+      this.#tripDurability(session.id, error);
+      throw durabilityError(error);
+    }
+    this.store.appendEvent(session.id, session.generation, attemptedEvent);
+
+    const resizeScreenVersion = this.store.bumpScreenVersion(session.id, session.generation);
+    let projectionResize: Promise<TerminalScreenSnapshot> | undefined;
+    try {
+      projectionResize = screen.resize(action.columns, action.rows, resizeScreenVersion);
+      this.#requireExecutor(session.id).resize(action.columns, action.rows);
+      this.#hooks.afterResizeWrite?.(action);
+      const resized = await projectionResize;
+      if (
+        resized.columns !== action.columns ||
+        resized.rows !== action.rows ||
+        resized.geometryVersion !== current.geometryVersion + 1 ||
+        resized.screenVersion !== resizeScreenVersion
+      ) {
+        throw new Error("Terminal projection did not converge to the requested geometry");
+      }
+      action.status = "DELIVERED";
+      const deliveredEvent = this.#eventDraft(
+        session,
+        "terminal.resized",
+        {
+          columns: resized.columns,
+          fromColumns: current.columns,
+          fromGeometryVersion: current.geometryVersion,
+          fromRows: current.rows,
+          geometryVersion: resized.geometryVersion,
+          rows: resized.rows,
+          screenVersion: resizeScreenVersion,
+        },
+        action,
+      );
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.finishResize({ action, event: deliveredEvent, session }),
+      );
+      this.store.appendEvent(session.id, session.generation, deliveredEvent);
+      return action;
+    } catch (error) {
+      await projectionResize?.catch(() => undefined);
+      action.status = "UNKNOWN";
+      const broken = this.store.breakSession(session.id, session.generation);
+      const unknownEvent = this.#eventDraft(
+        broken,
+        "terminal.resize_unknown",
+        { reason: errorMessage(error) },
+        action,
+      );
+      const brokenEvent = this.#eventDraft(broken, "session.broken", {
+        reason: "Terminal geometry convergence is unknown",
+      });
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.finishResize({
+          action,
+          brokenEvent,
+          event: unknownEvent,
+          session: broken,
+        }),
+      ).catch((durableFailure: unknown) => this.#tripDurability(session.id, durableFailure));
+      this.store.appendEvent(session.id, session.generation, unknownEvent);
+      this.store.appendEvent(session.id, session.generation, brokenEvent);
+      this.#breakLiveSession(broken, errorMessage(error));
+      throw new RuntimeError(
+        "DELIVERY_UNKNOWN",
+        "Terminal resize delivery is uncertain; the Session generation is broken",
+        { actionId: action.id },
+        false,
+      );
+    }
+  }
+
   async #sendControlLocked(request: ControlRequest): Promise<ControlAction> {
     await this.#flushDurable(request.sessionId);
     const requestHash = hashRequest({
@@ -1300,7 +1491,7 @@ export class RuntimeService {
     after = 0,
     requestedLimit = DEFAULT_EVENT_LIMIT,
   ): Promise<EventPage> {
-    this.#requireGeneration(sessionId, generation);
+    this.#requireExactGeneration(sessionId, generation);
     const limit = Math.max(1, Math.min(requestedLimit, MAX_EVENT_LIMIT));
     if (this.#durability !== undefined) {
       await this.#flushDurable(sessionId);
@@ -1443,7 +1634,7 @@ export class RuntimeService {
   async #assertInteractionAllowed(
     session: Session,
     actor: Actor,
-    interactionType: "input" | "control",
+    interactionType: "input" | "control" | "resize",
     bypassGuard: boolean,
   ): Promise<void> {
     const state = await this.#reconcileExpiredGuard(session);
@@ -1666,6 +1857,7 @@ export class RuntimeService {
   }
 
   #screenFailure(sessionId: string, generation: number, error: unknown): RuntimeError {
+    if (error instanceof RuntimeError) return error;
     try {
       this.#requireGeneration(sessionId, generation);
     } catch (stateError) {
@@ -1862,6 +2054,8 @@ export class RuntimeService {
     this.#markActiveDispatchUnknown(session, reason);
     this.#executors.get(session.id)?.close();
     this.#executors.delete(session.id);
+    this.#screens.get(session.id)?.dispose();
+    this.#screens.delete(session.id);
     if (session.status !== "CLOSED" && session.status !== "BROKEN") {
       this.store.breakSession(session.id, session.generation);
     }
@@ -2006,16 +2200,33 @@ function validateScreenWait(request: ScreenWaitRequest): void {
 }
 
 function validateScreenRegion(request: ScreenRegionRequest): void {
-  if (!validScreenRange(request.startRow, request.rowCount, CANONICAL_TERMINAL_ROWS)) {
+  if (!validScreenRange(request.startRow, request.rowCount, MAX_TERMINAL_ROWS)) {
     throw new RuntimeError(
       "INVALID_REQUEST",
-      `Screen row region must fit within ${CANONICAL_TERMINAL_ROWS.toString()} rows`,
+      `Screen row region must fit within the ${MAX_TERMINAL_ROWS.toString()}-row maximum`,
     );
   }
-  if (!validScreenRange(request.startColumn, request.columnCount, CANONICAL_TERMINAL_COLUMNS)) {
+  if (!validScreenRange(request.startColumn, request.columnCount, MAX_TERMINAL_COLUMNS)) {
     throw new RuntimeError(
       "INVALID_REQUEST",
-      `Screen column region must fit within ${CANONICAL_TERMINAL_COLUMNS.toString()} columns`,
+      `Screen column region must fit within the ${MAX_TERMINAL_COLUMNS.toString()}-column maximum`,
+    );
+  }
+}
+
+function validateTerminalGeometry(columns: number, rows: number): void {
+  if (
+    !Number.isSafeInteger(columns) ||
+    columns < MIN_TERMINAL_COLUMNS ||
+    columns > MAX_TERMINAL_COLUMNS ||
+    !Number.isSafeInteger(rows) ||
+    rows < MIN_TERMINAL_ROWS ||
+    rows > MAX_TERMINAL_ROWS
+  ) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      `Terminal geometry must be ${MIN_TERMINAL_COLUMNS.toString()}-${MAX_TERMINAL_COLUMNS.toString()} columns by ${MIN_TERMINAL_ROWS.toString()}-${MAX_TERMINAL_ROWS.toString()} rows`,
+      { columns, rows },
     );
   }
 }

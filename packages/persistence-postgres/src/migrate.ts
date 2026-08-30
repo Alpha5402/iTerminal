@@ -7,6 +7,7 @@ const migrations = [
   "002_bounded_observation.sql",
   "003_reliable_messaging.sql",
   "004_interaction_guards.sql",
+  "005_terminal_geometry.sql",
 ] as const;
 
 export async function migrateDatabase(pool: Pool): Promise<void> {

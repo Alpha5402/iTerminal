@@ -5,6 +5,11 @@ import type {
 import {
   CANONICAL_TERMINAL_COLUMNS,
   CANONICAL_TERMINAL_ROWS,
+  MAX_TERMINAL_COLUMNS,
+  MAX_TERMINAL_ROWS,
+  MIN_TERMINAL_COLUMNS,
+  MIN_TERMINAL_ROWS,
+  RuntimeError,
   TERMINAL_SCREEN_HISTORY_ENTRIES,
   type TerminalScreenCell,
   type TerminalScreenCellStyle,
@@ -46,6 +51,7 @@ export class XtermScreenProjection implements TerminalScreenProjection {
   #scheduledVersion = 0;
   #disposed = false;
   #failure: Error | undefined;
+  #geometryVersion = 1;
   #tail: Promise<void> = Promise.resolve();
   readonly #history: TerminalScreenSnapshot[] = [];
   readonly #historyEntries: number;
@@ -78,6 +84,7 @@ export class XtermScreenProjection implements TerminalScreenProjection {
     this.#terminal = new Terminal({
       allowProposedApi: true,
       cols: CANONICAL_TERMINAL_COLUMNS,
+      reflowCursorLine: true,
       rows: CANONICAL_TERMINAL_ROWS,
       scrollback,
     });
@@ -132,13 +139,21 @@ export class XtermScreenProjection implements TerminalScreenProjection {
     readonly startColumn: number;
     readonly startRow: number;
   }): Promise<TerminalScreenCellsResult> {
-    if (!validRange(input.startRow, input.rowCount, this.#terminal.rows)) {
-      return Promise.reject(new Error("Screen cell row region is outside the active viewport"));
-    }
-    if (!validRange(input.startColumn, input.columnCount, this.#terminal.cols)) {
-      return Promise.reject(new Error("Screen cell column region is outside the active viewport"));
-    }
-    return this.#read(() => this.#captureCells(input));
+    return this.#read(() => {
+      if (!validRange(input.startRow, input.rowCount, this.#terminal.rows)) {
+        throw new RuntimeError(
+          "INVALID_REQUEST",
+          "Screen cell row region is outside the active viewport",
+        );
+      }
+      if (!validRange(input.startColumn, input.columnCount, this.#terminal.cols)) {
+        throw new RuntimeError(
+          "INVALID_REQUEST",
+          "Screen cell column region is outside the active viewport",
+        );
+      }
+      return this.#captureCells(input);
+    });
   }
 
   public region(input: {
@@ -147,13 +162,55 @@ export class XtermScreenProjection implements TerminalScreenProjection {
     readonly startColumn: number;
     readonly startRow: number;
   }): Promise<TerminalScreenRegionResult> {
-    if (!validRange(input.startRow, input.rowCount, this.#terminal.rows)) {
-      return Promise.reject(new Error("Screen row region is outside the active viewport"));
+    return this.#read(() => {
+      if (!validRange(input.startRow, input.rowCount, this.#terminal.rows)) {
+        throw new RuntimeError(
+          "INVALID_REQUEST",
+          "Screen row region is outside the active viewport",
+        );
+      }
+      if (!validRange(input.startColumn, input.columnCount, this.#terminal.cols)) {
+        throw new RuntimeError(
+          "INVALID_REQUEST",
+          "Screen column region is outside the active viewport",
+        );
+      }
+      return this.#captureRegion(input);
+    });
+  }
+
+  public resize(
+    columns: number,
+    rows: number,
+    screenVersion: number,
+  ): Promise<TerminalScreenSnapshot> {
+    validateGeometry(columns, rows);
+    if (!Number.isSafeInteger(screenVersion) || screenVersion <= this.#scheduledVersion) {
+      return Promise.reject(
+        new Error("Terminal screen resize version must increase monotonically"),
+      );
     }
-    if (!validRange(input.startColumn, input.columnCount, this.#terminal.cols)) {
-      return Promise.reject(new Error("Screen column region is outside the active viewport"));
-    }
-    return this.#read(() => this.#captureRegion(input));
+    this.#assertAvailable();
+    this.#scheduledVersion = screenVersion;
+    const operation = this.#tail.then(() => {
+      this.#assertAvailable();
+      this.#terminal.resize(columns, rows);
+      this.#geometryVersion += 1;
+      this.#appliedVersion = screenVersion;
+      const snapshot = this.#recordSnapshot();
+      this.#notifyVersionWaiters(snapshot);
+      return cloneSnapshot(snapshot);
+    });
+    this.#tail = operation.then(
+      () => undefined,
+      (error: unknown) => {
+        const failure = asError(error);
+        this.#fail(failure);
+        throw failure;
+      },
+    );
+    void this.#tail.catch(() => undefined);
+    return operation;
   }
 
   public search(input: {
@@ -303,6 +360,7 @@ export class XtermScreenProjection implements TerminalScreenProjection {
       buffer: active === this.#terminal.buffer.alternate ? "alternate" : "normal",
       columns: this.#terminal.cols,
       cursor: { column: active.cursorX, row: active.cursorY },
+      geometryVersion: this.#geometryVersion,
       lines,
       rows: this.#terminal.rows,
       screenVersion: this.#appliedVersion,
@@ -385,6 +443,18 @@ export class XtermScreenProjection implements TerminalScreenProjection {
       return {
         afterVersion,
         reason: "history_unavailable",
+        resyncRequired: true,
+        snapshot: cloneSnapshot(current),
+      };
+    }
+    if (
+      previous.geometryVersion !== current.geometryVersion ||
+      previous.columns !== current.columns ||
+      previous.rows !== current.rows
+    ) {
+      return {
+        afterVersion,
+        reason: "geometry_changed",
         resyncRequired: true,
         snapshot: cloneSnapshot(current),
       };
@@ -505,6 +575,7 @@ function snapshotFrame(snapshot: TerminalScreenSnapshot): TerminalScreenFrame {
     buffer: snapshot.buffer,
     columns: snapshot.columns,
     cursor: { ...snapshot.cursor },
+    geometryVersion: snapshot.geometryVersion,
     rows: snapshot.rows,
     screenVersion: snapshot.screenVersion,
     sessionGeneration: snapshot.sessionGeneration,
@@ -575,4 +646,21 @@ function abortError(): Error {
   const error = new Error("Screen wait aborted");
   error.name = "AbortError";
   return error;
+}
+
+function validateGeometry(columns: number, rows: number): void {
+  if (
+    !Number.isSafeInteger(columns) ||
+    columns < MIN_TERMINAL_COLUMNS ||
+    columns > MAX_TERMINAL_COLUMNS ||
+    !Number.isSafeInteger(rows) ||
+    rows < MIN_TERMINAL_ROWS ||
+    rows > MAX_TERMINAL_ROWS
+  ) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      `Terminal geometry must be ${MIN_TERMINAL_COLUMNS.toString()}-${MAX_TERMINAL_COLUMNS.toString()} columns by ${MIN_TERMINAL_ROWS.toString()}-${MAX_TERMINAL_ROWS.toString()} rows`,
+      { columns, rows },
+    );
+  }
 }

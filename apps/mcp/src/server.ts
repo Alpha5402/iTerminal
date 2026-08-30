@@ -1,5 +1,11 @@
 import type { Actor } from "@iterminal/domain";
-import { RuntimeError } from "@iterminal/domain";
+import {
+  MAX_TERMINAL_COLUMNS,
+  MAX_TERMINAL_ROWS,
+  MIN_TERMINAL_COLUMNS,
+  MIN_TERMINAL_ROWS,
+  RuntimeError,
+} from "@iterminal/domain";
 import type { RuntimeGateway } from "@iterminal/runtime-rpc";
 import type { CallToolResult } from "@modelcontextprotocol/server";
 import { McpServer } from "@modelcontextprotocol/server";
@@ -18,17 +24,25 @@ const idempotencyKey = z
   .max(256)
   .describe("Caller-generated retry key; reuse only for the identical request");
 const screenRectangle = z.strictObject({
-  columnCount: z.number().int().min(1).max(120),
+  columnCount: z.number().int().min(1).max(MAX_TERMINAL_COLUMNS),
   generation,
-  rowCount: z.number().int().min(1).max(40),
+  rowCount: z.number().int().min(1).max(MAX_TERMINAL_ROWS),
   sessionId,
-  startColumn: z.number().int().min(0).max(119),
-  startRow: z.number().int().min(0).max(39),
+  startColumn: z
+    .number()
+    .int()
+    .min(0)
+    .max(MAX_TERMINAL_COLUMNS - 1),
+  startRow: z
+    .number()
+    .int()
+    .min(0)
+    .max(MAX_TERMINAL_ROWS - 1),
 });
 
 export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServer {
   const server = new McpServer(
-    { name: "iterminal", version: "0.6.5" },
+    { name: "iterminal", version: "0.6.6" },
     {
       instructions:
         "Create or select one shared Session, then pass its exact generation to every operation. " +
@@ -36,6 +50,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
         "PTY_BUSY means another Execute is active: wait for it, send targeted input/control if appropriate, or use another Session. " +
         "BACKPRESSURE means no Action was admitted; wait for durable delivery capacity and retry the identical idempotency key. " +
         "Before interactive input, inspect interaction_get; INPUT_GUARDED is retryable only after the Guard expires or changes, while POLICY_DENIED requires a Human policy decision. " +
+        "Resize is an explicit shared Action: read geometryVersion from screen_get and handle GEOMETRY_CHANGED by re-observing instead of overwriting another Actor's decision. " +
         "Never retry a mutating call after DELIVERY_UNKNOWN without first inspecting the idempotency key or durable events.",
     },
   );
@@ -227,6 +242,36 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
   );
 
   server.registerTool(
+    "terminal_resize",
+    {
+      annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: false },
+      description:
+        "Explicitly resize the shared generation-owned PTY and canonical Virtual Screen. Pass geometryVersion from screen_get as expectedGeometryVersion. The Runtime serializes reflow, applies input policy/Human Guard, and records an attributed ResizeAction. GEOMETRY_CHANGED means another Actor resized first; re-observe before deciding. Never retry DELIVERY_UNKNOWN without reconciling the idempotency key/events.",
+      inputSchema: z.strictObject({
+        columns: z.number().int().min(MIN_TERMINAL_COLUMNS).max(MAX_TERMINAL_COLUMNS),
+        expectedGeometryVersion: z.number().int().positive(),
+        idempotencyKey,
+        generation,
+        rows: z.number().int().min(MIN_TERMINAL_ROWS).max(MAX_TERMINAL_ROWS),
+        sessionId,
+      }),
+      title: "Resize shared terminal geometry",
+    },
+    async (input) =>
+      call(() =>
+        gateway.resizeTerminal({
+          actor,
+          columns: input.columns,
+          expectedGeometryVersion: input.expectedGeometryVersion,
+          idempotencyKey: input.idempotencyKey,
+          rows: input.rows,
+          sessionGeneration: input.generation,
+          sessionId: input.sessionId,
+        }),
+      ),
+  );
+
+  server.registerTool(
     "events_query",
     {
       annotations: { readOnlyHint: true, openWorldHint: false },
@@ -249,7 +294,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
     {
       annotations: { readOnlyHint: true, openWorldHint: false },
       description:
-        "Read the exact live Session generation's bounded 120x40 Virtual Screen after ANSI/VT parsing. Returns active normal/alternate buffer, zero-based cursor, plain-text rows, and screenVersion for guarded input.",
+        "Read the exact live Session generation's bounded canonical Virtual Screen after ANSI/VT parsing. Returns dynamic rows/columns, geometryVersion, active normal/alternate buffer, zero-based cursor, plain-text rows, and screenVersion for guarded input.",
       inputSchema: z.strictObject({ generation, sessionId }),
       title: "Get live terminal screen",
     },
@@ -262,7 +307,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
     {
       annotations: { readOnlyHint: true, openWorldHint: false },
       description:
-        "Read one rectangular slice of the current active 120x40 viewport using zero-based terminal-cell coordinates. Wide glyphs clipped by a boundary are returned as blank cells. This does not read scrollback.",
+        "Read one rectangular slice of the current active canonical viewport using zero-based terminal-cell coordinates. Bounds must fit the live geometry returned by screen_get. Wide glyphs clipped by a boundary are returned as blank cells. This does not read scrollback.",
       inputSchema: screenRectangle,
       title: "Read live terminal screen region",
     },
@@ -286,7 +331,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
     {
       annotations: { readOnlyHint: true, openWorldHint: false },
       description:
-        "Read bounded full-row replacements after a retained screenVersion. If the version is future or outside the live 64-revision ring, resyncRequired=true includes the current full snapshot; no missing delta is fabricated.",
+        "Read bounded full-row replacements after a retained screenVersion. Future, expired, or cross-geometry versions return resyncRequired=true with the current full snapshot; no missing delta or resize reflow is fabricated.",
       inputSchema: z.strictObject({
         afterVersion: z.number().int().nonnegative(),
         generation,
@@ -302,7 +347,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
     {
       annotations: { readOnlyHint: true, openWorldHint: false },
       description:
-        "Search literal text only in the current active 120x40 viewport. Returns at most maxMatches terminal-cell row/column ranges tied to one exact screen snapshot; it does not search scrollback or durable Events.",
+        "Search literal text only in the current active canonical viewport. Returns at most maxMatches terminal-cell row/column ranges tied to one exact screen snapshot; it does not search scrollback or durable Events.",
       inputSchema: z.strictObject({
         caseSensitive: z.boolean().default(false),
         generation,

@@ -185,6 +185,145 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     expect(Number(durable.rows[0]?.agent_actions)).toBeGreaterThanOrEqual(3);
     expect(durable.rows[0]?.guarded_rejected_actions).toBe("0");
   }, 60_000);
+
+  it("keeps Human and Agent resize on one versioned PTY geometry and browser render", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "iterminal-m6-resize-")));
+    fixtures.push(root);
+    const workspace = join(root, "workspace");
+    await mkdir(workspace, { recursive: true });
+    daemon = await startRuntimeDaemon({
+      databaseUrl: databaseUrl ?? "",
+      ownerId: "owner-m6-resize",
+      socketPath: join(root, "runtime.sock"),
+    });
+    consoleServer = await startHumanConsole({
+      gateway: new UnixRuntimeClient(daemon.socketPath),
+      port: 0,
+      staticRoot,
+    });
+    mcp = await connectAgent(daemon.socketPath);
+    browser = await chromium.launch({
+      args: ["--disable-background-networking", "--no-first-run"],
+      executablePath: browserExecutable,
+      headless: true,
+    });
+    page = await browser.newPage({ viewport: { height: 1_100, width: 1_600 } });
+    await page.goto(consoleServer.url, { waitUntil: "networkidle" });
+
+    await page.getByLabel("Workspace root").fill(workspace);
+    await page.getByRole("button", { name: "Create persistent shell" }).click();
+    await waitForPageText(page, ".status-strip", "READY");
+    const sessions = await callTool<readonly SessionResult[]>(mcp, "session_list", {});
+    const session = required(sessions[0]);
+    const watcher = await callTool<StartedResult>(mcp, "execute", {
+      command:
+        "python3 -u -c 'import os,signal,time; emit=lambda *_: print(f\"SIZE={os.get_terminal_size().columns}x{os.get_terminal_size().lines}\",flush=True); signal.signal(signal.SIGWINCH,emit); emit(); time.sleep(30)'",
+      generation: session.generation,
+      idempotencyKey: "m6-resize-watcher",
+      sessionId: session.id,
+    });
+    await waitUntilRunning(mcp, watcher.execution.id);
+    await waitForPageText(page, '[data-testid="screen-reader-output"]', "SIZE=120x40");
+    const beforeHuman = await callTool<ScreenResult>(mcp, "screen_get", {
+      generation: session.generation,
+      sessionId: session.id,
+    });
+
+    await page.getByLabel("Columns").fill("96");
+    await page.getByLabel("Rows").fill("30");
+    await page.getByRole("button", { name: "Resize canonical PTY" }).click();
+    await waitForPageText(page, ".status-strip", "geometry 96×30 v2");
+    await waitForPageText(page, '[data-testid="screen-reader-output"]', "SIZE=96x30");
+    const afterHuman = await callTool<ScreenResult>(mcp, "screen_get", {
+      generation: session.generation,
+      sessionId: session.id,
+    });
+    expect(afterHuman).toMatchObject({ columns: 96, geometryVersion: 2, rows: 30 });
+    const crossGeometryDiff = await callTool<ScreenDiffResult>(mcp, "screen_diff", {
+      afterVersion: beforeHuman.screenVersion,
+      generation: session.generation,
+      sessionId: session.id,
+    });
+    expect(crossGeometryDiff).toMatchObject({
+      reason: "geometry_changed",
+      resyncRequired: true,
+      snapshot: { columns: 96, geometryVersion: 2, rows: 30 },
+    });
+
+    const stale = await mcp.callTool({
+      arguments: {
+        columns: 100,
+        expectedGeometryVersion: 1,
+        generation: session.generation,
+        idempotencyKey: "m6-resize-stale",
+        rows: 32,
+        sessionId: session.id,
+      },
+      name: "terminal_resize",
+    });
+    expect(stale.isError).toBe(true);
+    expect(textContent(stale)).toContain('"code":"GEOMETRY_CHANGED"');
+
+    await callTool(mcp, "terminal_resize", {
+      columns: 100,
+      expectedGeometryVersion: 2,
+      generation: session.generation,
+      idempotencyKey: "m6-resize-agent",
+      rows: 32,
+      sessionId: session.id,
+    });
+    await waitForPageText(page, ".status-strip", "geometry 100×32 v3");
+    await waitForPageText(page, '[data-testid="screen-reader-output"]', "SIZE=100x32");
+    const afterAgent = await callTool<ScreenResult>(mcp, "screen_get", {
+      generation: session.generation,
+      sessionId: session.id,
+    });
+    expect(afterAgent).toMatchObject({ columns: 100, geometryVersion: 3, rows: 32 });
+    await page.waitForFunction(
+      () =>
+        document.querySelector('[data-testid="screen-reader-output"]')?.textContent?.trimEnd() ===
+        document.querySelector('[data-testid="browser-terminal-output"]')?.textContent?.trimEnd(),
+      undefined,
+      { timeout: 10_000 },
+    );
+
+    await callTool(mcp, "control", {
+      delivery: { control: "CTRL_C", mode: "TTY_CONTROL" },
+      generation: session.generation,
+      idempotencyKey: "m6-resize-stop",
+      sessionId: session.id,
+      targetExecutionId: watcher.execution.id,
+    });
+    await callTool(mcp, "execution_wait", { executionId: watcher.execution.id });
+
+    const durable = await pool.query<{
+      agent_resize_actions: string;
+      human_resize_actions: string;
+      stale_resize_actions: string;
+      terminal_columns: number;
+      terminal_rows: number;
+      geometry_version: string;
+    }>(
+      `SELECT
+         count(*) FILTER (WHERE a.actor_id LIKE 'human_console_%' AND a.kind = 'resize') AS human_resize_actions,
+         count(*) FILTER (WHERE a.actor_id = 'agent-m5-browser' AND a.kind = 'resize') AS agent_resize_actions,
+         count(*) FILTER (WHERE a.idempotency_key = 'm6-resize-stale') AS stale_resize_actions,
+         max(s.terminal_columns) AS terminal_columns,
+         max(s.terminal_rows) AS terminal_rows,
+         max(s.geometry_version)::text AS geometry_version
+       FROM sessions s LEFT JOIN actions a ON a.session_id = s.id
+       WHERE s.id = $1`,
+      [session.id],
+    );
+    expect(durable.rows[0]).toMatchObject({
+      agent_resize_actions: "1",
+      geometry_version: "3",
+      human_resize_actions: "1",
+      stale_resize_actions: "0",
+      terminal_columns: 100,
+      terminal_rows: 32,
+    });
+  }, 60_000);
 });
 
 async function connectAgent(socketPath: string): Promise<Client> {
@@ -287,6 +426,19 @@ function required<T>(value: T | undefined): T {
 interface SessionResult {
   readonly generation: number;
   readonly id: string;
+}
+
+interface ScreenResult {
+  readonly columns: number;
+  readonly geometryVersion: number;
+  readonly rows: number;
+  readonly screenVersion: number;
+}
+
+interface ScreenDiffResult {
+  readonly reason?: string;
+  readonly resyncRequired: boolean;
+  readonly snapshot?: ScreenResult;
 }
 
 interface StartedResult {

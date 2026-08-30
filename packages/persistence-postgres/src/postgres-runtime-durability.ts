@@ -15,6 +15,7 @@ import type {
   InputAction,
   InputPolicyMode,
   InteractionState,
+  ResizeAction,
   Session,
   SessionAction,
   SessionStatus,
@@ -75,8 +76,9 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
       await client.query(
         `INSERT INTO sessions
           (id, current_generation, status, shell, workspace_root, owner_id,
-           next_action_sequence, screen_version, created_at)
-         VALUES ($1, $2, 'STARTING', $3, $4, $5, $6, $7, $8)`,
+           next_action_sequence, screen_version, terminal_columns, terminal_rows,
+           geometry_version, created_at)
+         VALUES ($1, $2, 'STARTING', $3, $4, $5, $6, $7, 120, 40, 1, $8)`,
         [
           session.id,
           session.generation,
@@ -568,6 +570,212 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
     });
   }
 
+  public async acceptResize(
+    action: ResizeAction,
+    event: DurableSessionEvent,
+    ownerId: string,
+  ): Promise<void> {
+    await this.#transaction(async (client) => {
+      const replay = await findReplay(
+        client,
+        action.sessionId,
+        action.actor.id,
+        action.idempotencyKey,
+      );
+      if (replay !== undefined) {
+        if (replay.requestHash !== action.requestHash || replay.actionId !== action.id) {
+          throw new RuntimeError(
+            "IDEMPOTENCY_KEY_REUSED",
+            "Resize idempotency key already exists",
+            { actionId: replay.actionId },
+          );
+        }
+        return;
+      }
+      const result = await client.query<{
+        current_generation: number;
+        database_now: Date;
+        geometry_version: string;
+        guard_actor_id: string | null;
+        guard_expires_at: Date | null;
+        input_policy: InputPolicyMode;
+        next_action_sequence: string;
+        owner_id: string;
+        status: SessionStatus;
+      }>(
+        `SELECT session.current_generation, session.status, session.owner_id,
+                session.next_action_sequence, session.geometry_version,
+                interaction.input_policy, interaction.guard_actor_id,
+                interaction.guard_expires_at, now() AS database_now
+           FROM sessions AS session
+           JOIN interaction_guards AS interaction
+             ON interaction.session_id = session.id
+            AND interaction.session_generation = session.current_generation
+          WHERE session.id = $1
+          FOR UPDATE OF session, interaction`,
+        [action.sessionId],
+      );
+      const current = result.rows[0];
+      if (current === undefined) {
+        throw new RuntimeError("SESSION_NOT_FOUND", `Session not found: ${action.sessionId}`);
+      }
+      if (current.current_generation !== action.sessionGeneration) {
+        throw new RuntimeError("SESSION_GENERATION_CHANGED", "Session generation changed", {
+          currentGeneration: current.current_generation,
+        });
+      }
+      if (current.owner_id !== ownerId) {
+        throw new RuntimeError("DELIVERY_UNKNOWN", "Resize reached a stale Runtime owner", {
+          currentOwnerId: current.owner_id,
+          ownerId,
+        });
+      }
+      if (
+        current.status !== "READY" &&
+        current.status !== "RESERVED" &&
+        current.status !== "RUNNING"
+      ) {
+        throw new RuntimeError("SESSION_NOT_READY", "Session has no resizable live PTY", {
+          status: current.status,
+        });
+      }
+      const currentGeometryVersion = Number.parseInt(current.geometry_version, 10);
+      if (currentGeometryVersion !== action.expectedGeometryVersion) {
+        throw new RuntimeError(
+          "GEOMETRY_CHANGED",
+          "Expected terminal geometry version is stale",
+          {
+            currentGeometryVersion,
+            expectedGeometryVersion: action.expectedGeometryVersion,
+          },
+          true,
+        );
+      }
+      assertDurableInteractionAllowed(action, current);
+      const durableSequence = Number.parseInt(current.next_action_sequence, 10) + 1;
+      if (durableSequence !== action.actionSequence) {
+        throw new RuntimeError("DELIVERY_UNKNOWN", "Live and durable Action sequence diverged", {
+          durableActionSequence: durableSequence,
+          liveActionSequence: action.actionSequence,
+        });
+      }
+      await expectOne(
+        client,
+        `UPDATE sessions
+            SET next_action_sequence = $2, terminal_columns = $3, terminal_rows = $4,
+                geometry_version = geometry_version + 1, updated_at = now()
+          WHERE id = $1 AND geometry_version = $5`,
+        [
+          action.sessionId,
+          action.actionSequence,
+          action.columns,
+          action.rows,
+          action.expectedGeometryVersion,
+        ],
+        "Durable terminal geometry version changed",
+      );
+      await upsertActor(client, action.actor);
+      await client.query(
+        `INSERT INTO actions
+          (id, session_id, session_generation, actor_id, kind, action_sequence,
+           idempotency_key, request_hash, payload, status, accepted_at)
+         VALUES ($1, $2, $3, $4, 'resize', $5, $6, $7, $8, 'ACCEPTED', $9)`,
+        [
+          action.id,
+          action.sessionId,
+          action.sessionGeneration,
+          action.actor.id,
+          action.actionSequence,
+          action.idempotencyKey,
+          action.requestHash,
+          JSON.stringify(actionPayload(action)),
+          action.acceptedAt,
+        ],
+      );
+      await insertEvents(client, [event]);
+    });
+  }
+
+  public async markResizeWriteAttempted(
+    action: ResizeAction,
+    event: DurableSessionEvent,
+    ownerId: string,
+  ): Promise<void> {
+    await this.#transaction(async (client) => {
+      const current = await client.query(
+        `SELECT 1
+           FROM actions a
+           JOIN sessions s ON s.id = a.session_id
+          WHERE a.id = $1 AND a.session_generation = $2 AND a.kind = 'resize'
+            AND a.status = 'ACCEPTED'
+            AND s.current_generation = $2 AND s.owner_id = $3
+            AND s.status IN ('READY', 'RESERVED', 'RUNNING')
+          FOR UPDATE OF a, s`,
+        [action.id, action.sessionGeneration, ownerId],
+      );
+      if (current.rowCount !== 1) {
+        throw new RuntimeError("DELIVERY_UNKNOWN", "Resize write attempt is no longer current", {
+          actionId: action.id,
+        });
+      }
+      await insertEvents(client, [event]);
+    });
+  }
+
+  public async finishResize(input: {
+    readonly action: ResizeAction;
+    readonly event: DurableSessionEvent;
+    readonly session: Session;
+    readonly brokenEvent?: DurableSessionEvent;
+  }): Promise<void> {
+    await this.#transaction(async (client) => {
+      await expectOne(
+        client,
+        `UPDATE actions SET status = $2, updated_at = now()
+          WHERE id = $1 AND status = 'ACCEPTED'`,
+        [input.action.id, input.action.status],
+        "Resize Action did not reach its delivery state",
+      );
+      if (input.action.status === "DELIVERED") {
+        await expectOne(
+          client,
+          `UPDATE sessions
+              SET screen_version = GREATEST(screen_version, $3), updated_at = now()
+            WHERE id = $1 AND current_generation = $2
+              AND terminal_columns = $4 AND terminal_rows = $5
+              AND geometry_version = $6`,
+          [
+            input.session.id,
+            input.session.generation,
+            input.session.screenVersion,
+            input.action.columns,
+            input.action.rows,
+            input.action.expectedGeometryVersion + 1,
+          ],
+          "Durable terminal geometry did not match the delivered resize",
+        );
+        await insertEvents(client, [input.event]);
+        return;
+      }
+      await client.query(
+        `UPDATE sessions SET status = 'BROKEN', active_execution_id = NULL, updated_at = now()
+          WHERE id = $1 AND current_generation = $2 AND status <> 'CLOSED'`,
+        [input.session.id, input.session.generation],
+      );
+      await client.query(
+        `UPDATE session_generations
+            SET status = 'BROKEN', broken_at = now(),
+                broken_reason = 'terminal geometry convergence is unknown'
+          WHERE session_id = $1 AND generation = $2 AND status <> 'CLOSED'`,
+        [input.session.id, input.session.generation],
+      );
+      await insertEvents(
+        client,
+        input.brokenEvent === undefined ? [input.event] : [input.event, input.brokenEvent],
+      );
+    });
+  }
+
   public async markInteractionWriteAttempted(
     action: InputAction | ControlAction,
     event: DurableSessionEvent,
@@ -804,7 +1012,7 @@ async function upsertActor(client: PoolClient, actor: Actor): Promise<void> {
 }
 
 function assertDurableInteractionAllowed(
-  action: InputAction | ControlAction,
+  action: InputAction | ControlAction | ResizeAction,
   state: Readonly<{
     database_now: Date;
     guard_actor_id: string | null;
@@ -930,20 +1138,30 @@ async function upsertSnapshot(
   );
 }
 
-function actionPayload(action: InputAction | ControlAction): Readonly<Record<string, unknown>> {
-  return action.type === "input"
-    ? {
-        data: action.data,
-        targetExecutionId: action.targetExecutionId,
-        ...(action.expectedScreenVersion === undefined
-          ? {}
-          : { expectedScreenVersion: action.expectedScreenVersion }),
-      }
-    : {
-        bypassGuard: action.bypassGuard,
-        delivery: action.delivery,
-        targetExecutionId: action.targetExecutionId,
-      };
+function actionPayload(
+  action: InputAction | ControlAction | ResizeAction,
+): Readonly<Record<string, unknown>> {
+  if (action.type === "input") {
+    return {
+      data: action.data,
+      targetExecutionId: action.targetExecutionId,
+      ...(action.expectedScreenVersion === undefined
+        ? {}
+        : { expectedScreenVersion: action.expectedScreenVersion }),
+    };
+  }
+  if (action.type === "control") {
+    return {
+      bypassGuard: action.bypassGuard,
+      delivery: action.delivery,
+      targetExecutionId: action.targetExecutionId,
+    };
+  }
+  return {
+    columns: action.columns,
+    expectedGeometryVersion: action.expectedGeometryVersion,
+    rows: action.rows,
+  };
 }
 
 function eventSearchText(event: DurableSessionEvent): string {

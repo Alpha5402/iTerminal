@@ -45,6 +45,7 @@ interface InteractionState {
 interface ScreenSnapshot {
   readonly columns: number;
   readonly cursor: { readonly column: number; readonly row: number };
+  readonly geometryVersion: number;
   readonly lines: readonly string[];
   readonly rows: number;
   readonly screenVersion: number;
@@ -62,6 +63,12 @@ interface SessionEvent {
 interface Bootstrap {
   readonly actor: Actor;
   readonly canonicalGeometry: { readonly columns: number; readonly rows: number };
+  readonly geometryBounds: {
+    readonly maxColumns: number;
+    readonly maxRows: number;
+    readonly minColumns: number;
+    readonly minRows: number;
+  };
   readonly sessions: readonly Session[];
 }
 
@@ -118,6 +125,9 @@ function App(): React.JSX.Element {
   const [shell, setShell] = useState<"bash" | "zsh">("zsh");
   const [command, setCommand] = useState("");
   const [interactive, setInteractive] = useState(false);
+  const [resizeColumns, setResizeColumns] = useState(SCREEN_COLUMNS.toString());
+  const [resizeRows, setResizeRows] = useState(SCREEN_ROWS.toString());
+  const [browserTerminalMirror, setBrowserTerminalMirror] = useState("");
   const interactiveState = useRef(false);
   const terminalHost = useRef<HTMLDivElement>(null);
   const terminal = useRef<Terminal | undefined>(undefined);
@@ -219,9 +229,15 @@ function App(): React.JSX.Element {
 
   useEffect(() => {
     if (terminal.current !== undefined && screen !== undefined) {
-      renderScreen(terminal.current, screen);
+      renderScreen(terminal.current, screen, setBrowserTerminalMirror);
     }
   }, [screen]);
+
+  useEffect(() => {
+    if (screen === undefined) return;
+    setResizeColumns(screen.columns.toString());
+    setResizeRows(screen.rows.toString());
+  }, [screen?.columns, screen?.rows]);
 
   const applyStreamFrame = useCallback((frame: StreamFrame): void => {
     if (frame.error !== undefined) setError(frame.error);
@@ -443,7 +459,7 @@ function App(): React.JSX.Element {
 
   const releaseGuard = async (): Promise<void> => {
     const currentSession = latestSession.current;
-    const state = latestInteraction.current;
+    let state = latestInteraction.current;
     if (
       currentSession === undefined ||
       state?.guard === undefined ||
@@ -451,20 +467,44 @@ function App(): React.JSX.Element {
     ) {
       return;
     }
-    const next = await api<InteractionState>(
+    let next: InteractionState;
+    try {
+      next = await deleteInteractionGuard(currentSession, state.version, state.guard.id);
+    } catch (reason) {
+      if (
+        !(reason instanceof ConsoleApiError) ||
+        reason.body.code !== "INTERACTION_GUARD_CHANGED"
+      ) {
+        throw reason;
+      }
+      state = await api<InteractionState>(
+        `/api/sessions/${encodeURIComponent(currentSession.id)}/interaction?generation=${currentSession.generation.toString()}`,
+      );
+      latestInteraction.current = state;
+      setInteraction(state);
+      if (state.guard?.actor.id !== bootstrap?.actor.id) return;
+      next = await deleteInteractionGuard(currentSession, state.version, state.guard.id);
+    }
+    latestInteraction.current = next;
+    setInteraction(next);
+  };
+
+  const deleteInteractionGuard = (
+    currentSession: Session,
+    expectedVersion: number,
+    guardId: string,
+  ): Promise<InteractionState> =>
+    api<InteractionState>(
       `/api/sessions/${encodeURIComponent(currentSession.id)}/interaction/guard`,
       {
         body: {
-          expectedVersion: state.version,
+          expectedVersion,
           generation: currentSession.generation,
-          guardId: state.guard.id,
+          guardId,
         },
         method: "DELETE",
       },
     );
-    latestInteraction.current = next;
-    setInteraction(next);
-  };
 
   const requiredRunningSession = (): Session => {
     const current = latestSession.current;
@@ -558,6 +598,25 @@ function App(): React.JSX.Element {
     }
   };
 
+  const resizeTerminal = async (event: React.FormEvent): Promise<void> => {
+    event.preventDefault();
+    if (session === undefined || screen === undefined) return;
+    try {
+      await api(`/api/sessions/${encodeURIComponent(session.id)}/resize`, {
+        body: {
+          columns: Number.parseInt(resizeColumns, 10),
+          expectedGeometryVersion: screen.geometryVersion,
+          generation: session.generation,
+          idempotencyKey: crypto.randomUUID(),
+          rows: Number.parseInt(resizeRows, 10),
+        },
+        method: "POST",
+      });
+    } catch (reason) {
+      setError(normalizeClientError(reason));
+    }
+  };
+
   const actorLabel = useMemo(
     () => bootstrap?.actor.id.replace("human_console_", "human:"),
     [bootstrap?.actor.id],
@@ -630,11 +689,15 @@ function App(): React.JSX.Element {
             </span>
             <span>generation {session?.generation ?? "—"}</span>
             <span>screen v{screen?.screenVersion ?? 0}</span>
+            <span>
+              geometry {screen?.columns ?? SCREEN_COLUMNS}×{screen?.rows ?? SCREEN_ROWS} v
+              {screen?.geometryVersion ?? 1}
+            </span>
             <span>cursor {cursor}</span>
             {session?.activeExecutionId !== undefined && <code>{session.activeExecutionId}</code>}
           </div>
           <div
-            aria-label="Canonical 120 by 40 terminal viewport"
+            aria-label={`Canonical ${screen?.columns ?? SCREEN_COLUMNS} by ${screen?.rows ?? SCREEN_ROWS} terminal viewport`}
             className={interactive ? "terminal-host interactive" : "terminal-host"}
             onBlur={() => {
               setInteractive(false);
@@ -645,6 +708,13 @@ function App(): React.JSX.Element {
           />
           <pre className="screen-reader-output" data-testid="screen-reader-output">
             {screen?.lines.join("\n") ?? ""}
+          </pre>
+          <pre
+            aria-hidden="true"
+            className="screen-reader-output"
+            data-testid="browser-terminal-output"
+          >
+            {browserTerminalMirror}
           </pre>
           <div className="mode-panel">
             {session?.status === "READY" ? (
@@ -716,6 +786,34 @@ function App(): React.JSX.Element {
                   : `${interaction.guard.renewals.toString()}/${interaction.guard.maxRenewals.toString()}`}
               </dd>
             </dl>
+            <form className="geometry-form" onSubmit={(event) => void resizeTerminal(event)}>
+              <label>
+                Columns
+                <input
+                  disabled={screen === undefined}
+                  max={bootstrap?.geometryBounds.maxColumns ?? 240}
+                  min={bootstrap?.geometryBounds.minColumns ?? 40}
+                  onChange={(event) => setResizeColumns(event.target.value)}
+                  type="number"
+                  value={resizeColumns}
+                />
+              </label>
+              <label>
+                Rows
+                <input
+                  disabled={screen === undefined}
+                  max={bootstrap?.geometryBounds.maxRows ?? 100}
+                  min={bootstrap?.geometryBounds.minRows ?? 12}
+                  onChange={(event) => setResizeRows(event.target.value)}
+                  type="number"
+                  value={resizeRows}
+                />
+              </label>
+              <button disabled={screen === undefined} type="submit">
+                Resize canonical PTY
+              </button>
+              <small>Explicit shared Action; window size never auto-owns the PTY.</small>
+            </form>
           </section>
           <section className="timeline">
             <div className="section-title">
@@ -808,12 +906,24 @@ function isApiError(value: unknown): value is ApiErrorBody {
   );
 }
 
-function renderScreen(terminal: Terminal, screen: ScreenSnapshot): void {
-  const lines = screen.lines.slice(0, SCREEN_ROWS).map(safeScreenText);
-  terminal.write(`\u001b[2J\u001b[H${lines.join("\r\n")}`);
+function renderScreen(
+  terminal: Terminal,
+  screen: ScreenSnapshot,
+  onRendered: (text: string) => void,
+): void {
+  terminal.resize(screen.columns, screen.rows);
+  const lines = screen.lines.slice(0, screen.rows).map(safeScreenText);
   terminal.write(
-    `\u001b[?25h\u001b[${(screen.cursor.row + 1).toString()};${(screen.cursor.column + 1).toString()}H`,
+    `\u001b[2J\u001b[H${lines.join("\r\n")}\u001b[?25h\u001b[${(screen.cursor.row + 1).toString()};${(screen.cursor.column + 1).toString()}H`,
+    () => onRendered(captureBrowserTerminal(terminal, screen.rows)),
   );
+}
+
+function captureBrowserTerminal(terminal: Terminal, rows: number): string {
+  const active = terminal.buffer.active;
+  return Array.from({ length: rows }, (_value, row) =>
+    (active.getLine(active.viewportY + row)?.translateToString(true) ?? "").trimEnd(),
+  ).join("\n");
 }
 
 function safeScreenText(line: string): string {

@@ -378,6 +378,8 @@ class InteractiveExecutor implements ShellExecutor {
     this.controls.push(delivery);
   }
 
+  public resize(): void {}
+
   public close(): void {}
 }
 

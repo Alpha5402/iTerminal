@@ -1,10 +1,10 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
-> 状态：Implementation Baseline v5.6 — M5 Browser Human Console + official MCP Agent shared path 已通过 L3；M0–M4.1、M6.5 与 M8.9 后端路径已通过 L2，M4 autonomous-model L3 仍待显式授权
+> 状态：Implementation Baseline v5.7 — M5 shared path 与 M6.6 controlled geometry 已通过 Browser Human + official MCP Agent L3；M0–M4.1、M6.5 与 M8.9 后端路径已通过 L2，M4 autonomous-model L3 仍待显式授权
 >
 > 基线日期：2026-08-30
 >
-> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live MCP daemon 已接入 PostgreSQL write-ahead journal、bounded ingest loop、固定 120×40 的 live ANSI/VT Virtual Screen，以及 generation-scoped Input Policy/Interaction Guard。M5 增加 loopback Fastify HTTP/WS、React+xterm.js Human Console、READY composer、RUNNING interactive focus、actor Timeline、cursor/screen resync 与浏览器 Guard 生命周期；真实无头 Chrome Human 和 official MCP SDK Agent 已在同一 PostgreSQL/zsh Session 中共享 cwd/env/Python REPL，并证明所有写入经 Action 归属。Agent 仍可经 exact-generation screen/interaction 工具做有界观察。M8.9 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放、DB/AMQP 恢复与真实三节点 RabbitMQ quorum leader failover。Autonomous model 授权、TUI 矩阵、resize/reflow、style parity、daemon restart 后 durable wait、Approval/secret、非对称分区、long soak、M9 fencing、多 Worker 与完整 MVP/L4 仍未完成。
+> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live Runtime 已接入 PostgreSQL write-ahead journal、bounded ingest loop、versioned dynamic ANSI/VT Virtual Screen，以及 generation-scoped Input Policy/Interaction Guard。M5/M6.6 增加 loopback Human Console 与受控 ResizeAction：真实无头 Chrome Human 和 official MCP SDK Agent 已在同一 PostgreSQL/zsh Session 中共享 cwd/env/Python REPL，并分别驱动同一 PTY 的 SIGWINCH；`geometryVersion` CAS、跨几何 full resync、browser/headless 文本一致、Action 归属与 UNKNOWN/BROKEN 均有证据。Viewer 布局不拥有 geometry。M8.9 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放、DB/AMQP 恢复与真实三节点 RabbitMQ quorum leader failover。Autonomous model 授权、更广 TUI/跨浏览器/style parity、daemon restart 后 durable wait、Approval/secret、非对称分区、long soak、M9 fencing、多 Worker 与完整 MVP/L4 仍未完成。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -578,13 +578,13 @@ M9 spike/ADR 选型；不能让任意 Worker 消费后新建第二个“同 Sess
 当前已注册且有实现证据的工具：
 
 - Session：`session_create`、`session_get`、`session_list`、`session_close`。
-- Action/Execution：`execute`、`execution_get`、`execution_wait`、`input`、`control`。
+- Action/Execution：`execute`、`execution_get`、`execution_wait`、`input`、`control`、`terminal_resize`。
 - Event：`events_query`。
 - Screen：`screen_get`、`screen_region`、`screen_cells`、`screen_diff`、`screen_search`、`screen_wait`。
 
 后续按能力分阶段增加：
 
-- M6.5：只读 `interaction_get`，让 Agent 在 Input/Control 前观察 policy、guard、version 与 expiry；Agent 默认不能经 MCP 修改 policy 或持有 Human Guard。
+- M6.5：只读 `interaction_get`，让 Agent 在 Input/Control/Resize 前观察 policy、guard、version 与 expiry；Agent 默认不能经 MCP 修改 policy 或持有 Human Guard。
 - M7：`session_fork`；完成 checkpoint/fork 语义前不注册空壳。
 - Event exact-get/全文 search 只有在 bounded schema、权限与分页契约冻结后才注册；底层 repository 已有能力不等于 MCP 工具已交付。
 
@@ -667,7 +667,7 @@ WebSocket 只承载 live event/screen/action transport，不是真相源。重�
 - [x] Human/Agent/System Action 标签与 bounded Timeline。
 - [x] event cursor 重连、screen resync、live/event gap 提示。
 - [ ] 预留 Approval/secret prompt 状态展示；完整交互与脱敏在 M10 实现。
-- [x] canonical 120×40 terminal geometry；viewer 不拥有 resize，避免抖动。
+- [x] Runtime-owned canonical geometry：默认 120×40、显式 ResizeAction、viewer 不自动 fit/抢占 ownership。
 - [x] 基本键盘可达、焦点边界、文本状态与非纯颜色提示。
 
 ---
@@ -853,14 +853,14 @@ Exit Gate：L2 协议/Runtime/持久化路径已完成；官方 SDK Client 已�
 - [x] current execution、Action actor label、bounded Timeline、PTY_BUSY allowed-next-action UI。
 - [x] Input/Control 与 actor/policy/guard 状态 UI；消费 M6.5 稳定契约，Approval/secret 仍待 M10。
 - [x] durable event cursor reconnect、full screen resync、live/event gap 提示与慢消费者上限。
-- [x] canonical 120×40 geometry、多 viewer 独立 stream、基本键盘/焦点/非颜色可访问性。
+- [x] 默认 120×40、受控 dynamic geometry、多 viewer 独立 stream、基本键盘/焦点/非颜色可访问性。
 
 Exit Gate：已通过 L3 shared path。真实无头 Chrome Human Console + official MCP SDK Agent 共享 cwd/env/Python REPL；Guard 阻断语义、浏览器 reload cursor/screen 恢复、Human/Agent PostgreSQL Action 归属与 READY 无旁路均有证据。Autonomous model、TUI/cross-browser/daemon-restart wait 不在本 Gate 的已证范围。
 
 ### M6 — Virtual Screen 与交互并发安全（目标：L3 MVP）
 
-- [x] `@xterm/headless` ANSI/VT parser、alternate screen、Unicode/wide chars 与固定 120×40 canonical geometry。
-- [ ] 受控 resize/reflow 与多 viewer geometry ownership。
+- [x] `@xterm/headless` ANSI/VT parser、alternate screen、Unicode/wide chars 与默认 120×40 canonical geometry。
+- [x] 受控 resize/reflow 与多 viewer geometry ownership：Runtime 单一 owner、40–240×12–100 bounds、`geometryVersion` CAS、Human/Agent ResizeAction、SIGWINCH、UNKNOWN/BROKEN。
 - [x] bounded full viewport、active buffer、cursor 与 exact `screenVersion` snapshot。
 - [x] bounded current-viewport literal search 与 terminal-cell row/column match。
 - [x] terminal-cell rectangular region、64-revision bounded row diff 与 explicit full-snapshot resync。
@@ -880,7 +880,7 @@ Exit Gate：已通过 L3 shared path。真实无头 Chrome Human Console + offic
 - [x] Agent read screen v100，Human 改到 v105，Agent stale input 被拒绝（L2 RPC/MCP Actor 路径；该 stale-version 子场景尚未由 Browser Human 重跑）。
 - [ ] Agent 看到 psql exec_101，Human Ctrl+C 后启动 python exec_102，旧 SQL 被拒绝。
 - [x] Human raw input 活跃时 Agent input 不插入半行；guard 过期/释放后可继续（L2 RPC + L3 Browser Human/MCP）。
-- [ ] Human xterm.js 与 Agent headless screen 在固定 geometry 下内容一致。
+- [x] Human xterm.js 与 Agent headless screen 在 Human/Agent resize 后文本一致（L3 Chrome + official MCP；style/pixel parity 仍未覆盖）。
 
 #### M6.5 — Input Policy 与 Interaction Guard（下一可执行切片，目标：L2）
 
@@ -1106,7 +1106,7 @@ Exit Gate：3+ Worker chaos 下每个 generation 最多一个有效 PTY owner；
 - [x] Shell Integration 使用独立 control FD，不信任 PTY 文本 marker 作为状态事实源。
 - [x] Persistent Shell ExecuteAction 接受 Shell command string；不与 direct argv API 混为一谈。
 - [x] Session 忙时 fail-fast，不建 Execute Queue；并行用 fork Session。
-- [ ] Human READY 使用 composer，RUNNING 使用 interactive input。
+- [x] Human READY 使用 composer，RUNNING 使用 interactive input。
 - [x] ADR-0023 冻结 M6.5 policy/Guard 精确契约；默认 `human_guarded`、TTL 500 ms（50 ms–5 s）、最多续租 3 次。
 - [x] Human emergency Control 的 `bypassGuard` 仅按 trusted-local Human role 绕过 Guard，不绕过 policy/stale/approval；完整 capability 待 M10。
 - [ ] Checkpoint 只保存 cwd + shell + filtered exported env + workspace。
@@ -1153,7 +1153,7 @@ v1.0 还必须满足 M7–M10、fork 语义、故障矩阵、owner routing、mul
 
 9. [x] `feat(interaction): enforce generation-scoped input policy and guards`：完成 M6.5 Domain/Application/PostgreSQL/RPC/MCP 与 L2 场景，不包含 Human Console。
 10. [x] `feat(console): add shared human terminal path`：完成 M5 最小 HTTP/WS、composer、interactive focus、actor/timeline 与 policy/guard UI，形成首条 L3 Browser Human + official MCP Agent 路径。
-11. `feat(screen): add controlled resize and geometry ownership`：完成 canonical geometry owner、resize/reflow 与 Human/headless fixture 对照。
+11. [x] `feat(screen): add controlled resize and geometry ownership`：完成 canonical geometry owner、resize/reflow、CAS/UNKNOWN 与 Human/headless L3 fixture 对照。
 12. `feat(screen): classify bounded terminal state evidence`：只实现有 confidence/evidence 的 heuristic 与 shell/REPL/TUI fixtures，不把 heuristic 当权限事实。
 13. `feat(session): fork from versioned shell checkpoint`：进入 M7；只复制明确列出的可重建 context。
 

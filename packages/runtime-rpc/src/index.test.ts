@@ -189,6 +189,7 @@ function stubGateway(): RuntimeGateway {
     listSessions: () => Promise.resolve([]),
     queryEvents: unsupported,
     releaseInteractionGuard: unsupported,
+    resizeTerminal: unsupported,
     renewInteractionGuard: unsupported,
     searchScreen: unsupported,
     sendControl: unsupported,

@@ -23,6 +23,10 @@ import type {
 import {
   CANONICAL_TERMINAL_COLUMNS,
   CANONICAL_TERMINAL_ROWS,
+  MAX_TERMINAL_COLUMNS,
+  MAX_TERMINAL_ROWS,
+  MIN_TERMINAL_COLUMNS,
+  MIN_TERMINAL_ROWS,
   type ControlDelivery,
   type ShellKind,
 } from "@iterminal/domain";
@@ -211,6 +215,23 @@ export class PtyShellExecutor implements ShellExecutor {
     }
     const processGroup = foregroundProcessGroup(this.shellPid);
     process.kill(-processGroup, delivery.signal);
+  }
+
+  public resize(columns: number, rows: number): void {
+    if (this.#closed || this.#fatalError !== undefined) {
+      throw this.#fatalError ?? new Error("Executor is closed");
+    }
+    if (
+      !Number.isSafeInteger(columns) ||
+      columns < MIN_TERMINAL_COLUMNS ||
+      columns > MAX_TERMINAL_COLUMNS ||
+      !Number.isSafeInteger(rows) ||
+      rows < MIN_TERMINAL_ROWS ||
+      rows > MAX_TERMINAL_ROWS
+    ) {
+      throw new Error("Terminal geometry is outside the controlled bounds");
+    }
+    this.#pty.resize(columns, rows);
   }
 
   public close(): void {

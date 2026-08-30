@@ -54,6 +54,7 @@ The HTTP status is only transport guidance. Clients branch on the stable Runtime
 | `POST`   | `/api/sessions/:id/execute`                                       | READY-only `execution.start`; command + idempotency key                   |
 | `POST`   | `/api/sessions/:id/input`                                         | RUNNING-only `input.send`; exact Execution and optional screen version    |
 | `POST`   | `/api/sessions/:id/control`                                       | RUNNING-only `control.send`; explicit delivery and Guard-bypass audit bit |
+| `POST`   | `/api/sessions/:id/resize`                                        | expected-geometry-version `terminal.resize`; READY/RESERVED/RUNNING       |
 | `GET`    | `/api/sessions/:id/events?generation=&after=&limit=`              | bounded durable `events.query`                                            |
 | `GET`    | `/api/sessions/:id/screen?generation=`                            | bounded full `screen.get`                                                 |
 | `GET`    | `/api/sessions/:id/interaction?generation=`                       | `interaction.get`                                                         |
@@ -102,4 +103,4 @@ If a durable cursor predates retained history, `eventGap` describes the missing 
 - Ctrl+C/Ctrl+D are explicit TTY ControlActions, not raw READY input.
 - Blur, focus exit, WebSocket disconnect, and TTL converge the Guard. Failure to confirm release never triggers automatic Input replay.
 
-The Runtime's headless 120x40 Virtual Screen remains canonical. The browser renders its bounded text/cursor into xterm.js and does not yet claim style parity, resize ownership, scrollback replay, or durable screen reconstruction.
+The Runtime's headless Virtual Screen remains canonical. It starts at 120×40 and exposes explicit bounded geometry plus `geometryVersion`. The browser resize form submits a Human ResizeAction using the observed version, then resizes xterm.js only from the returned/streamed canonical snapshot. Browser layout, reconnect, and focus never auto-fit or acquire geometry ownership. The Console does not yet claim style/pixel parity, scrollback replay, or durable screen reconstruction.

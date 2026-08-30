@@ -6,7 +6,15 @@ import { resolve } from "node:path";
 import fastifyStatic from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
 import type { Actor, EventPage, InteractionState, Session } from "@iterminal/domain";
-import { RuntimeError } from "@iterminal/domain";
+import {
+  CANONICAL_TERMINAL_COLUMNS,
+  CANONICAL_TERMINAL_ROWS,
+  MAX_TERMINAL_COLUMNS,
+  MAX_TERMINAL_ROWS,
+  MIN_TERMINAL_COLUMNS,
+  MIN_TERMINAL_ROWS,
+  RuntimeError,
+} from "@iterminal/domain";
 import type { RuntimeGateway } from "@iterminal/runtime-rpc";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import type { RawData, WebSocket } from "ws";
@@ -75,6 +83,12 @@ const renewGuardSchema = identitySchema.extend({
 const releaseGuardSchema = identitySchema.extend({
   expectedVersion: z.number().int().positive(),
   guardId: z.string().min(1).max(256),
+});
+const resizeSchema = identitySchema.extend({
+  columns: z.number().int().min(MIN_TERMINAL_COLUMNS).max(MAX_TERMINAL_COLUMNS),
+  expectedGeometryVersion: z.number().int().positive(),
+  idempotencyKey: z.string().min(1).max(256),
+  rows: z.number().int().min(MIN_TERMINAL_ROWS).max(MAX_TERMINAL_ROWS),
 });
 const eventQuerySchema = z.strictObject({
   after: z.coerce.number().int().nonnegative().default(0),
@@ -151,7 +165,16 @@ export async function createHumanConsoleApp(
     const sessions = await options.gateway.listSessions();
     return success(request, {
       actor,
-      canonicalGeometry: { columns: 120, rows: 40 },
+      canonicalGeometry: {
+        columns: CANONICAL_TERMINAL_COLUMNS,
+        rows: CANONICAL_TERMINAL_ROWS,
+      },
+      geometryBounds: {
+        maxColumns: MAX_TERMINAL_COLUMNS,
+        maxRows: MAX_TERMINAL_ROWS,
+        minColumns: MIN_TERMINAL_COLUMNS,
+        minRows: MIN_TERMINAL_ROWS,
+      },
       sessions,
     });
   });
@@ -242,6 +265,26 @@ export async function createHumanConsoleApp(
           sessionGeneration: body.generation,
           sessionId,
           targetExecutionId: body.targetExecutionId,
+        }),
+      ),
+    );
+  });
+
+  app.post("/api/sessions/:sessionId/resize", async (request, reply) => {
+    const actor = actorForRequest(request, reply, actors, now);
+    const { sessionId } = sessionParamsSchema.parse(request.params);
+    const body = resizeSchema.parse(request.body);
+    return reply.status(202).send(
+      success(
+        request,
+        await options.gateway.resizeTerminal({
+          actor,
+          columns: body.columns,
+          expectedGeometryVersion: body.expectedGeometryVersion,
+          idempotencyKey: body.idempotencyKey,
+          rows: body.rows,
+          sessionGeneration: body.generation,
+          sessionId,
         }),
       ),
     );
@@ -862,6 +905,8 @@ function allowedNextActions(code: string): readonly string[] {
     case "SCREEN_CHANGED":
     case "RESYNC_REQUIRED":
       return ["refresh_screen", "reconnect_stream"];
+    case "GEOMETRY_CHANGED":
+      return ["refresh_screen", "retry_after_reobserve"];
     case "EXECUTION_CHANGED":
       return ["refresh_session", "target_current_execution"];
     case "BACKPRESSURE":

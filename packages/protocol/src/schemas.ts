@@ -86,3 +86,26 @@ export const controlRequestSchema = {
   ],
   type: "object",
 } as const;
+
+export const resizeRequestSchema = {
+  additionalProperties: false,
+  properties: {
+    actor: executeRequestSchema.properties.actor,
+    columns: { maximum: 240, minimum: 40, type: "integer" },
+    expectedGeometryVersion: { minimum: 1, type: "integer" },
+    idempotencyKey: { minLength: 1, type: "string" },
+    rows: { maximum: 100, minimum: 12, type: "integer" },
+    sessionGeneration: { minimum: 1, type: "integer" },
+    sessionId: { minLength: 1, type: "string" },
+  },
+  required: [
+    "sessionId",
+    "sessionGeneration",
+    "actor",
+    "columns",
+    "rows",
+    "expectedGeometryVersion",
+    "idempotencyKey",
+  ],
+  type: "object",
+} as const;

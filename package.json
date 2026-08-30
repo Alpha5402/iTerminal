@@ -30,6 +30,8 @@
     "test:m5": "vitest run apps/console/src/server.test.ts",
     "test:m5:browser": "pnpm build:console && vitest run apps/console/src/browser-shared-path.test.ts",
     "test:m6:interaction": "vitest run packages/application/src/interaction-policy.test.ts packages/persistence-postgres/src/postgres-interaction-guard.test.ts apps/runtime-daemon/src/interaction-policy.test.ts",
+    "test:m6:resize": "vitest run packages/terminal-screen/src/index.test.ts packages/persistence-postgres/src/postgres-terminal-geometry.test.ts apps/runtime-daemon/src/resize.test.ts",
+    "test:m6:resize:browser": "pnpm build:console && vitest run apps/console/src/browser-shared-path.test.ts",
     "test:m8:messaging": "vitest run packages/queue-rabbitmq/src/rabbitmq-messaging.test.ts",
     "test:m8:dispatch": "vitest run apps/execution-worker/src/execution-worker.test.ts",
     "test:m8:interactions": "vitest run apps/runtime-daemon/src/interaction-crash.test.ts",

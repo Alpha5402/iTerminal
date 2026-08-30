@@ -22,6 +22,10 @@ export type ControlDelivery =
 
 export const CANONICAL_TERMINAL_COLUMNS = 120;
 export const CANONICAL_TERMINAL_ROWS = 40;
+export const MIN_TERMINAL_COLUMNS = 40;
+export const MAX_TERMINAL_COLUMNS = 240;
+export const MIN_TERMINAL_ROWS = 12;
+export const MAX_TERMINAL_ROWS = 100;
 export const TERMINAL_SCREEN_HISTORY_ENTRIES = 64;
 export const DEFAULT_INTERACTION_GUARD_TTL_MS = 500;
 export const MIN_INTERACTION_GUARD_TTL_MS = 50;
@@ -32,6 +36,7 @@ export interface TerminalScreenFrame {
   readonly buffer: "normal" | "alternate";
   readonly columns: number;
   readonly cursor: Readonly<{ column: number; row: number }>;
+  readonly geometryVersion: number;
   readonly rows: number;
   readonly screenVersion: number;
   readonly sessionGeneration: number;
@@ -100,7 +105,7 @@ export type TerminalScreenDiffResult =
     }>
   | Readonly<{
       afterVersion: number;
-      reason: "future_version" | "history_unavailable";
+      reason: "future_version" | "geometry_changed" | "history_unavailable";
       resyncRequired: true;
       snapshot: TerminalScreenSnapshot;
     }>;
@@ -218,7 +223,15 @@ export interface ControlAction extends ActionBase {
   status: InteractionActionStatus;
 }
 
-export type SessionAction = ExecuteAction | InputAction | ControlAction;
+export interface ResizeAction extends ActionBase {
+  readonly type: "resize";
+  readonly columns: number;
+  readonly expectedGeometryVersion: number;
+  readonly rows: number;
+  status: InteractionActionStatus;
+}
+
+export type SessionAction = ExecuteAction | InputAction | ControlAction | ResizeAction;
 
 export interface SessionEvent {
   readonly id: string;

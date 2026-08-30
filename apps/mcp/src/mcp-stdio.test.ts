@@ -52,6 +52,7 @@ describe("M4 stdio MCP bridge", () => {
       "session_create",
       "session_get",
       "session_list",
+      "terminal_resize",
     ]);
 
     const session = await callTool<SessionResult>(first, "session_create", {
@@ -372,6 +373,7 @@ type EventPageResult = {
 type ScreenResult = {
   readonly buffer: string;
   readonly columns: number;
+  readonly geometryVersion: number;
   readonly lines: readonly string[];
   readonly rows: number;
   readonly screenVersion: number;

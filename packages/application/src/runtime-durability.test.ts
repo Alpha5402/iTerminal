@@ -226,6 +226,8 @@ class RecordingExecutor implements ShellExecutor {
 
   public sendControl(): void {}
 
+  public resize(): void {}
+
   public close(): void {
     this.closed = true;
   }
@@ -287,6 +289,18 @@ class ControlledDurability implements RuntimeDurability {
   }
 
   public finishInteraction(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  public acceptResize(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  public markResizeWriteAttempted(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  public finishResize(): Promise<void> {
     return Promise.resolve();
   }
 

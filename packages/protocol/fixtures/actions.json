@@ -40,5 +40,19 @@
       "control": "CTRL_C"
     },
     "idempotencyKey": "control-001"
+  },
+  "resize": {
+    "sessionId": "ses_example",
+    "sessionGeneration": 1,
+    "actor": {
+      "id": "human_example",
+      "type": "human",
+      "principal": "local-human",
+      "client": "console"
+    },
+    "columns": 100,
+    "rows": 32,
+    "expectedGeometryVersion": 1,
+    "idempotencyKey": "resize-001"
   }
 }

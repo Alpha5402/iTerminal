@@ -12,6 +12,7 @@ import type {
   InputRequest,
   ReleaseInteractionGuardRequest,
   RenewInteractionGuardRequest,
+  ResizeRequest,
   ScreenCellsRequest,
   ScreenDiffRequest,
   ScreenRegionRequest,
@@ -27,6 +28,7 @@ import type {
   Execution,
   InputAction,
   InteractionState,
+  ResizeAction,
   Session,
   TerminalScreenCellsResult,
   TerminalScreenDiffResult,
@@ -35,7 +37,7 @@ import type {
   TerminalScreenSnapshot,
   TerminalScreenWaitResult,
 } from "@iterminal/domain";
-import { RuntimeError } from "@iterminal/domain";
+import { MAX_TERMINAL_COLUMNS, MAX_TERMINAL_ROWS, RuntimeError } from "@iterminal/domain";
 import * as z from "zod/v4";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
@@ -50,6 +52,7 @@ const runtimeErrorCodes = new Set<RuntimeError["code"]>([
   "PTY_BUSY",
   "EXECUTION_CHANGED",
   "SCREEN_CHANGED",
+  "GEOMETRY_CHANGED",
   "INPUT_GUARDED",
   "INTERACTION_GUARD_CHANGED",
   "POLICY_DENIED",
@@ -83,10 +86,18 @@ const sessionIdentitySchema = z.strictObject({
 });
 
 const screenRectangleSchema = sessionIdentitySchema.extend({
-  columnCount: z.number().int().min(1).max(120),
-  rowCount: z.number().int().min(1).max(40),
-  startColumn: z.number().int().min(0).max(119),
-  startRow: z.number().int().min(0).max(39),
+  columnCount: z.number().int().min(1).max(MAX_TERMINAL_COLUMNS),
+  rowCount: z.number().int().min(1).max(MAX_TERMINAL_ROWS),
+  startColumn: z
+    .number()
+    .int()
+    .min(0)
+    .max(MAX_TERMINAL_COLUMNS - 1),
+  startRow: z
+    .number()
+    .int()
+    .min(0)
+    .max(MAX_TERMINAL_ROWS - 1),
 });
 
 const operationSchemas = {
@@ -147,6 +158,13 @@ const operationSchemas = {
     actor: actorSchema,
     expectedVersion: z.number().int().positive(),
     mode: z.enum(["common", "human_guarded", "human_only", "agent_only"]),
+  }),
+  "terminal.resize": sessionIdentitySchema.extend({
+    actor: actorSchema,
+    columns: z.number().int().min(40).max(MAX_TERMINAL_COLUMNS),
+    expectedGeometryVersion: z.number().int().positive(),
+    idempotencyKey: z.string().min(1).max(256),
+    rows: z.number().int().min(12).max(MAX_TERMINAL_ROWS),
   }),
   "screen.cells": screenRectangleSchema,
   "screen.diff": sessionIdentitySchema.extend({
@@ -216,6 +234,7 @@ export interface RuntimeGateway {
   waitExecution(executionId: string): Promise<Execution>;
   sendInput(request: InputRequest): Promise<InputAction>;
   sendControl(request: ControlRequest): Promise<ControlAction>;
+  resizeTerminal(request: ResizeRequest): Promise<ResizeAction>;
   getInteractionState(sessionId: string, generation: number): Promise<InteractionState>;
   setInputPolicy(request: SetInputPolicyRequest): Promise<InteractionState>;
   acquireInteractionGuard(request: AcquireInteractionGuardRequest): Promise<InteractionState>;
@@ -296,6 +315,10 @@ export class LocalRuntimeGateway implements RuntimeGateway {
 
   public sendControl(request: ControlRequest): Promise<ControlAction> {
     return this.runtime.sendControl(request);
+  }
+
+  public resizeTerminal(request: ResizeRequest): Promise<ResizeAction> {
+    return this.runtime.resizeTerminal(request);
   }
 
   public getInteractionState(sessionId: string, generation: number): Promise<InteractionState> {
@@ -493,6 +516,18 @@ export class UnixRuntimeClient implements RuntimeGateway {
       idempotencyKey: request.idempotencyKey,
       sessionId: request.sessionId,
       targetExecutionId: request.targetExecutionId,
+    });
+  }
+
+  public resizeTerminal(request: ResizeRequest): Promise<ResizeAction> {
+    return this.#request("terminal.resize", {
+      actor: request.actor,
+      columns: request.columns,
+      expectedGeometryVersion: request.expectedGeometryVersion,
+      generation: request.sessionGeneration,
+      idempotencyKey: request.idempotencyKey,
+      rows: request.rows,
+      sessionId: request.sessionId,
     });
   }
 
@@ -790,6 +825,18 @@ async function dispatch(
         targetExecutionId: request.targetExecutionId,
       });
     }
+    case "terminal.resize": {
+      const request = operationSchemas[operation].parse(input);
+      return gateway.resizeTerminal({
+        actor: request.actor,
+        columns: request.columns,
+        expectedGeometryVersion: request.expectedGeometryVersion,
+        idempotencyKey: request.idempotencyKey,
+        rows: request.rows,
+        sessionGeneration: request.generation,
+        sessionId: request.sessionId,
+      });
+    }
     case "interaction.get": {
       const request = operationSchemas[operation].parse(input);
       return gateway.getInteractionState(request.sessionId, request.generation);
@@ -974,6 +1021,7 @@ function isMutating(operation: RuntimeOperation): boolean {
     operation === "execution.start" ||
     operation === "input.send" ||
     operation === "control.send" ||
+    operation === "terminal.resize" ||
     operation === "interaction.policy.set" ||
     operation === "interaction.guard.acquire" ||
     operation === "interaction.guard.renew" ||

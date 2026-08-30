@@ -19,6 +19,7 @@ describe("XtermScreenProjection", () => {
         buffer: "normal",
         columns: CANONICAL_TERMINAL_COLUMNS,
         cursor: { column: 3, row: 3 },
+        geometryVersion: 1,
         rows: CANONICAL_TERMINAL_ROWS,
         screenVersion: 3,
       });
@@ -180,6 +181,46 @@ describe("XtermScreenProjection", () => {
         resyncRequired: true,
         snapshot: { screenVersion: 4 },
       });
+    } finally {
+      screen.dispose();
+    }
+  });
+
+  it("serializes canonical resize, reflows content, and forces cross-geometry resync", async () => {
+    const screen = createScreen();
+    try {
+      screen.write(`before-${"x".repeat(90)}`, 1);
+      const waiting = screen.waitForVersion(1, 500);
+      const resized = await screen.resize(80, 24, 2);
+
+      expect(resized).toMatchObject({
+        columns: 80,
+        geometryVersion: 2,
+        rows: 24,
+        screenVersion: 2,
+      });
+      expect(resized.lines[0]).toBe(`before-${"x".repeat(73)}`);
+      expect(resized.lines[1]).toBe("x".repeat(17));
+      await expect(waiting).resolves.toMatchObject({
+        columns: 80,
+        geometryVersion: 2,
+        rows: 24,
+        screenVersion: 2,
+      });
+      await expect(screen.diff(1)).resolves.toMatchObject({
+        afterVersion: 1,
+        reason: "geometry_changed",
+        resyncRequired: true,
+        snapshot: {
+          columns: 80,
+          geometryVersion: 2,
+          rows: 24,
+          screenVersion: 2,
+        },
+      });
+      await expect(
+        screen.region({ columnCount: 1, rowCount: 1, startColumn: 80, startRow: 0 }),
+      ).rejects.toThrow("outside the active viewport");
     } finally {
       screen.dispose();
     }

@@ -28,6 +28,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0022](./0022-stable-screen-cell-style-dto.md)          | Map live styled cells into a stable bounded DTO          | Accepted for M6.4        |
 | [0023](./0023-generation-scoped-interaction-policy.md)  | Version policy and short Human Interaction Guards        | Accepted for M6.5        |
 | [0024](./0024-human-console-transport.md)               | Keep Human HTTP/WS as a loopback Runtime adapter         | Accepted for M5          |
+| [0025](./0025-controlled-terminal-geometry.md)          | Make resize an explicit Runtime-owned versioned Action   | Accepted for M6.6        |
 
 Statuses:
 
