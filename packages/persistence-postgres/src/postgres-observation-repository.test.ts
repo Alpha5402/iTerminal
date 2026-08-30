@@ -40,6 +40,12 @@ describeDatabase("PostgresObservationRepository", () => {
           SET artifact_count = 0, byte_size = 0, updated_at = now()
         WHERE scope = 'default'`,
     );
+    await pool.query(
+      `UPDATE retention_policies
+          SET max_age_days = 7, max_events_per_generation = 100000,
+              cleanup_batch_size = 10000, updated_at = now()
+        WHERE scope = 'default'`,
+    );
   });
 
   afterAll(async () => {
@@ -357,6 +363,134 @@ describeDatabase("PostgresObservationRepository", () => {
     await expect(
       observation.queryEvents({ after: 1, generation: 1, sessionId: session }),
     ).rejects.toMatchObject({ code: "RESYNC_REQUIRED" });
+  });
+
+  it("masks an older fragment after an unsupported direct middle deletion", async () => {
+    const session = await createSession(runtime);
+    for (let index = 1; index <= 6; index += 1) {
+      await observation.appendOutput({
+        createdAt: new Date(),
+        data: `direct-delete-${index.toString()}`,
+        generation: 1,
+        sessionId: session,
+      });
+    }
+    await pool.query(
+      `DELETE FROM session_events
+        WHERE session_id = $1 AND session_generation = 1 AND event_sequence = 4`,
+      [session],
+    );
+
+    await expect(
+      observation.queryEvents({ after: 3, generation: 1, sessionId: session }),
+    ).rejects.toMatchObject({
+      code: "RESYNC_REQUIRED",
+      details: { minimumAvailableSequence: 5 },
+    });
+    expect(
+      (await observation.queryEvents({ generation: 1, limit: 10, sessionId: session })).events.map(
+        (event) => event.sequence,
+      ),
+    ).toEqual([5, 6]);
+    expect((await observation.maintainEventRetention()).deletedEvents).toBe(3);
+    const physical = await pool.query<{ event_sequence: string }>(
+      `SELECT event_sequence::text
+         FROM session_events
+        WHERE session_id = $1 AND session_generation = 1
+        ORDER BY event_sequence`,
+      [session],
+    );
+    expect(physical.rows.map((row) => Number.parseInt(row.event_sequence, 10))).toEqual([5, 6]);
+  });
+
+  it("deletes one bounded Event prefix and advances a cursor-safe watermark", async () => {
+    const session = await createSession(runtime);
+    await pool.query(
+      `UPDATE retention_policies
+          SET max_age_days = 7, max_events_per_generation = 5,
+              cleanup_batch_size = 2, updated_at = now()
+        WHERE scope = 'default'`,
+    );
+    for (let index = 1; index <= 10; index += 1) {
+      await observation.appendOutput({
+        createdAt: new Date(),
+        data: `retention-${index.toString()}`,
+        generation: 1,
+        sessionId: session,
+      });
+    }
+
+    expect((await observation.maintainEventRetention()).deletedEvents).toBe(2);
+    await expect(
+      observation.queryEvents({ after: 1, generation: 1, sessionId: session }),
+    ).rejects.toMatchObject({
+      code: "RESYNC_REQUIRED",
+      details: { minimumAvailableSequence: 3 },
+    });
+    expect((await observation.maintainEventRetention()).deletedEvents).toBe(2);
+    expect((await observation.maintainEventRetention()).deletedEvents).toBe(1);
+    expect((await observation.maintainEventRetention()).deletedEvents).toBe(0);
+
+    const fresh = await observation.queryEvents({ generation: 1, limit: 10, sessionId: session });
+    expect(fresh.events.map((event) => event.sequence)).toEqual([6, 7, 8, 9, 10]);
+    const watermark = await pool.query<{
+      deleted_events: string;
+      deleted_through_sequence: string;
+    }>(
+      `SELECT deleted_through_sequence::text, deleted_events::text
+         FROM event_retention_watermarks
+        WHERE session_id = $1 AND session_generation = 1`,
+      [session],
+    );
+    expect(watermark.rows[0]).toEqual({
+      deleted_events: "5",
+      deleted_through_sequence: "5",
+    });
+  });
+
+  it("keeps Event age cleanup contiguous and preserves the latest anchor", async () => {
+    const session = await createSession(runtime);
+    const now = new Date("2026-08-31T00:00:00.000Z");
+    const old = new Date("2026-08-01T00:00:00.000Z");
+    const fresh = new Date("2026-08-30T00:00:00.000Z");
+    await pool.query(
+      `UPDATE retention_policies
+          SET max_age_days = 7, max_events_per_generation = 100,
+              cleanup_batch_size = 10, updated_at = now()
+        WHERE scope = 'default'`,
+    );
+    for (const [index, createdAt] of [old, old, fresh, old, old].entries()) {
+      await observation.appendOutput({
+        createdAt,
+        data: `age-${index.toString()}`,
+        generation: 1,
+        sessionId: session,
+      });
+    }
+    expect((await observation.maintainEventRetention(now)).deletedEvents).toBe(2);
+    const retained = await observation.queryEvents({
+      generation: 1,
+      limit: 10,
+      sessionId: session,
+    });
+    expect(retained.events.map((event) => event.sequence)).toEqual([3, 4, 5]);
+
+    const allOldSession = await createSession(runtime);
+    for (let index = 0; index < 3; index += 1) {
+      await observation.appendOutput({
+        createdAt: old,
+        data: `all-old-${index.toString()}`,
+        generation: 1,
+        sessionId: allOldSession,
+      });
+    }
+    expect((await observation.maintainEventRetention(now)).deletedEvents).toBe(2);
+    const anchor = await observation.queryEvents({
+      generation: 1,
+      limit: 10,
+      sessionId: allOldSession,
+    });
+    expect(anchor.events.map((event) => event.sequence)).toEqual([3]);
   });
 });
 

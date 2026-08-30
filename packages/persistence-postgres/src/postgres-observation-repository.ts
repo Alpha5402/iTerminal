@@ -8,6 +8,7 @@ import type { Pool, PoolClient } from "pg";
 import { createPostgresEndpointPool, type PostgresConnectionTarget } from "./postgres-endpoints.js";
 import { assertSessionFence, throwSessionLeaseLost } from "./session-fencing.js";
 import { actorFromRow, persistActor } from "./actors.js";
+import { maintainEventRetention, type EventRetentionMaintenanceResult } from "./event-retention.js";
 
 const MAX_EVENT_LIMIT = 500;
 const MAX_SEARCH_LIMIT = 50;
@@ -186,6 +187,10 @@ export class PostgresObservationRepository {
     });
   }
 
+  public async maintainEventRetention(now?: Date): Promise<EventRetentionMaintenanceResult> {
+    return maintainEventRetention(this.#pool, now);
+  }
+
   public async getEvent(eventId: string): Promise<EventObservation | undefined> {
     const result = await this.#pool.query<EventRow>(`${eventSelect()} WHERE e.id = $1`, [eventId]);
     return result.rows[0] === undefined ? undefined : mapEvent(result.rows[0]);
@@ -259,8 +264,12 @@ export class PostgresObservationRepository {
         requestedGeneration: query.generation,
       });
     }
-    const after = cursor?.after ?? query.after ?? 0;
-    await this.#assertCursorAvailable(query.sessionId, query.generation, after);
+    const requestedAfter = cursor?.after ?? query.after ?? 0;
+    const after = await this.#availableEventFloor(
+      query.sessionId,
+      query.generation,
+      requestedAfter,
+    );
     const limit = bounded(query.limit ?? 100, MAX_EVENT_LIMIT);
     const values: unknown[] = [query.sessionId, query.generation, after];
     const filters = ["e.session_id = $1", "e.session_generation = $2", "e.event_sequence > $3"];
@@ -530,25 +539,38 @@ export class PostgresObservationRepository {
     };
   }
 
-  async #assertCursorAvailable(
+  async #availableEventFloor(
     sessionId: string,
     generation: number,
     after: number,
-  ): Promise<void> {
-    if (after === 0) {
-      return;
-    }
-    const result = await this.#pool.query<{ minimum: string | null }>(
-      `SELECT min(event_sequence) AS minimum FROM session_events
-        WHERE session_id = $1 AND session_generation = $2`,
+  ): Promise<number> {
+    const result = await this.#pool.query<{
+      deleted_through: string;
+      minimum: string | null;
+    }>(
+      `SELECT coalesce(watermark.deleted_through_sequence, 0)::text AS deleted_through,
+              min(event.event_sequence)::text AS minimum
+         FROM session_generations generation
+         LEFT JOIN event_retention_watermarks watermark
+           ON watermark.session_id = generation.session_id
+          AND watermark.session_generation = generation.generation
+         LEFT JOIN session_events event
+           ON event.session_id = generation.session_id
+          AND event.session_generation = generation.generation
+        WHERE generation.session_id = $1 AND generation.generation = $2
+        GROUP BY watermark.deleted_through_sequence`,
       [sessionId, generation],
     );
-    const minimum = result.rows[0]?.minimum;
-    if (minimum !== null && minimum !== undefined && after < Number.parseInt(minimum, 10) - 1) {
+    const row = result.rows[0];
+    if (row === undefined) return after;
+    const minimumFloor = row.minimum === null ? 0 : Number.parseInt(row.minimum, 10) - 1;
+    const deletedThrough = Math.max(Number.parseInt(row.deleted_through, 10), minimumFloor);
+    if (after !== 0 && after < deletedThrough) {
       throw new RuntimeError("RESYNC_REQUIRED", "Cursor points before retained event history", {
-        minimumAvailableSequence: Number.parseInt(minimum, 10),
+        minimumAvailableSequence: deletedThrough + 1,
       });
     }
+    return Math.max(after, deletedThrough);
   }
 
   async #transaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {

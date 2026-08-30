@@ -6,6 +6,7 @@ import { RuntimeError } from "@iterminal/domain";
 import type { Pool, PoolClient } from "pg";
 
 import { migrateDatabase } from "./migrate.js";
+import { maintainEventRetention } from "./event-retention.js";
 import { createPostgresEndpointPool, type PostgresConnectionTarget } from "./postgres-endpoints.js";
 import { assertSessionFence, throwSessionLeaseLost } from "./session-fencing.js";
 import { actorFromRow, persistActor } from "./actors.js";
@@ -833,25 +834,7 @@ export class PostgresRuntimeRepository {
   }
 
   public async applyRetention(now: Date): Promise<number> {
-    const result = await this.#pool.query(
-      `WITH policy AS (
-         SELECT max_age_days, max_events_per_generation
-           FROM retention_policies WHERE scope = 'default'
-       ), ranked AS (
-         SELECT id, created_at,
-                row_number() OVER (
-                  PARTITION BY session_id, session_generation ORDER BY event_sequence DESC
-                ) AS newest_rank
-           FROM session_events
-       )
-       DELETE FROM session_events e
-        USING ranked r, policy p
-        WHERE e.id = r.id
-          AND (r.created_at < $1::timestamptz - make_interval(days => p.max_age_days)
-               OR r.newest_rank > p.max_events_per_generation)`,
-      [now],
-    );
-    return result.rowCount ?? 0;
+    return (await maintainEventRetention(this.#pool, now)).deletedEvents;
   }
 
   public async inspectSession(sessionId: string): Promise<{

@@ -3,7 +3,10 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "exports": "./src/maintenance.ts",
+  "exports": {
+    ".": "./src/maintenance.ts",
+    "./event-retention": "./src/event-retention.ts"
+  },
   "dependencies": {
     "@iterminal/persistence-postgres": "workspace:*"
   }

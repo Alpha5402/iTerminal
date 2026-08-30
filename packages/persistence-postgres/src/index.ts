@@ -1,4 +1,5 @@
 export * from "./action-rate-limit.js";
+export * from "./event-retention.js";
 export * from "./postgres-observation-repository.js";
 export * from "./postgres-messaging-repository.js";
 export * from "./postgres-endpoints.js";

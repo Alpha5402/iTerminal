@@ -30,6 +30,12 @@ describeDatabase("PostgresRuntimeRepository", () => {
 
   beforeEach(async () => {
     await pool.query("TRUNCATE sessions, actors, outbox RESTART IDENTITY CASCADE");
+    await pool.query(
+      `UPDATE retention_policies
+          SET max_age_days = 7, max_events_per_generation = 100000,
+              cleanup_batch_size = 10000, updated_at = now()
+        WHERE scope = 'default'`,
+    );
   });
 
   afterAll(async () => {

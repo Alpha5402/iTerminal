@@ -56,6 +56,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0050](./0050-human-only-secret-input-and-sensitive-output-redaction.md) | Keep Human secret bytes out of ordinary observations       | Accepted for M10.4       |
 | [0051](./0051-bounded-artifact-storage-and-maintenance.md)               | Bound Artifact bytes and reclaim expired content           | Accepted for M10.5       |
 | [0052](./0052-bounded-pty-output-event-coalescing.md)                    | Coalesce PTY callbacks without crossing truth boundaries   | Accepted for M10.6       |
+| [0053](./0053-bounded-cursor-safe-event-retention.md)                    | Delete bounded Event prefixes with explicit cursor resync  | Accepted for M10.7       |
 
 Statuses:
 

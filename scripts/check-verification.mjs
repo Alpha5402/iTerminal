@@ -62,6 +62,10 @@ const requiredReports = [
     level: "L2",
     path: "docs/verification/M10/2026-08-31-pty-output-event-coalescing.md",
   },
+  {
+    level: "L2",
+    path: "docs/verification/M10/2026-08-31-bounded-event-retention.md",
+  },
 ];
 
 for (const report of requiredReports) {
