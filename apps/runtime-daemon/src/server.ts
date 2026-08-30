@@ -32,6 +32,11 @@ import {
 
 export type { RuntimeDaemonDurabilityState } from "./postgres-recovery-supervisor.js";
 
+export interface RuntimeDaemonDrainState {
+  readonly pendingSessionCreations: number;
+  readonly phase: "DRAINING" | "SETTLED" | "TIMED_OUT";
+}
+
 export interface RuntimeDaemonHandle extends RuntimeRpcServerHandle {
   readonly durable: boolean;
   readonly runtime: RuntimeService;
@@ -43,6 +48,7 @@ export interface RuntimeDaemonHandle extends RuntimeRpcServerHandle {
 const DEFAULT_OWNER_LEASE_MILLISECONDS = 15_000;
 const DEFAULT_SESSION_LEASE_MILLISECONDS = 15_000;
 const DEFAULT_DATABASE_HEALTH_CHECK_MILLISECONDS = 1_000;
+const DEFAULT_DRAIN_TIMEOUT_MILLISECONDS = 5_000;
 
 export async function startRuntimeDaemon(options: {
   readonly actionRateLimitWindowMilliseconds?: number;
@@ -57,6 +63,8 @@ export async function startRuntimeDaemon(options: {
   readonly databaseReconnectInitialMilliseconds?: number;
   readonly databaseReconnectJitterRatio?: number;
   readonly databaseReconnectMaxMilliseconds?: number;
+  readonly drainTimeoutMilliseconds?: number;
+  readonly onDrainState?: (state: RuntimeDaemonDrainState) => void;
   readonly onDurabilityState?: (state: RuntimeDaemonDurabilityState) => void;
   readonly outboxMaxPending?: number;
   readonly ownerId?: string;
@@ -83,6 +91,8 @@ export async function startRuntimeDaemon(options: {
     (options.actionRateLimitWindowMilliseconds !== undefined ||
       options.actorActionRateLimit !== undefined ||
       options.beforeAcceptExecuteCommit !== undefined ||
+      options.drainTimeoutMilliseconds !== undefined ||
+      options.onDrainState !== undefined ||
       options.ownerInstanceId !== undefined ||
       options.ownerLeaseMilliseconds !== undefined ||
       options.sessionActionRateLimit !== undefined ||
@@ -105,8 +115,10 @@ export async function startRuntimeDaemon(options: {
       options.databaseReconnectInitialMilliseconds !== undefined ||
       options.databaseReconnectJitterRatio !== undefined ||
       options.databaseReconnectMaxMilliseconds !== undefined ||
+      options.drainTimeoutMilliseconds !== undefined ||
       options.executionDispatch !== undefined ||
       options.hooks !== undefined ||
+      options.onDrainState !== undefined ||
       options.onDurabilityState !== undefined ||
       options.outboxMaxPending !== undefined ||
       options.ownerInstanceId !== undefined ||
@@ -164,6 +176,10 @@ export async function startRuntimeDaemon(options: {
     options.databaseHealthCheckMilliseconds ?? DEFAULT_DATABASE_HEALTH_CHECK_MILLISECONDS,
     "databaseHealthCheckMilliseconds",
   );
+  const drainTimeoutMilliseconds = positiveInteger(
+    options.drainTimeoutMilliseconds ?? DEFAULT_DRAIN_TIMEOUT_MILLISECONDS,
+    "drainTimeoutMilliseconds",
+  );
   if (
     ownerRegistry !== undefined &&
     (ownerLeaseMilliseconds <= databaseHealthCheckMilliseconds * 2 ||
@@ -201,6 +217,7 @@ export async function startRuntimeDaemon(options: {
       ? { attempt: 0, phase: "DISABLED" }
       : { attempt: 0, phase: "CONNECTING" };
   const readyWaiters = new Set<Deferred<void>>();
+  let closing = false;
   let closed = false;
   const isReady = (): boolean =>
     !closed &&
@@ -275,8 +292,8 @@ export async function startRuntimeDaemon(options: {
     runtime,
     socketPath: rpcHandle.socketPath,
     close: () => {
-      if (!closed) {
-        closed = true;
+      if (!closing) {
+        closing = true;
         const failure = new RuntimeError(
           "RUNTIME_UNAVAILABLE",
           "Runtime daemon closed before PostgreSQL became ready",
@@ -293,11 +310,20 @@ export async function startRuntimeDaemon(options: {
         ownerRegistry,
         supervisor,
         durabilityState,
+        drainTimeoutMilliseconds,
         ownerLeaseMilliseconds,
-      );
+        options.onDrainState,
+      ).finally(() => {
+        closed = true;
+      });
       return closePromise;
     },
     waitUntilReady: () => {
+      if (closing) {
+        return Promise.reject(
+          new RuntimeError("RUNTIME_UNAVAILABLE", "Runtime daemon is closing", {}, true),
+        );
+      }
       if (isReady()) return Promise.resolve();
       if (closed) {
         return Promise.reject(
@@ -318,7 +344,9 @@ async function closeDaemon(
   ownerRegistry: PostgresRuntimeOwnerRegistry | undefined,
   supervisor: PostgresRecoverySupervisor | undefined,
   durabilityState: RuntimeDaemonDurabilityState,
+  drainTimeoutMilliseconds: number,
   ownerLeaseMilliseconds: number,
+  onDrainState: ((state: RuntimeDaemonDrainState) => void) | undefined,
 ): Promise<void> {
   const errors: unknown[] = [];
   const ownerRegistration = supervisor?.ownerRegistration();
@@ -327,19 +355,41 @@ async function closeDaemon(
     runtime.isDurabilityHealthy() &&
     ownerRegistration !== undefined;
   if (canPersistShutdown && ownerRegistry !== undefined && ownerRegistration !== undefined) {
-    await ownerRegistry
-      .beginOwnerDrain(ownerRegistration, ownerLeaseMilliseconds)
-      .then((draining) => {
-        runtime.activateDurableOwner(draining);
-        return runtime.renewDurableSessionLeases();
-      })
-      .catch((error: unknown) => {
-        errors.push(error);
-        runtime.reportDurabilityUnavailable(error);
-        canPersistShutdown = false;
+    try {
+      const draining = await ownerRegistry.beginOwnerDrain(
+        ownerRegistration,
+        ownerLeaseMilliseconds,
+      );
+      runtime.activateDurableOwner(draining);
+      await runtime.renewDurableSessionLeases();
+      const deadline = Date.now() + drainTimeoutMilliseconds;
+      let pendingSessionCreations = await ownerRegistry.countPendingSessionCreations(draining);
+      reportDrainState(onDrainState, {
+        pendingSessionCreations,
+        phase: "DRAINING",
       });
+      while (pendingSessionCreations > 0 && Date.now() < deadline) {
+        await delay(Math.min(25, Math.max(1, deadline - Date.now())));
+        pendingSessionCreations = await ownerRegistry.countPendingSessionCreations(draining);
+      }
+      const remainingMilliseconds = Math.max(1, deadline - Date.now());
+      const rpcDrained =
+        rpc.drain === undefined
+          ? await rpc.close().then(() => true)
+          : await rpc.drain(remainingMilliseconds);
+      reportDrainState(onDrainState, {
+        pendingSessionCreations,
+        phase: pendingSessionCreations === 0 && rpcDrained ? "SETTLED" : "TIMED_OUT",
+      });
+    } catch (error) {
+      errors.push(error);
+      runtime.reportDurabilityUnavailable(error);
+      canPersistShutdown = false;
+      await rpc.close().catch((closeError: unknown) => errors.push(closeError));
+    }
+  } else {
+    await rpc.close().catch((error: unknown) => errors.push(error));
   }
-  await rpc.close().catch((error: unknown) => errors.push(error));
   if (canPersistShutdown && runtime.isDurabilityHealthy()) {
     for (const session of runtime.listSessions()) {
       if (session.status !== "CLOSED" && session.status !== "BROKEN") {
@@ -365,6 +415,21 @@ async function closeDaemon(
   if (errors.length > 0) {
     throw new AggregateError(errors, "Runtime daemon did not close cleanly");
   }
+}
+
+function reportDrainState(
+  report: ((state: RuntimeDaemonDrainState) => void) | undefined,
+  state: RuntimeDaemonDrainState,
+): void {
+  try {
+    report?.(state);
+  } catch {
+    // Diagnostics must not change Runtime shutdown semantics.
+  }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }
 
 function positiveInteger(value: number, name: string): number {

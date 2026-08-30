@@ -208,6 +208,46 @@ describe("UnixRuntimeClient delivery classification", () => {
       await rm(fixture, { force: true, recursive: true });
     }
   });
+
+  it("stops accepting new sockets while an active response drains successfully", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-drain-active-"));
+    let announceStarted!: () => void;
+    let releaseResponse!: () => void;
+    const started = new Promise<void>((resolve) => {
+      announceStarted = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      releaseResponse = resolve;
+    });
+    const server = await startRuntimeRpcServer({
+      gateway: {
+        ...stubGateway(),
+        listSessions: async () => {
+          announceStarted();
+          await released;
+          return [];
+        },
+      },
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    const client = new UnixRuntimeClient(server.socketPath);
+    const response = client.listSessions();
+    try {
+      await started;
+      if (server.drain === undefined) throw new Error("RPC drain capability is missing");
+      const draining = server.drain(1_000);
+      releaseResponse();
+      await expect(response).resolves.toEqual([]);
+      await expect(draining).resolves.toBe(true);
+      await expect(new UnixRuntimeClient(server.socketPath).listSessions()).rejects.toMatchObject({
+        code: "RUNTIME_UNAVAILABLE",
+      });
+    } finally {
+      releaseResponse();
+      await server.close().catch(() => undefined);
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
 });
 
 function missingSocket(suffix: string): string {

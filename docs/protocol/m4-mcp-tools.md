@@ -29,7 +29,7 @@ M9.6 isolates one Runtime's PostgreSQL path behind a silent blackhole. Its query
 
 M9.7 makes two Router crash boundaries explicit. A placement claim committed before owner forwarding remains a consumed attempt even if no Session is created. A successful owner mutation whose Router response is lost remains owner-authoritative; the Router never retries it across owners. The client observes `DELIVERY_UNKNOWN` and may settle an idempotent operation such as `execution.start` only with its original identity and idempotency key.
 
-M9.8 gives root `session.create` its own global idempotency key and durable placement intent. M9.9 keeps a database-partitioned Router fail closed without cached routing. M9.10 lets the production Router bind its local socket in `CONNECTING`, retry migration in the background, and expose route-phase `RUNTIME_UNAVAILABLE` until PostgreSQL is READY. A raw route-query failure returns the gate to `UNAVAILABLE`; healthy Routers and owners remain independent. M9.11 bounds caller-controlled root-creation keys with one PostgreSQL policy shared by every Router and trusted-local Runtime fallback. Active Sessions and work still owned by an exact live incarnation remain pinned; only retained terminal/stale work is cleaned.
+M9.8 gives root `session.create` its own global idempotency key and durable placement intent. M9.9 keeps a database-partitioned Router fail closed without cached routing. M9.10 lets the production Router bind its local socket in `CONNECTING`, retry migration in the background, and expose route-phase `RUNTIME_UNAVAILABLE` until PostgreSQL is READY. A raw route-query failure returns the gate to `UNAVAILABLE`; healthy Routers and owners remain independent. M9.11 bounds caller-controlled root-creation keys with one PostgreSQL policy shared by every Router and trusted-local Runtime fallback. Active Sessions and work still owned by an exact live incarnation remain pinned; only retained terminal/stale work is cleaned. M9.12 makes graceful drain settle placement committed before `DRAINING`: the Runtime keeps RPC available while exact-owner unfinished root-create intents remain, then gracefully drains accepted responses before closing Sessions and persisting `STOPPED`. One deadline bounds both phases. Timeout does not move the intent to another owner or claim successful delivery.
 
 | Environment variable                  | Default                         |
 | ------------------------------------- | ------------------------------- |
@@ -37,6 +37,7 @@ M9.8 gives root `session.create` its own global idempotency key and durable plac
 | `ITERM_RUNTIME_OWNER_INSTANCE_ID`     | random boot-unique UUID         |
 | `ITERM_RUNTIME_OWNER_LEASE_MS`        | `15000`                         |
 | `ITERM_SESSION_LEASE_MS`              | `15000`                         |
+| `ITERM_RUNTIME_DRAIN_TIMEOUT_MS`      | `5000`                          |
 | `ITERM_DATABASE_HEALTH_CHECK_MS`      | `1000`                          |
 | `ITERM_DATABASE_RECONNECT_INITIAL_MS` | `250`                           |
 | `ITERM_DATABASE_RECONNECT_MAX_MS`     | `30000`                         |
@@ -45,7 +46,7 @@ M9.8 gives root `session.create` its own global idempotency key and durable plac
 | `ITERM_SESSION_ACTION_RATE_LIMIT`     | `240`                           |
 | `ITERM_ACTION_RATE_LIMIT_WINDOW_MS`   | `1000`                          |
 
-The owner and Session leases must each exceed two database health-check intervals. Session expiry is capped at the current owner lease expiry. The production Runtime Router uses the health/reconnect/statement-timeout values for degraded startup and recovery. These settings are valid only with `ITERM_DATABASE_URL`.
+The owner and Session leases must each exceed two database health-check intervals. Session expiry is capped at the current owner lease expiry. The drain timeout is one shared budget for pending root-create settlement and accepted RPC response drain; expiry proceeds to Session closure without reassigning exact-owner work. The production Runtime Router uses the health/reconnect/statement-timeout values for degraded startup and recovery. These settings are valid only with `ITERM_DATABASE_URL`.
 
 ## Actor configuration
 

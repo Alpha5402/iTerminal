@@ -212,6 +212,29 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
     });
   }
 
+  public async countPendingSessionCreations(identity: RuntimeOwnerIdentity): Promise<number> {
+    validateIdentity(identity);
+    const pending = await this.#pool.query<{ request_count: string }>(
+      `SELECT count(*)::text AS request_count
+         FROM session_creation_requests
+        WHERE owner_id = $1
+          AND owner_instance_id = $2
+          AND owner_registry_epoch = $3
+          AND session_id IS NULL`,
+      [identity.ownerId, identity.instanceId, identity.epoch],
+    );
+    const requestCount = Number(pending.rows[0]?.request_count);
+    if (!Number.isSafeInteger(requestCount) || requestCount < 0) {
+      throw new RuntimeError(
+        "RUNTIME_UNAVAILABLE",
+        "Pending Session creation count is invalid",
+        { ownerId: identity.ownerId, requestCount: pending.rows[0]?.request_count },
+        true,
+      );
+    }
+    return requestCount;
+  }
+
   public async claimSessionCreation(input: {
     readonly idempotencyKey: string;
     readonly requestHash: string;

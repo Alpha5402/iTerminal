@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import type { Session } from "@iterminal/domain";
@@ -952,6 +952,110 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
     ]);
   }, 120_000);
 
+  it("settles a pre-drain placement before the selected Runtime stops", async () => {
+    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m912-drain-")));
+    fixtures.push(root);
+    const workspace = join(root, "workspace");
+    await mkdir(workspace, { recursive: true });
+    const ownerA = await startRuntimeChild(
+      root,
+      "owner-drain-a",
+      "instance-drain-a",
+      join(root, "a.sock"),
+    );
+    const ownerB = await startRuntimeChild(
+      root,
+      "owner-drain-b",
+      "instance-drain-b",
+      join(root, "b.sock"),
+    );
+    children.push(ownerA, ownerB);
+    const releasePath = join(root, "release-placement");
+    const routerSocket = join(root, "router.sock");
+    const router = startChild(
+      "router-delayed-placement",
+      "apps/runtime-router/src/fixtures/delayed-placement-router.ts",
+      {
+        ITERM_DATABASE_URL: databaseUrl ?? "",
+        ITERM_ROUTER_SOCKET: routerSocket,
+        ITERM_TEST_DELAY_OWNER_ID: "owner-drain-a",
+        ITERM_TEST_DELAY_RELEASE_PATH: releasePath,
+      },
+    );
+    children.push(router);
+    await waitForText(router, "Runtime Router listening", 15_000);
+    const client = new UnixRuntimeClient(routerSocket);
+    const drainingRequest = {
+      idempotencyKey: "m912-pre-drain-create",
+      shell: "zsh" as const,
+      workspaceRoot: workspace,
+    };
+    const pendingCreation = client.createSession(drainingRequest);
+    void pendingCreation.catch(() => undefined);
+    await waitForText(router, "placement paused owner=owner-drain-a", 10_000);
+    const claimed = await pool.query<{ session_id: string | null }>(
+      "SELECT session_id FROM session_creation_requests WHERE idempotency_key = $1",
+      [drainingRequest.idempotencyKey],
+    );
+    expect(claimed.rows).toEqual([{ session_id: null }]);
+
+    ownerA.process.kill("SIGTERM");
+    await waitForOwnerStatus("owner-drain-a", "DRAINING");
+    await waitForText(ownerA, "Runtime drain draining pending_session_creations=1", 10_000);
+    expect(ownerA.process.exitCode).toBeNull();
+
+    const healthy = await client.createSession({
+      idempotencyKey: "m912-healthy-create",
+      shell: "zsh",
+      workspaceRoot: workspace,
+    });
+    expect(healthy.ownerId).toBe("owner-drain-b");
+    const healthyExecution = await client.startExecute({
+      actor: actor("drain-healthy"),
+      command: "printf m912-drain-healthy",
+      idempotencyKey: "m912-drain-healthy-execute",
+      sessionGeneration: healthy.generation,
+      sessionId: healthy.id,
+    });
+    expect((await client.waitExecution(healthyExecution.execution.id)).output).toContain(
+      "m912-drain-healthy",
+    );
+
+    await writeFile(releasePath, "release\n", "utf8");
+    const settled = await pendingCreation;
+    expect(settled.ownerId).toBe("owner-drain-a");
+    await waitForText(ownerA, "Runtime drain settled pending_session_creations=0", 10_000);
+    await waitForExit(ownerA, 15_000);
+    expect(ownerA.process.exitCode).toBe(0);
+    const durable = await pool.query<{
+      owner_status: string;
+      session_id: string;
+      session_status: string;
+    }>(
+      `SELECT worker.status AS owner_status,
+              request.session_id,
+              session.status AS session_status
+         FROM session_creation_requests AS request
+         JOIN sessions AS session ON session.id = request.session_id
+         JOIN runtime_workers AS worker ON worker.owner_id = request.owner_id
+        WHERE request.idempotency_key = $1`,
+      [drainingRequest.idempotencyKey],
+    );
+    expect(durable.rows).toEqual([
+      {
+        owner_status: "STOPPED",
+        session_id: settled.id,
+        session_status: "CLOSED",
+      },
+    ]);
+    expect(
+      await pool.query(
+        `SELECT 1 FROM session_creation_requests
+          WHERE owner_id = 'owner-drain-a' AND session_id IS NULL`,
+      ),
+    ).toMatchObject({ rowCount: 0 });
+  }, 120_000);
+
   async function startRuntimeChild(
     root: string,
     ownerId: string,
@@ -968,6 +1072,7 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
       ITERM_RUNTIME_OWNER_ID: ownerId,
       ITERM_RUNTIME_OWNER_INSTANCE_ID: instanceId,
       ITERM_RUNTIME_OWNER_LEASE_MS: "2000",
+      ITERM_RUNTIME_DRAIN_TIMEOUT_MS: "5000",
       ITERM_RUNTIME_SOCKET: socketPath,
       ITERM_SESSION_LEASE_MS: "2000",
       TMPDIR: root,

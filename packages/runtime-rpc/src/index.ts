@@ -421,6 +421,7 @@ type RpcResponse =
 export interface RuntimeRpcServerHandle {
   readonly socketPath: string;
   close(): Promise<void>;
+  drain?(timeoutMilliseconds: number): Promise<boolean>;
 }
 
 export async function startRuntimeRpcServer(options: {
@@ -450,20 +451,51 @@ export async function startRuntimeRpcServer(options: {
     await unlink(options.socketPath).catch(() => undefined);
     throw error;
   }
-  let closed = false;
+  let closePromise: Promise<void> | undefined;
+  let drainPromise: Promise<boolean> | undefined;
+  const removeSocketPath = async (): Promise<void> => {
+    await unlink(options.socketPath).catch((error: unknown) => {
+      if (!isNodeError(error, "ENOENT")) {
+        throw error;
+      }
+    });
+  };
   return {
     socketPath: options.socketPath,
-    close: async () => {
-      if (closed) {
-        return;
-      }
-      closed = true;
-      await closeServer(server, activeSockets, activeResponses);
-      await unlink(options.socketPath).catch((error: unknown) => {
-        if (!isNodeError(error, "ENOENT")) {
-          throw error;
+    close: () => {
+      closePromise ??= (async () => {
+        if (drainPromise !== undefined) {
+          await drainPromise;
+          return;
         }
-      });
+        await closeServer(server, activeSockets, activeResponses);
+        await removeSocketPath();
+      })();
+      return closePromise;
+    },
+    drain: (timeoutMilliseconds) => {
+      if (!Number.isSafeInteger(timeoutMilliseconds) || timeoutMilliseconds <= 0) {
+        return Promise.reject(
+          new RuntimeError("INVALID_REQUEST", "RPC drain timeout must be a positive integer", {
+            timeoutMilliseconds,
+          }),
+        );
+      }
+      drainPromise ??= (async () => {
+        if (closePromise !== undefined) {
+          await closePromise;
+          return false;
+        }
+        const drained = await drainServer(
+          server,
+          activeSockets,
+          activeResponses,
+          timeoutMilliseconds,
+        );
+        await removeSocketPath();
+        return drained;
+      })();
+      return drainPromise;
     },
   };
 }
@@ -1085,6 +1117,31 @@ async function closeServer(
     for (const socket of activeSockets) socket.destroy();
   });
   await Promise.allSettled([...activeResponses]);
+}
+
+async function drainServer(
+  server: Server,
+  activeSockets: ReadonlySet<Socket>,
+  activeResponses: ReadonlySet<Promise<void>>,
+  timeoutMilliseconds: number,
+): Promise<boolean> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const serverClosed = new Promise<void>((resolve, reject) => {
+    server.close((error) => (error === undefined ? resolve() : reject(error)));
+  });
+  const drained = await Promise.race([
+    serverClosed.then(() => true),
+    new Promise<false>((resolveTimeout) => {
+      timeout = setTimeout(() => resolveTimeout(false), timeoutMilliseconds);
+    }),
+  ]);
+  if (timeout !== undefined) clearTimeout(timeout);
+  if (!drained) {
+    for (const socket of activeSockets) socket.destroy();
+    await serverClosed;
+  }
+  await Promise.allSettled([...activeResponses]);
+  return drained;
 }
 
 function normalizeError(error: unknown): RuntimeError {

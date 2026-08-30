@@ -43,6 +43,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0037](./0037-router-database-partition-isolation.md)             | Fail a database-partitioned Router closed                  | Accepted for M9.9        |
 | [0038](./0038-router-cold-start-database-supervision.md)          | Keep Router alive through database cold-start failure      | Accepted for M9.10       |
 | [0039](./0039-bounded-session-creation-idempotency.md)            | Bound root Session idempotency without deleting live truth | Accepted for M9.11       |
+| [0040](./0040-bounded-runtime-drain-settlement.md)                | Settle pre-drain placement before stopping an owner        | Accepted for M9.12       |
 
 Statuses:
 

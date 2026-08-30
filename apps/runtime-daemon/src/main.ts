@@ -1,6 +1,7 @@
 import {
   defaultRuntimeSocketPath,
   startRuntimeDaemon,
+  type RuntimeDaemonDrainState,
   type RuntimeDaemonDurabilityState,
 } from "./server.js";
 
@@ -26,6 +27,7 @@ const databaseReconnectInitialMilliseconds = optionalPositiveInteger(
 );
 const databaseReconnectMaxMilliseconds = optionalPositiveInteger("ITERM_DATABASE_RECONNECT_MAX_MS");
 const databaseHealthCheckMilliseconds = optionalPositiveInteger("ITERM_DATABASE_HEALTH_CHECK_MS");
+const drainTimeoutMilliseconds = optionalPositiveInteger("ITERM_RUNTIME_DRAIN_TIMEOUT_MS");
 const daemon = await startRuntimeDaemon({
   socketPath,
   ...(actionRateLimitWindowMilliseconds === undefined ? {} : { actionRateLimitWindowMilliseconds }),
@@ -42,11 +44,13 @@ const daemon = await startRuntimeDaemon({
     : { databaseReconnectInitialMilliseconds }),
   ...(databaseReconnectMaxMilliseconds === undefined ? {} : { databaseReconnectMaxMilliseconds }),
   ...(databaseHealthCheckMilliseconds === undefined ? {} : { databaseHealthCheckMilliseconds }),
+  ...(drainTimeoutMilliseconds === undefined ? {} : { drainTimeoutMilliseconds }),
   ...(ownerId === undefined ? {} : { ownerId }),
   ...(ownerInstanceId === undefined ? {} : { ownerInstanceId }),
   ...(ownerLeaseMilliseconds === undefined ? {} : { ownerLeaseMilliseconds }),
   ...(sessionLeaseMilliseconds === undefined ? {} : { sessionLeaseMilliseconds }),
   ...(sessionActionRateLimit === undefined ? {} : { sessionActionRateLimit }),
+  onDrainState: reportDrainState,
   onDurabilityState: reportDurabilityState,
 });
 process.stderr.write(
@@ -101,5 +105,11 @@ function reportDurabilityState(state: RuntimeDaemonDurabilityState): void {
         ? ""
         : ` retry_ms=${state.retryInMilliseconds.toString()}`
     }${state.error === undefined ? "" : ` error=${JSON.stringify(state.error)}`}\n`,
+  );
+}
+
+function reportDrainState(state: RuntimeDaemonDrainState): void {
+  process.stderr.write(
+    `iTerminal Runtime drain ${state.phase.toLowerCase()} pending_session_creations=${state.pendingSessionCreations.toString()}\n`,
   );
 }
