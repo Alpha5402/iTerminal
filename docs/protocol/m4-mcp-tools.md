@@ -17,16 +17,19 @@ A PostgreSQL-backed daemon registers its stable logical `ownerId`, boot-unique `
 
 The registry is discovery and lifecycle state, not a Session lease. Registry epoch protects only registry-row updates. M9.2's stateless Router uses PostgreSQL to select an ACTIVE owner for `session.create`, route exact Session/Execution operations to an ACTIVE or DRAINING owner, and fail closed when a route is missing, stopped, expired, or unreachable. It reuses the Runtime RPC protocol and never owns a PTY.
 
-`OWNER_ROUTE_UNAVAILABLE` means routing failed before a usable owner result was obtained. An exact target that exists without a live route is not recreated. If a mutating forward may have reached the registered endpoint, the result remains `DELIVERY_UNKNOWN`; the Router does not retry it. Registry routing still is not generation-scoped Session fencing, so stale durable-write rejection remains M9.3 work.
+`OWNER_ROUTE_UNAVAILABLE` means routing failed before a usable owner result was obtained. An exact target that exists without a live route is not recreated. If a mutating forward may have reached the registered endpoint, the result remains `DELIVERY_UNKNOWN`; the Router does not retry it.
+
+M9.3 adds a separate generation-scoped Session lease. Root/fork creation acquires it for the exact owner instance; the daemon renews only its in-memory exact fence set, and lease expiry never exceeds owner expiry. Every live durable mutation validates owner ID, boot instance, registry epoch, Session ID, generation, and fencing token in its PostgreSQL transaction. Execution transitions additionally compare their own expected version. `SESSION_LEASE_LOST` is non-retryable because PTY bytes may already have been written; it trips the owner-wide circuit and closes local PTYs best-effort. Recovery marks the old generation `BROKEN`, ambiguous Execution state `UNKNOWN`, and rebuilds only as a new Session—never as live PTY takeover.
 
 | Environment variable              | Default                         |
 | --------------------------------- | ------------------------------- |
 | `ITERM_RUNTIME_OWNER_ID`          | derived from the Runtime socket |
 | `ITERM_RUNTIME_OWNER_INSTANCE_ID` | random boot-unique UUID         |
 | `ITERM_RUNTIME_OWNER_LEASE_MS`    | `15000`                         |
+| `ITERM_SESSION_LEASE_MS`          | `15000`                         |
 | `ITERM_DATABASE_HEALTH_CHECK_MS`  | `1000`                          |
 
-The owner lease must exceed two database health-check intervals. These settings are valid only with `ITERM_DATABASE_URL`.
+The owner and Session leases must each exceed two database health-check intervals. Session expiry is capped at the current owner lease expiry. These settings are valid only with `ITERM_DATABASE_URL`.
 
 ## Actor configuration
 

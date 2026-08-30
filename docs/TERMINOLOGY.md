@@ -26,6 +26,9 @@ These terms are protocol contracts. Avoid synonyms in code and public APIs unles
 | Owner              | Worker/process that physically holds a generation's live PTY. It is not a Human/Agent role.      |
 | Owner instance     | One boot-unique Runtime process incarnation registered beneath a stable logical owner ID.        |
 | Registry epoch     | Monotonic owner-incarnation number; fences registry writes but is not a Session fencing token.   |
+| Session lease      | Database-time authority held by one exact owner incarnation for one Session generation.          |
+| Fencing token      | Globally monotonic Session-lease token checked inside every live durable mutation transaction.   |
+| Execution version  | Optimistic version for one Execution transition; independent of owner identity and fencing.      |
 | Runtime Router     | Stateless local RPC adapter that resolves durable owner routes and forwards to the exact daemon. |
 | `UNKNOWN`          | The Runtime cannot prove whether a write or external side effect occurred/completed.             |
 | `BROKEN`           | The generation's PTY/Shell/owner/control protocol is lost or no longer trustworthy.              |
@@ -42,6 +45,7 @@ These terms are protocol contracts. Avoid synonyms in code and public APIs unles
 - Rebuild/fork != PTY or process clone.
 - Fencing stale database writes != undoing external side effects.
 - Owner route freshness != generation-scoped Session fencing or PTY failover.
+- Registry epoch != Session fencing token != Execution expected version.
 
 ## TerminalState evidence boundary
 

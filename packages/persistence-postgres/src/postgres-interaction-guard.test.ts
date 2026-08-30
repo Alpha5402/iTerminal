@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 
 import type { Actor, InteractionState, RuntimeError, Session } from "@iterminal/domain";
+import type { RuntimeOwnerRecord } from "@iterminal/application";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { PostgresRuntimeDurability } from "./postgres-runtime-durability.js";
+import { PostgresRuntimeOwnerRegistry } from "./postgres-runtime-owner-registry.js";
 
 const databaseUrl = process.env.ITERM_DATABASE_URL;
 const describeDatabase = databaseUrl === undefined ? describe.skip : describe;
@@ -17,7 +19,9 @@ const human: Actor = {
 
 describeDatabase("PostgreSQL Interaction Guard state", () => {
   const durability = new PostgresRuntimeDurability(databaseUrl ?? "");
+  const registry = new PostgresRuntimeOwnerRegistry(databaseUrl ?? "");
   const pool = new Pool({ connectionString: databaseUrl });
+  let owner: RuntimeOwnerRecord;
 
   beforeAll(async () => {
     const database = await pool.query<{ current_database: string }>("SELECT current_database()");
@@ -28,17 +32,29 @@ describeDatabase("PostgreSQL Interaction Guard state", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("TRUNCATE sessions, actors, outbox RESTART IDENTITY CASCADE");
+    await pool.query("TRUNCATE sessions, actors, outbox, runtime_workers RESTART IDENTITY CASCADE");
+    owner = await registry.registerOwner({
+      endpoint: "/private/tmp/iterminal-guard-test.sock",
+      instanceId: `guard_${randomUUID()}`,
+      leaseMilliseconds: 60_000,
+      ownerId: "owner-postgres-guard",
+    });
   });
 
   afterAll(async () => {
     await durability.close();
+    await registry.close();
     await pool.end();
   });
 
   it("commits state and Event atomically with one expected-version winner", async () => {
     const session = sessionFixture();
-    await durability.createSession(session, [eventFixture(session, "session.created")]);
+    const fence = await durability.createSession(
+      session,
+      [eventFixture(session, "session.created")],
+      owner,
+      60_000,
+    );
     const humanOnly: InteractionState = {
       policy: "human_only",
       sessionGeneration: session.generation,
@@ -48,11 +64,13 @@ describeDatabase("PostgreSQL Interaction Guard state", () => {
     const agentOnly: InteractionState = { ...humanOnly, policy: "agent_only" };
     const attempts = await Promise.allSettled([
       durability.saveInteractionState(
+        fence,
         humanOnly,
         1,
         eventFixture(session, "interaction.policy_changed", human),
       ),
       durability.saveInteractionState(
+        fence,
         agentOnly,
         1,
         eventFixture(session, "interaction.policy_changed", human),
@@ -87,7 +105,12 @@ describeDatabase("PostgreSQL Interaction Guard state", () => {
 
   it("persists the full bounded Guard and rolls back an invalid renewal", async () => {
     const session = sessionFixture();
-    await durability.createSession(session, [eventFixture(session, "session.created")]);
+    const fence = await durability.createSession(
+      session,
+      [eventFixture(session, "session.created")],
+      owner,
+      60_000,
+    );
     const guarded: InteractionState = {
       guard: {
         acquiredAt: "2026-08-30T00:00:00.000Z",
@@ -104,6 +127,7 @@ describeDatabase("PostgreSQL Interaction Guard state", () => {
       version: 2,
     };
     await durability.saveInteractionState(
+      fence,
       guarded,
       1,
       eventFixture(session, "interaction.guard_acquired", human),
@@ -131,6 +155,7 @@ describeDatabase("PostgreSQL Interaction Guard state", () => {
 
     await expect(
       durability.saveInteractionState(
+        fence,
         {
           ...guarded,
           guard: { ...activeGuard, renewals: 4 },

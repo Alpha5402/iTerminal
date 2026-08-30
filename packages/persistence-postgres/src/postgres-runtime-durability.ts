@@ -7,7 +7,10 @@ import type {
   DurableOwnerRecoveryResult,
   DurableRebuildableSession,
   DurableSessionEvent,
+  RuntimeOwnerIdentity,
   RuntimeDurability,
+  SessionFence,
+  SessionLease,
 } from "@iterminal/application";
 import type {
   Actor,
@@ -30,6 +33,15 @@ import { Pool, type PoolClient } from "pg";
 import { PostgresObservationRepository } from "./postgres-observation-repository.js";
 import { guardPostgresPool } from "./postgres-pool.js";
 import { PostgresRuntimeRepository } from "./postgres-runtime-repository.js";
+import {
+  assertRuntimeOwner,
+  assertSessionFence,
+  createSessionLease,
+  releaseSessionLease,
+  sessionLease,
+  type SessionLeaseRow,
+  throwSessionLeaseLost,
+} from "./session-fencing.js";
 
 export interface PostgresRuntimeDurabilityOptions {
   readonly beforeAcceptExecuteCommit?: () => void;
@@ -58,8 +70,13 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
         statement_timeout: statementTimeoutMilliseconds,
       }),
     );
-    this.#observation = new PostgresObservationRepository(connectionString);
-    this.#admission = new PostgresRuntimeRepository(connectionString, options);
+    this.#observation = new PostgresObservationRepository(connectionString, {
+      requireSessionFence: true,
+    });
+    this.#admission = new PostgresRuntimeRepository(connectionString, {
+      ...options,
+      requireSessionFence: true,
+    });
   }
 
   public async migrate(): Promise<void> {
@@ -77,8 +94,12 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
   public async createSession(
     session: Session,
     events: readonly DurableSessionEvent[],
-  ): Promise<void> {
-    await this.#transaction(async (client) => {
+    owner: RuntimeOwnerIdentity,
+    leaseMilliseconds: number,
+  ): Promise<SessionLease> {
+    return this.#transaction(async (client) => {
+      assertSessionOwner(session, owner);
+      await assertRuntimeOwner(client, owner);
       await client.query(
         `INSERT INTO sessions
           (id, current_generation, status, shell, workspace_root, owner_id,
@@ -108,11 +129,111 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
          VALUES ($1, $2, 'human_guarded', 1)`,
         [session.id, session.generation],
       );
+      const lease = await createSessionLease(client, {
+        generation: session.generation,
+        leaseMilliseconds,
+        owner,
+        sessionId: session.id,
+      });
       await insertEvents(client, events);
+      return lease;
+    });
+  }
+
+  public async renewSessionLeases(
+    owner: RuntimeOwnerIdentity,
+    leases: readonly SessionFence[],
+    leaseMilliseconds: number,
+  ): Promise<readonly SessionLease[]> {
+    positiveInteger(leaseMilliseconds, "leaseMilliseconds");
+    if (leases.length === 0) {
+      await this.#transaction((client) => assertRuntimeOwner(client, owner));
+      return [];
+    }
+    return this.#transaction(async (client) => {
+      const currentOwner = await assertRuntimeOwner(client, owner);
+      for (const lease of leases) {
+        if (
+          lease.ownerId !== owner.ownerId ||
+          lease.instanceId !== owner.instanceId ||
+          lease.epoch !== owner.epoch
+        ) {
+          throwSessionLeaseLost(lease);
+        }
+      }
+      const requested = leases.map((lease) => ({
+        fencingToken: lease.fencingToken,
+        generation: lease.generation,
+        sessionId: lease.sessionId,
+      }));
+      const renewed = await client.query<{
+        acquired_at: Date;
+        fencing_token: string;
+        lease_expires_at: Date;
+        owner_id: string;
+        owner_instance_id: string;
+        owner_registry_epoch: string;
+        renewed_at: Date;
+        session_generation: number;
+        session_id: string;
+        version: string;
+      }>(
+        `WITH requested AS (
+           SELECT * FROM jsonb_to_recordset($4::jsonb)
+             AS item(session_id text, generation integer, fencing_token bigint)
+         )
+         UPDATE session_leases lease
+            SET renewed_at = now(),
+                lease_expires_at = LEAST(
+                  $5::timestamptz,
+                  now() + ($6::bigint * interval '1 millisecond')
+                ),
+                version = lease.version + 1
+           FROM requested
+          WHERE lease.session_id = requested.session_id
+            AND lease.session_generation = requested.generation
+            AND lease.fencing_token = requested.fencing_token
+            AND lease.owner_id = $1 AND lease.owner_instance_id = $2
+            AND lease.owner_registry_epoch = $3
+            AND lease.released_at IS NULL AND lease.lease_expires_at > now()
+         RETURNING lease.session_id, lease.session_generation, lease.owner_id,
+                   lease.owner_instance_id, lease.owner_registry_epoch::text,
+                   lease.fencing_token::text, lease.acquired_at, lease.renewed_at,
+                   lease.lease_expires_at, lease.version::text`,
+        [
+          owner.ownerId,
+          owner.instanceId,
+          owner.epoch,
+          JSON.stringify(
+            requested.map((item) => ({
+              fencing_token: item.fencingToken,
+              generation: item.generation,
+              session_id: item.sessionId,
+            })),
+          ),
+          currentOwner.leaseExpiresAt,
+          leaseMilliseconds,
+        ],
+      );
+      if (renewed.rows.length !== leases.length) throwSessionLeaseLost(leases[0] as SessionFence);
+      const byScope = new Map(
+        renewed.rows.map((row) => [
+          `${row.session_id}:${row.session_generation.toString()}:${row.fencing_token}`,
+          sessionLease(row),
+        ]),
+      );
+      return leases.map((lease) => {
+        const renewedLease = byScope.get(
+          `${lease.sessionId}:${lease.generation.toString()}:${lease.fencingToken}`,
+        );
+        if (renewedLease === undefined) throwSessionLeaseLost(lease);
+        return renewedLease;
+      });
     });
   }
 
   public async markSessionReady(
+    fence: SessionFence,
     session: Session,
     shellPid: number,
     event: DurableSessionEvent,
@@ -120,6 +241,8 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
     additionalEvents: readonly DurableSessionEvent[] = [],
   ): Promise<void> {
     await this.#transaction(async (client) => {
+      await assertSessionFence(client, fence);
+      assertFenceSession(fence, session);
       await expectOne(
         client,
         `UPDATE sessions SET status = 'READY', updated_at = now()
@@ -145,8 +268,29 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
     });
   }
 
-  public async createForkSession(input: DurableForkAdmission): Promise<void> {
-    await this.#transaction(async (client) => {
+  public async createForkSession(
+    input: DurableForkAdmission,
+    owner: RuntimeOwnerIdentity,
+    leaseMilliseconds: number,
+    parentFence?: SessionFence,
+  ): Promise<SessionLease> {
+    return this.#transaction(async (client) => {
+      assertSessionOwner(input.child, owner);
+      await assertRuntimeOwner(client, owner);
+      if (
+        input.parent.status === "READY" ||
+        input.parent.status === "RESERVED" ||
+        input.parent.status === "RUNNING"
+      ) {
+        if (parentFence === undefined) {
+          throw new RuntimeError("SESSION_LEASE_LOST", "Live fork parent has no Session fence", {
+            generation: input.parent.generation,
+            sessionId: input.parent.id,
+          });
+        }
+        await assertSessionFence(client, parentFence);
+        assertFenceSession(parentFence, input.parent);
+      }
       await upsertActor(client, input.actor);
       const parent = await client.query<{ status: SessionStatus }>(
         `SELECT status
@@ -181,7 +325,14 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
             { childSessionId: replay.child_session_id },
           );
         }
-        return;
+        const lease = await selectSessionLease(client, input.child.id, input.child.generation);
+        if (lease === undefined) {
+          throw new RuntimeError("DELIVERY_UNKNOWN", "Durable fork child has no Session lease", {
+            childSessionId: input.child.id,
+          });
+        }
+        await assertSessionFence(client, lease);
+        return lease;
       }
       const parentStatus = parent.rows[0]?.status;
       if (parentStatus === undefined || parentStatus !== input.expectedParentStatus) {
@@ -248,6 +399,12 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
          VALUES ($1, 1, $2, 'runtime-v1', 'STARTING', $3)`,
         [input.child.id, input.child.ownerId, input.child.createdAt],
       );
+      const childLease = await createSessionLease(client, {
+        generation: input.child.generation,
+        leaseMilliseconds,
+        owner,
+        sessionId: input.child.id,
+      });
       await client.query(
         `INSERT INTO interaction_guards
           (session_id, session_generation, input_policy, state_version)
@@ -275,29 +432,21 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
         ],
       );
       await insertEvents(client, [input.parentEvent, ...input.childEvents]);
+      return childLease;
     });
   }
 
   public async markSessionBroken(
+    fence: SessionFence,
     session: Session,
     events: readonly DurableSessionEvent[],
     reason: string,
+    activeExecution?: Readonly<{ readonly id: string; readonly version: number }>,
   ): Promise<void> {
     await this.#transaction(async (client) => {
-      await client.query(
-        `UPDATE executions
-            SET status = 'UNKNOWN', unknown_reason = $3, finished_at = now(), version = version + 1
-          WHERE session_id = $1 AND session_generation = $2
-            AND status IN ('DISPATCHING', 'RUNNING')`,
-        [session.id, session.generation, reason],
-      );
-      await client.query(
-        `UPDATE actions a SET status = 'UNKNOWN', updated_at = now()
-          FROM executions e
-         WHERE e.action_id = a.id AND e.session_id = $1 AND e.session_generation = $2
-           AND e.status = 'UNKNOWN'`,
-        [session.id, session.generation],
-      );
+      await assertSessionFence(client, fence);
+      assertFenceSession(fence, session);
+      await markActiveExecutionUnknown(client, session, activeExecution, reason);
       await client.query(
         `UPDATE sessions SET status = 'BROKEN', active_execution_id = NULL, updated_at = now()
           WHERE id = $1 AND current_generation = $2 AND status <> 'CLOSED'`,
@@ -315,25 +464,24 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
         [session.id],
       );
       await insertEvents(client, events);
+      await releaseSessionLease(client, fence, reason);
     });
   }
 
-  public async closeSession(session: Session, event: DurableSessionEvent): Promise<void> {
+  public async closeSession(
+    fence: SessionFence,
+    session: Session,
+    event: DurableSessionEvent,
+    activeExecution?: Readonly<{ readonly id: string; readonly version: number }>,
+  ): Promise<void> {
     await this.#transaction(async (client) => {
-      await client.query(
-        `UPDATE executions
-            SET status = 'UNKNOWN', unknown_reason = 'session closed while active',
-                finished_at = now(), version = version + 1
-          WHERE session_id = $1 AND session_generation = $2
-            AND status IN ('DISPATCHING', 'RUNNING')`,
-        [session.id, session.generation],
-      );
-      await client.query(
-        `UPDATE actions a SET status = 'UNKNOWN', updated_at = now()
-          FROM executions e
-         WHERE e.action_id = a.id AND e.session_id = $1 AND e.session_generation = $2
-           AND e.status = 'UNKNOWN'`,
-        [session.id, session.generation],
+      await assertSessionFence(client, fence);
+      assertFenceSession(fence, session);
+      await markActiveExecutionUnknown(
+        client,
+        session,
+        activeExecution,
+        "session closed while active",
       );
       await expectOne(
         client,
@@ -351,10 +499,12 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
         "Session generation did not close",
       );
       await insertEvents(client, [event]);
+      await releaseSessionLease(client, fence, "session closed");
     });
   }
 
   public async acceptExecute(
+    fence: SessionFence,
     input: DurableExecuteAdmission,
   ): Promise<DurableExecuteAdmissionResult> {
     return this.#admission.acceptExecute({
@@ -372,22 +522,35 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
       outboxId: `out_${randomUUID()}`,
       requestHash: input.action.requestHash,
       sessionId: input.action.sessionId,
+      fence,
     });
   }
 
   public async markExecutionRunning(input: {
+    readonly fence: SessionFence;
+    readonly expectedExecutionVersion: number;
     readonly session: Session;
     readonly action: Extract<SessionAction, { type: "execute" }>;
     readonly execution: Execution;
     readonly event: DurableSessionEvent;
   }): Promise<void> {
     await this.#transaction(async (client) => {
+      await assertSessionFence(client, input.fence);
+      assertFenceSession(input.fence, input.session);
       await expectOne(
         client,
         `UPDATE executions
             SET status = 'RUNNING', started_at = $2, version = version + 1
-          WHERE id = $1 AND status = 'DISPATCHING'`,
-        [input.execution.id, input.execution.startedAt],
+          WHERE id = $1 AND status = 'DISPATCHING' AND version = $3
+            AND session_id = $4 AND session_generation = $5 AND owner_id = $6`,
+        [
+          input.execution.id,
+          input.execution.startedAt,
+          input.expectedExecutionVersion,
+          input.session.id,
+          input.session.generation,
+          input.session.ownerId,
+        ],
         "Execution did not transition DISPATCHING -> RUNNING",
       );
       await expectOne(
@@ -415,18 +578,28 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
   }
 
   public async markExecutionWriteAttempted(input: {
+    readonly fence: SessionFence;
+    readonly expectedExecutionVersion: number;
     readonly session: Session;
     readonly action: Extract<SessionAction, { type: "execute" }>;
     readonly execution: Execution;
     readonly event: DurableSessionEvent;
   }): Promise<void> {
     await this.#transaction(async (client) => {
+      await assertSessionFence(client, input.fence);
+      assertFenceSession(input.fence, input.session);
       const execution = await client.query(
         `SELECT 1 FROM executions
           WHERE id = $1 AND session_id = $2 AND session_generation = $3
-            AND owner_id = $4 AND status = 'DISPATCHING'
+            AND owner_id = $4 AND status = 'DISPATCHING' AND version = $5
           FOR UPDATE`,
-        [input.execution.id, input.session.id, input.session.generation, input.session.ownerId],
+        [
+          input.execution.id,
+          input.session.id,
+          input.session.generation,
+          input.session.ownerId,
+          input.expectedExecutionVersion,
+        ],
       );
       if (execution.rowCount !== 1) {
         throw new RuntimeError("DELIVERY_UNKNOWN", "Execution write attempt is no longer current");
@@ -446,6 +619,8 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
   }
 
   public async finishExecution(input: {
+    readonly fence: SessionFence;
+    readonly expectedExecutionVersion: number;
     readonly session: Session;
     readonly action: Extract<SessionAction, { type: "execute" }>;
     readonly execution: Execution;
@@ -453,6 +628,8 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
     readonly checkpoint?: ShellCheckpoint;
   }): Promise<void> {
     await this.#transaction(async (client) => {
+      await assertSessionFence(client, input.fence);
+      assertFenceSession(input.fence, input.session);
       if (input.execution.status !== "COMPLETED" && input.execution.status !== "INTERRUPTED") {
         throw new RuntimeError("INVALID_REQUEST", "Execution terminal status is invalid");
       }
@@ -460,13 +637,18 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
         client,
         `UPDATE executions
             SET status = $2, exit_code = $3, cwd = $4, finished_at = $5, version = version + 1
-          WHERE id = $1 AND status IN ('DISPATCHING', 'RUNNING')`,
+          WHERE id = $1 AND status IN ('DISPATCHING', 'RUNNING') AND version = $6
+            AND session_id = $7 AND session_generation = $8 AND owner_id = $9`,
         [
           input.execution.id,
           input.execution.status,
           input.execution.exitCode,
           input.execution.cwd,
           input.execution.finishedAt,
+          input.expectedExecutionVersion,
+          input.session.id,
+          input.session.generation,
+          input.session.ownerId,
         ],
         "Execution did not reach its terminal state",
       );
@@ -504,6 +686,8 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
   }
 
   public async failExecution(input: {
+    readonly fence: SessionFence;
+    readonly expectedExecutionVersion: number;
     readonly session: Session;
     readonly action: Extract<SessionAction, { type: "execute" }>;
     readonly execution: Execution;
@@ -511,11 +695,24 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
     readonly reason: string;
   }): Promise<void> {
     await this.#transaction(async (client) => {
-      await client.query(
+      await assertSessionFence(client, input.fence);
+      assertFenceSession(input.fence, input.session);
+      await expectOne(
+        client,
         `UPDATE executions
             SET status = 'FAILED', unknown_reason = $2, finished_at = $3, version = version + 1
-          WHERE id = $1 AND status IN ('DISPATCHING', 'RUNNING')`,
-        [input.execution.id, input.reason, input.execution.finishedAt],
+          WHERE id = $1 AND status IN ('DISPATCHING', 'RUNNING') AND version = $4
+            AND session_id = $5 AND session_generation = $6 AND owner_id = $7`,
+        [
+          input.execution.id,
+          input.reason,
+          input.execution.finishedAt,
+          input.expectedExecutionVersion,
+          input.session.id,
+          input.session.generation,
+          input.session.ownerId,
+        ],
+        "Execution version changed before failure",
       );
       await client.query(
         `UPDATE actions SET status = 'FAILED', updated_at = now()
@@ -534,10 +731,12 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
         [input.session.id, input.session.generation, input.reason],
       );
       await insertEvents(client, input.events);
+      await releaseSessionLease(client, input.fence, input.reason);
     });
   }
 
   public async saveInteractionState(
+    fence: SessionFence,
     state: InteractionState,
     expectedVersion: number,
     event: DurableSessionEvent,
@@ -550,6 +749,8 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
       );
     }
     await this.#transaction(async (client) => {
+      await assertSessionFence(client, fence);
+      assertFenceScope(fence, state.sessionId, state.sessionGeneration);
       if (state.guard !== undefined) await upsertActor(client, state.guard.actor);
       const updated = await client.query(
         `UPDATE interaction_guards AS interaction
@@ -602,10 +803,13 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
   }
 
   public async acceptInteraction(
+    fence: SessionFence,
     action: InputAction | ControlAction,
     event: DurableSessionEvent,
   ): Promise<void> {
     await this.#transaction(async (client) => {
+      await assertSessionFence(client, fence);
+      assertFenceScope(fence, action.sessionId, action.sessionGeneration);
       const replay = await findReplay(
         client,
         action.sessionId,
@@ -709,10 +913,13 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
   }
 
   public async finishInteraction(
+    fence: SessionFence,
     action: InputAction | ControlAction,
     event: DurableSessionEvent,
   ): Promise<void> {
     await this.#transaction(async (client) => {
+      await assertSessionFence(client, fence);
+      assertFenceScope(fence, action.sessionId, action.sessionGeneration);
       await expectOne(
         client,
         `UPDATE actions SET status = $2, updated_at = now()
@@ -725,11 +932,13 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
   }
 
   public async acceptResize(
+    fence: SessionFence,
     action: ResizeAction,
     event: DurableSessionEvent,
-    ownerId: string,
   ): Promise<void> {
     await this.#transaction(async (client) => {
+      await assertSessionFence(client, fence);
+      assertFenceScope(fence, action.sessionId, action.sessionGeneration);
       const replay = await findReplay(
         client,
         action.sessionId,
@@ -778,10 +987,10 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
           currentGeneration: current.current_generation,
         });
       }
-      if (current.owner_id !== ownerId) {
+      if (current.owner_id !== fence.ownerId) {
         throw new RuntimeError("DELIVERY_UNKNOWN", "Resize reached a stale Runtime owner", {
           currentOwnerId: current.owner_id,
-          ownerId,
+          ownerId: fence.ownerId,
         });
       }
       if (
@@ -851,11 +1060,13 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
   }
 
   public async markResizeWriteAttempted(
+    fence: SessionFence,
     action: ResizeAction,
     event: DurableSessionEvent,
-    ownerId: string,
   ): Promise<void> {
     await this.#transaction(async (client) => {
+      await assertSessionFence(client, fence);
+      assertFenceScope(fence, action.sessionId, action.sessionGeneration);
       const current = await client.query(
         `SELECT 1
            FROM actions a
@@ -865,7 +1076,7 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
             AND s.current_generation = $2 AND s.owner_id = $3
             AND s.status IN ('READY', 'RESERVED', 'RUNNING')
           FOR UPDATE OF a, s`,
-        [action.id, action.sessionGeneration, ownerId],
+        [action.id, action.sessionGeneration, fence.ownerId],
       );
       if (current.rowCount !== 1) {
         throw new RuntimeError("DELIVERY_UNKNOWN", "Resize write attempt is no longer current", {
@@ -877,12 +1088,16 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
   }
 
   public async finishResize(input: {
+    readonly fence: SessionFence;
     readonly action: ResizeAction;
     readonly event: DurableSessionEvent;
     readonly session: Session;
     readonly brokenEvent?: DurableSessionEvent;
+    readonly activeExecution?: Readonly<{ readonly id: string; readonly version: number }>;
   }): Promise<void> {
     await this.#transaction(async (client) => {
+      await assertSessionFence(client, input.fence);
+      assertFenceSession(input.fence, input.session);
       await expectOne(
         client,
         `UPDATE actions SET status = $2, updated_at = now()
@@ -911,6 +1126,12 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
         await insertEvents(client, [input.event]);
         return;
       }
+      await markActiveExecutionUnknown(
+        client,
+        input.session,
+        input.activeExecution,
+        "terminal geometry convergence is unknown",
+      );
       await client.query(
         `UPDATE sessions SET status = 'BROKEN', active_execution_id = NULL, updated_at = now()
           WHERE id = $1 AND current_generation = $2 AND status <> 'CLOSED'`,
@@ -927,15 +1148,18 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
         client,
         input.brokenEvent === undefined ? [input.event] : [input.event, input.brokenEvent],
       );
+      await releaseSessionLease(client, input.fence, "terminal geometry convergence is unknown");
     });
   }
 
   public async markInteractionWriteAttempted(
+    fence: SessionFence,
     action: InputAction | ControlAction,
     event: DurableSessionEvent,
-    ownerId: string,
   ): Promise<void> {
     await this.#transaction(async (client) => {
+      await assertSessionFence(client, fence);
+      assertFenceScope(fence, action.sessionId, action.sessionGeneration);
       const current = await client.query(
         `SELECT 1
            FROM actions a
@@ -945,7 +1169,7 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
             AND s.current_generation = $2 AND s.owner_id = $4
             AND s.status = 'RUNNING' AND s.active_execution_id = $5
           FOR UPDATE OF a, s`,
-        [action.id, action.sessionGeneration, action.type, ownerId, action.targetExecutionId],
+        [action.id, action.sessionGeneration, action.type, fence.ownerId, action.targetExecutionId],
       );
       if (current.rowCount !== 1) {
         throw new RuntimeError(
@@ -958,9 +1182,11 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
     });
   }
 
-  public async appendEvent(event: DurableSessionEvent): Promise<void> {
+  public async appendEvent(fence: SessionFence, event: DurableSessionEvent): Promise<void> {
+    assertFenceScope(fence, event.sessionId, event.sessionGeneration);
     if (event.type === "terminal.pty_output" && typeof event.payload.data === "string") {
       await this.#observation.appendOutput({
+        fence,
         ...(event.actionId === undefined ? {} : { actionId: event.actionId }),
         ...(event.actor === undefined ? {} : { actor: event.actor }),
         createdAt: new Date(event.observedAt),
@@ -975,15 +1201,46 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
       });
       const screenVersion = event.payload.screenVersion;
       if (typeof screenVersion === "number" && Number.isSafeInteger(screenVersion)) {
-        await this.#pool.query(
-          `UPDATE sessions SET screen_version = GREATEST(screen_version, $3), updated_at = now()
-            WHERE id = $1 AND current_generation = $2`,
-          [event.sessionId, event.sessionGeneration, screenVersion],
-        );
+        await this.#transaction(async (client) => {
+          await assertSessionFence(client, fence);
+          await client.query(
+            `UPDATE sessions SET screen_version = GREATEST(screen_version, $3), updated_at = now()
+              WHERE id = $1 AND current_generation = $2`,
+            [event.sessionId, event.sessionGeneration, screenVersion],
+          );
+        });
       }
       return;
     }
-    await this.#transaction(async (client) => insertEvents(client, [event]));
+    await this.#transaction(async (client) => {
+      await assertSessionFence(client, fence);
+      await insertEvents(client, [event]);
+    });
+  }
+
+  public async appendOwnerEvent(
+    owner: RuntimeOwnerIdentity,
+    event: DurableSessionEvent,
+  ): Promise<void> {
+    await this.#transaction(async (client) => {
+      await assertRuntimeOwner(client, owner);
+      const historical = await client.query(
+        `SELECT 1 FROM sessions
+          WHERE id = $1 AND current_generation = $2 AND owner_id = $3
+            AND status = 'BROKEN'
+          FOR UPDATE`,
+        [event.sessionId, event.sessionGeneration, owner.ownerId],
+      );
+      if (historical.rowCount !== 1) {
+        throw new RuntimeError(
+          "SESSION_LEASE_LOST",
+          "Owner-authorized Event is restricted to a historical BROKEN Session",
+          { generation: event.sessionGeneration, sessionId: event.sessionId },
+          false,
+        );
+      }
+      await insertEvents(client, [event]);
+    });
   }
 
   public async queryEvents(
@@ -1015,39 +1272,57 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
     };
   }
 
-  public async recoverOwner(ownerId: string, reason: string): Promise<DurableOwnerRecoveryResult> {
+  public async recoverOwner(
+    owner: RuntimeOwnerIdentity,
+    reason: string,
+  ): Promise<DurableOwnerRecoveryResult> {
     return this.#transaction(async (client) => {
+      await assertRuntimeOwner(client, owner);
       const executions = await client.query<{ id: string }>(
-        `UPDATE executions
-            SET status = 'UNKNOWN', unknown_reason = $2, finished_at = now(), version = version + 1
-          WHERE owner_id = $1 AND status IN ('DISPATCHING', 'RUNNING')
-        RETURNING id`,
-        [ownerId, reason],
+        `WITH current AS MATERIALIZED (
+           SELECT id, version FROM executions
+            WHERE owner_id = $1 AND status IN ('DISPATCHING', 'RUNNING')
+            FOR UPDATE
+         )
+         UPDATE executions execution
+            SET status = 'UNKNOWN', unknown_reason = $2, finished_at = now(),
+                version = execution.version + 1
+           FROM current
+          WHERE execution.id = current.id AND execution.version = current.version
+        RETURNING execution.id`,
+        [owner.ownerId, reason],
       );
       await client.query(
         `UPDATE actions a SET status = 'UNKNOWN', updated_at = now()
           FROM executions e
          WHERE e.action_id = a.id AND e.owner_id = $1 AND e.status = 'UNKNOWN'`,
-        [ownerId],
+        [owner.ownerId],
       );
       await client.query(
         `UPDATE actions a SET status = 'UNKNOWN', updated_at = now()
           FROM sessions s
          WHERE a.session_id = s.id AND s.owner_id = $1 AND a.status = 'ACCEPTED'`,
-        [ownerId],
+        [owner.ownerId],
       );
       const sessions = await client.query<{ id: string; current_generation: number }>(
         `UPDATE sessions
             SET status = 'BROKEN', active_execution_id = NULL, updated_at = now()
           WHERE owner_id = $1 AND status IN ('STARTING', 'READY', 'RESERVED', 'RUNNING')
         RETURNING id, current_generation`,
-        [ownerId],
+        [owner.ownerId],
       );
       await client.query(
         `UPDATE session_generations
             SET status = 'BROKEN', broken_at = now(), broken_reason = $2
           WHERE owner_id = $1 AND status IN ('STARTING', 'READY', 'RESERVED', 'RUNNING')`,
-        [ownerId, reason],
+        [owner.ownerId, reason],
+      );
+      await client.query(
+        `UPDATE session_leases
+            SET released_at = now(), release_reason = $2, lease_expires_at = now(),
+                version = version + 1
+          WHERE owner_id = $1 AND released_at IS NULL`,
+        [owner.ownerId, reason],
       );
       for (const session of sessions.rows) {
         await insertEvents(client, [
@@ -1095,7 +1370,7 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
           WHERE s.owner_id = $1 AND s.status = 'BROKEN' AND g.status = 'BROKEN'
           ORDER BY s.updated_at DESC, s.created_at DESC, s.id
           LIMIT $2`,
-        [ownerId, MAX_REBUILDABLE_SESSIONS],
+        [owner.ownerId, MAX_REBUILDABLE_SESSIONS],
       );
       return {
         brokenSessions: sessions.rowCount ?? 0,
@@ -1173,6 +1448,46 @@ function positiveInteger(value: number, name: string): number {
     });
   }
   return value;
+}
+
+function assertSessionOwner(session: Session, owner: RuntimeOwnerIdentity): void {
+  if (session.ownerId !== owner.ownerId) {
+    throw new RuntimeError("SESSION_LEASE_LOST", "Session owner does not match Runtime identity", {
+      ownerId: owner.ownerId,
+      sessionId: session.id,
+      sessionOwnerId: session.ownerId,
+    });
+  }
+}
+
+function assertFenceSession(fence: SessionFence, session: Session): void {
+  assertFenceScope(fence, session.id, session.generation);
+  if (fence.ownerId !== session.ownerId) {
+    throwSessionLeaseLost(fence);
+  }
+}
+
+function assertFenceScope(fence: SessionFence, sessionId: string, generation: number): void {
+  if (fence.sessionId !== sessionId || fence.generation !== generation) {
+    throwSessionLeaseLost(fence);
+  }
+}
+
+async function selectSessionLease(
+  client: PoolClient,
+  sessionId: string,
+  generation: number,
+): Promise<SessionLease | undefined> {
+  const result = await client.query<SessionLeaseRow>(
+    `SELECT session_id, session_generation, owner_id, owner_instance_id,
+            owner_registry_epoch::text, fencing_token::text, acquired_at,
+            renewed_at, lease_expires_at, version::text
+       FROM session_leases
+      WHERE session_id = $1 AND session_generation = $2`,
+    [sessionId, generation],
+  );
+  const row = result.rows[0];
+  return row === undefined ? undefined : sessionLease(row);
 }
 
 function stringRecord(value: unknown): Readonly<Record<string, string>> | undefined {
@@ -1347,6 +1662,68 @@ async function expectOne(
   if (result.rowCount !== 1) {
     throw new RuntimeError("DELIVERY_UNKNOWN", message);
   }
+}
+
+async function markActiveExecutionUnknown(
+  client: PoolClient,
+  session: Pick<Session, "generation" | "id" | "ownerId">,
+  expected: Readonly<{ readonly id: string; readonly version: number }> | undefined,
+  reason: string,
+): Promise<void> {
+  const active = await client.query<{
+    action_id: string;
+    id: string;
+    version: number;
+  }>(
+    `SELECT id, action_id, version
+       FROM executions
+      WHERE session_id = $1 AND session_generation = $2 AND owner_id = $3
+        AND status IN ('DISPATCHING', 'RUNNING')
+      FOR UPDATE`,
+    [session.id, session.generation, session.ownerId],
+  );
+  const row = active.rows[0];
+  if (active.rows.length > 1) {
+    throw new RuntimeError("DELIVERY_UNKNOWN", "Session has multiple active Executions", {
+      generation: session.generation,
+      sessionId: session.id,
+    });
+  }
+  if (row === undefined && expected === undefined) return;
+  if (
+    row === undefined ||
+    expected === undefined ||
+    row.id !== expected.id ||
+    row.version !== expected.version
+  ) {
+    throw new RuntimeError(
+      "DELIVERY_UNKNOWN",
+      "Active Execution changed before the Session lifecycle transition",
+      {
+        currentExecutionId: row?.id,
+        currentExecutionVersion: row?.version,
+        expectedExecutionId: expected?.id,
+        expectedExecutionVersion: expected?.version,
+        sessionId: session.id,
+      },
+    );
+  }
+  await expectOne(
+    client,
+    `UPDATE executions
+        SET status = 'UNKNOWN', unknown_reason = $3, finished_at = now(),
+            version = version + 1
+      WHERE id = $1 AND version = $2 AND status IN ('DISPATCHING', 'RUNNING')`,
+    [row.id, row.version, reason],
+    "Execution version changed before it became UNKNOWN",
+  );
+  await expectOne(
+    client,
+    `UPDATE actions SET status = 'UNKNOWN', updated_at = now()
+      WHERE id = $1 AND status IN ('DISPATCHING', 'RUNNING')`,
+    [row.action_id],
+    "Execute Action changed before it became UNKNOWN",
+  );
 }
 
 async function upsertSnapshot(

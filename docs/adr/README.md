@@ -34,6 +34,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0028](./0028-durable-broken-session-rebuild-projection.md) | Hydrate bounded BROKEN evidence for explicit rebuild     | Accepted for M7.2        |
 | [0029](./0029-runtime-owner-registry-and-central-router.md) | Register Runtime instances and route centrally by owner  | Accepted for M9.1        |
 | [0030](./0030-central-runtime-router-forwarding.md)         | Forward exact Session and Execution calls through Router | Accepted for M9.2        |
+| [0031](./0031-generation-scoped-session-fencing.md)         | Fence generation writes with an exact Session lease      | Accepted for M9.3        |
 
 Statuses:
 

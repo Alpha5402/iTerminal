@@ -279,6 +279,7 @@ export interface Execution {
   readonly command: string;
   readonly actor: Actor;
   readonly createdAt: string;
+  version: number;
   status: ExecutionStatus;
   startedAt?: string;
   finishedAt?: string;

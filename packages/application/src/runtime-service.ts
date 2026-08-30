@@ -47,9 +47,12 @@ import type {
   DurableForkAdmission,
   DurableOwnerRecoveryResult,
   DurableRebuildableSession,
+  RuntimeOwnerIdentity,
   RuntimeDurability,
   RuntimeServiceOptions,
   RuntimeStore,
+  SessionFence,
+  SessionLease,
   ShellExecutionResult,
   ShellExecutor,
   ShellExecutorFactory,
@@ -63,6 +66,7 @@ const MAX_EVENT_LIMIT = 500;
 const MAX_PENDING_DURABLE_EVENTS = 10_000;
 const MAX_PENDING_DURABLE_BYTES = 8 * 1024 * 1024;
 const DURABLE_FLUSH_TIMEOUT_MS = 30_000;
+const DEFAULT_SESSION_LEASE_MILLISECONDS = 15_000;
 const MAX_SCREEN_QUERY_LENGTH = 1_024;
 const MAX_SCREEN_SEARCH_MATCHES = 100;
 const MAX_SCREEN_WAIT_TIMEOUT_MS = 5 * 60 * 1_000;
@@ -263,6 +267,7 @@ export class RuntimeService {
   readonly #durableQueues = new Map<string, DurableQueueState>();
   readonly #mutationTails = new Map<string, Promise<void>>();
   readonly #interactionStates = new Map<string, InteractionState>();
+  readonly #sessionLeases = new Map<string, SessionLease>();
   readonly #checkpoints = new Map<string, ShellCheckpoint>();
   readonly #checkpointInvalid = new Set<string>();
   readonly #forkReplays = new Map<string, ForkReplay>();
@@ -274,6 +279,8 @@ export class RuntimeService {
   readonly #hooks: NonNullable<RuntimeServiceOptions["hooks"]>;
   readonly #now: () => Date;
   readonly #ownerId: string;
+  #ownerIdentity: RuntimeOwnerIdentity;
+  readonly #sessionLeaseMilliseconds: number;
   readonly #screenProjectionFactory: TerminalScreenProjectionFactory | undefined;
 
   public constructor(
@@ -289,7 +296,61 @@ export class RuntimeService {
     this.#hooks = options.hooks ?? {};
     this.#now = options.now ?? (() => new Date());
     this.#ownerId = options.ownerId ?? `owner_${process.pid.toString()}`;
+    this.#ownerIdentity = {
+      epoch: 1,
+      instanceId: `in_process_${process.pid.toString()}`,
+      ownerId: this.#ownerId,
+    };
+    this.#sessionLeaseMilliseconds = requirePositiveInteger(
+      options.sessionLeaseMilliseconds ?? DEFAULT_SESSION_LEASE_MILLISECONDS,
+      "sessionLeaseMilliseconds",
+    );
     this.#screenProjectionFactory = options.screenProjectionFactory;
+  }
+
+  public activateDurableOwner(owner: RuntimeOwnerIdentity): void {
+    if (owner.ownerId !== this.#ownerId) {
+      throw new RuntimeError("OWNER_LEASE_LOST", "Runtime owner identity changed logical owner", {
+        configuredOwnerId: this.#ownerId,
+        ownerId: owner.ownerId,
+      });
+    }
+    this.#ownerIdentity = { ...owner };
+  }
+
+  public async renewDurableSessionLeases(): Promise<number> {
+    if (this.#durability === undefined) return 0;
+    this.#requireOwnerDurability();
+    const leases = [...this.#sessionLeases.values()].filter((lease) => {
+      const session = this.store.getSession(lease.sessionId);
+      return (
+        session !== undefined &&
+        session.generation === lease.generation &&
+        session.status !== "BROKEN" &&
+        session.status !== "CLOSED"
+      );
+    });
+    try {
+      const renewed = await this.#durability.renewSessionLeases(
+        this.#ownerIdentity,
+        leases,
+        this.#sessionLeaseMilliseconds,
+      );
+      if (renewed.length !== leases.length) {
+        throw new RuntimeError(
+          "SESSION_LEASE_LOST",
+          "Runtime renewed only part of its exact Session lease set",
+          { expected: leases.length, renewed: renewed.length },
+          false,
+        );
+      }
+      for (const lease of renewed) this.#sessionLeases.set(lease.sessionId, lease);
+      return renewed.length;
+    } catch (error) {
+      const failure = durabilityError(error);
+      this.#tripOwnerDurability(failure);
+      throw failure;
+    }
   }
 
   public async createSession(request: CreateSessionRequest): Promise<Session> {
@@ -328,9 +389,18 @@ export class RuntimeService {
     const startingEvent = this.#event(session, "session.shell_starting", {}, { persist: false });
 
     try {
-      await this.#enqueueDurable(session.id, 0, () =>
-        this.#durability?.createSession(session, [createdEvent, startingEvent]),
+      const lease = await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.createSession(
+          session,
+          [createdEvent, startingEvent],
+          this.#ownerIdentity,
+          this.#sessionLeaseMilliseconds,
+        ),
       );
+      if (this.#durability !== undefined) {
+        if (lease === undefined) throw missingSessionLease(session);
+        this.#sessionLeases.set(session.id, lease);
+      }
     } catch (error) {
       this.#interactionStates.delete(sessionId);
       this.store.breakSession(sessionId, generation);
@@ -503,10 +573,23 @@ export class RuntimeService {
         requestHash,
       };
       let admitted = false;
+      const parentFence =
+        this.#durability === undefined || parent.status === "BROKEN"
+          ? undefined
+          : this.#requireSessionFence(parent);
       try {
-        await this.#enqueueDurable(parent.id, 0, () =>
-          this.#durability?.createForkSession(admission),
+        const childLease = await this.#enqueueDurable(parent.id, 0, () =>
+          this.#durability?.createForkSession(
+            admission,
+            this.#ownerIdentity,
+            this.#sessionLeaseMilliseconds,
+            parentFence,
+          ),
         );
+        if (this.#durability !== undefined) {
+          if (childLease === undefined) throw missingSessionLease(child);
+          this.#sessionLeases.set(child.id, childLease);
+        }
         admitted = true;
         this.#checkpoints.set(parent.id, checkpoint);
         this.#checkpointInvalid.delete(parent.id);
@@ -542,15 +625,23 @@ export class RuntimeService {
         return result;
       } catch (error) {
         if (!admitted) {
+          this.#sessionLeases.delete(child.id);
           this.#interactionStates.delete(child.id);
           this.store.deleteSession(child.id, child.generation);
         }
-        this.#event(
+        const failedEvent = this.#event(
           parent,
           "session.fork_failed",
           { childSessionId: child.id, reason: errorMessage(error) },
-          { actor: request.actor },
+          { actor: request.actor, persist: false },
         );
+        if (this.#durability !== undefined) {
+          void this.#enqueueDurable(parent.id, 0, () =>
+            parentFence === undefined
+              ? this.#durability?.appendOwnerEvent(this.#ownerIdentity, failedEvent)
+              : this.#durability?.appendEvent(parentFence, failedEvent),
+          ).catch((durableError: unknown) => this.#tripDurability(parent.id, durableError));
+        }
         throw error;
       }
     });
@@ -765,7 +856,7 @@ export class RuntimeService {
   }> {
     try {
       const recovered: DurableOwnerRecoveryResult = (await this.#durability?.recoverOwner(
-        this.#ownerId,
+        this.#ownerIdentity,
         reason,
       )) ?? {
         brokenSessions: 0,
@@ -773,6 +864,7 @@ export class RuntimeService {
         unknownExecutions: 0,
       };
       let hydratedSessions = 0;
+      this.#sessionLeases.clear();
       for (const rebuildable of recovered.rebuildableSessions) {
         if (!this.#checkpointCompatibleWithRuntime(rebuildable)) continue;
         const existing = this.store.getSession(rebuildable.session.id);
@@ -931,6 +1023,7 @@ export class RuntimeService {
       sessionGeneration: session.generation,
       sessionId: session.id,
       status: "DISPATCHING",
+      version: 1,
     };
     const acceptedEvent = this.#eventDraft(reserved, "action.accepted", {}, action, execution);
     const dispatchingEvent = this.#eventDraft(
@@ -943,7 +1036,7 @@ export class RuntimeService {
     try {
       if (this.#durability !== undefined) {
         const durable = await this.#enqueueDurable(session.id, 0, () =>
-          this.#durability?.acceptExecute({
+          this.#durability?.acceptExecute(this.#requireSessionFence(session), {
             acceptedEvent,
             action,
             dispatchingEvent,
@@ -1053,6 +1146,8 @@ export class RuntimeService {
       await this.#enqueueDurable(session.id, 0, () =>
         this.#durability?.markExecutionWriteAttempted({
           action,
+          expectedExecutionVersion: execution.version,
+          fence: this.#requireSessionFence(session),
           event: writeAttemptedEvent,
           execution,
           session,
@@ -1087,12 +1182,17 @@ export class RuntimeService {
             void this.#enqueueDurable(session.id, 0, () =>
               this.#durability?.markExecutionRunning({
                 action,
+                expectedExecutionVersion: execution.version,
+                fence: this.#requireSessionFence(running),
                 event: startedEvent,
                 execution,
                 session: running,
               }),
             ).then(
-              () => state.started.resolve(),
+              () => {
+                execution.version += 1;
+                state.started.resolve();
+              },
               (error: unknown) => {
                 this.#tripDurability(session.id, error);
                 state.started.reject(durabilityError(error));
@@ -1178,6 +1278,8 @@ export class RuntimeService {
       await this.#enqueueDurable(execution.sessionId, 0, () =>
         this.#durability?.finishExecution({
           action,
+          expectedExecutionVersion: execution.version,
+          fence: this.#requireSessionFence(ready),
           ...(checkpoint === undefined ? {} : { checkpoint }),
           events:
             checkpointRejectedEvent === undefined
@@ -1197,6 +1299,7 @@ export class RuntimeService {
       this.#checkpoints.set(execution.sessionId, checkpoint);
       this.#checkpointInvalid.delete(execution.sessionId);
     }
+    execution.version += 1;
     return execution;
   }
 
@@ -1222,15 +1325,25 @@ export class RuntimeService {
         { reason: errorMessage(error) },
         { persist: false },
       );
-      await this.#enqueueDurable(execution.sessionId, 0, () =>
+      const persisted = await this.#enqueueDurable(execution.sessionId, 0, () =>
         this.#durability?.failExecution({
           action,
+          expectedExecutionVersion: execution.version,
+          fence: this.#requireSessionFence(broken),
           events: [failedEvent, brokenEvent],
           execution,
           reason: errorMessage(error),
           session: broken,
         }),
-      ).catch((durableError: unknown) => this.#tripDurability(execution.sessionId, durableError));
+      ).then(
+        () => true,
+        (durableError: unknown) => {
+          this.#tripDurability(execution.sessionId, durableError);
+          return false;
+        },
+      );
+      if (persisted) execution.version += 1;
+      this.#sessionLeases.delete(execution.sessionId);
     }
     throw error;
   }
@@ -1487,7 +1600,11 @@ export class RuntimeService {
     const acceptedEvent = this.#eventDraft(session, "action.accepted", {}, action);
     try {
       await this.#enqueueDurable(session.id, 0, () =>
-        this.#durability?.acceptInteraction(action, acceptedEvent),
+        this.#durability?.acceptInteraction(
+          this.#requireSessionFence(session),
+          action,
+          acceptedEvent,
+        ),
       );
     } catch (error) {
       this.store.rollbackActionSequence(session.id, session.generation, action.actionSequence);
@@ -1512,7 +1629,11 @@ export class RuntimeService {
         { action, persist: false },
       );
       await this.#enqueueDurable(session.id, 0, () =>
-        this.#durability?.finishInteraction(action, deliveredEvent),
+        this.#durability?.finishInteraction(
+          this.#requireSessionFence(session),
+          action,
+          deliveredEvent,
+        ),
       );
       return action;
     } catch (error) {
@@ -1524,7 +1645,11 @@ export class RuntimeService {
         { action, persist: false },
       );
       await this.#enqueueDurable(session.id, 0, () =>
-        this.#durability?.finishInteraction(action, unknownEvent),
+        this.#durability?.finishInteraction(
+          this.#requireSessionFence(session),
+          action,
+          unknownEvent,
+        ),
       ).catch((durableFailure: unknown) => this.#tripDurability(session.id, durableFailure));
       throw new RuntimeError(
         "DELIVERY_UNKNOWN",
@@ -1616,7 +1741,7 @@ export class RuntimeService {
     const acceptedEvent = this.#eventDraft(session, "action.accepted", {}, action);
     try {
       await this.#enqueueDurable(session.id, 0, () =>
-        this.#durability?.acceptResize(action, acceptedEvent, this.#ownerId),
+        this.#durability?.acceptResize(this.#requireSessionFence(session), action, acceptedEvent),
       );
     } catch (error) {
       this.store.rollbackActionSequence(session.id, session.generation, action.actionSequence);
@@ -1641,7 +1766,11 @@ export class RuntimeService {
     );
     try {
       await this.#enqueueDurable(session.id, 0, () =>
-        this.#durability?.markResizeWriteAttempted(action, attemptedEvent, this.#ownerId),
+        this.#durability?.markResizeWriteAttempted(
+          this.#requireSessionFence(session),
+          action,
+          attemptedEvent,
+        ),
       );
     } catch (error) {
       this.#tripDurability(session.id, error);
@@ -1680,13 +1809,24 @@ export class RuntimeService {
         action,
       );
       await this.#enqueueDurable(session.id, 0, () =>
-        this.#durability?.finishResize({ action, event: deliveredEvent, session }),
+        this.#durability?.finishResize({
+          action,
+          event: deliveredEvent,
+          fence: this.#requireSessionFence(session),
+          session,
+        }),
       );
       this.store.appendEvent(session.id, session.generation, deliveredEvent);
       return action;
     } catch (error) {
       await projectionResize?.catch(() => undefined);
       action.status = "UNKNOWN";
+      const activeExecutionState =
+        session.activeExecutionId === undefined
+          ? undefined
+          : this.#requireExecution(session.activeExecutionId);
+      const activeExecution =
+        activeExecutionState === undefined ? undefined : executionVersion(activeExecutionState);
       const broken = this.store.breakSession(session.id, session.generation);
       const unknownEvent = this.#eventDraft(
         broken,
@@ -1697,14 +1837,23 @@ export class RuntimeService {
       const brokenEvent = this.#eventDraft(broken, "session.broken", {
         reason: "Terminal geometry convergence is unknown",
       });
+      let persisted = false;
       await this.#enqueueDurable(session.id, 0, () =>
         this.#durability?.finishResize({
           action,
+          ...(activeExecution === undefined ? {} : { activeExecution }),
           brokenEvent,
           event: unknownEvent,
+          fence: this.#requireSessionFence(broken),
           session: broken,
         }),
-      ).catch((durableFailure: unknown) => this.#tripDurability(session.id, durableFailure));
+      )
+        .then(() => {
+          persisted = true;
+        })
+        .catch((durableFailure: unknown) => this.#tripDurability(session.id, durableFailure));
+      if (persisted && activeExecutionState !== undefined) activeExecutionState.version += 1;
+      this.#sessionLeases.delete(session.id);
       this.store.appendEvent(session.id, session.generation, unknownEvent);
       this.store.appendEvent(session.id, session.generation, brokenEvent);
       this.#breakLiveSession(broken, errorMessage(error));
@@ -1761,7 +1910,11 @@ export class RuntimeService {
     const acceptedEvent = this.#eventDraft(session, "action.accepted", {}, action);
     try {
       await this.#enqueueDurable(session.id, 0, () =>
-        this.#durability?.acceptInteraction(action, acceptedEvent),
+        this.#durability?.acceptInteraction(
+          this.#requireSessionFence(session),
+          action,
+          acceptedEvent,
+        ),
       );
     } catch (error) {
       this.store.rollbackActionSequence(session.id, session.generation, action.actionSequence);
@@ -1788,7 +1941,11 @@ export class RuntimeService {
         { action, persist: false },
       );
       await this.#enqueueDurable(session.id, 0, () =>
-        this.#durability?.finishInteraction(action, deliveredEvent),
+        this.#durability?.finishInteraction(
+          this.#requireSessionFence(session),
+          action,
+          deliveredEvent,
+        ),
       );
       return action;
     } catch (error) {
@@ -1800,7 +1957,11 @@ export class RuntimeService {
         { action, persist: false },
       );
       await this.#enqueueDurable(session.id, 0, () =>
-        this.#durability?.finishInteraction(action, unknownEvent),
+        this.#durability?.finishInteraction(
+          this.#requireSessionFence(session),
+          action,
+          unknownEvent,
+        ),
       ).catch((durableFailure: unknown) => this.#tripDurability(session.id, durableFailure));
       throw new RuntimeError(
         "DELIVERY_UNKNOWN",
@@ -1829,7 +1990,11 @@ export class RuntimeService {
     );
     try {
       await this.#enqueueDurable(session.id, 0, () =>
-        this.#durability?.markInteractionWriteAttempted(action, event, this.#ownerId),
+        this.#durability?.markInteractionWriteAttempted(
+          this.#requireSessionFence(session),
+          action,
+          event,
+        ),
       );
     } catch (error) {
       this.#tripDurability(session.id, error);
@@ -1879,6 +2044,12 @@ export class RuntimeService {
       });
       const session = this.#requireExactGeneration(sessionId, generation);
       const previousStatus = session.status;
+      const activeExecutionState =
+        session.activeExecutionId === undefined
+          ? undefined
+          : this.#requireExecution(session.activeExecutionId);
+      const activeExecution =
+        activeExecutionState === undefined ? undefined : executionVersion(activeExecutionState);
       this.#markActiveDispatchUnknown(session, "Session closed before Execution outcome");
       this.#executors.get(sessionId)?.close();
       this.#executors.delete(sessionId);
@@ -1894,8 +2065,15 @@ export class RuntimeService {
       if (flushFailure !== undefined) throw durabilityError(flushFailure);
       try {
         await this.#enqueueDurable(sessionId, 0, () =>
-          this.#durability?.closeSession(closed, closedEvent),
+          this.#durability?.closeSession(
+            this.#requireSessionFence(closed),
+            closed,
+            closedEvent,
+            activeExecution,
+          ),
         );
+        if (activeExecutionState !== undefined) activeExecutionState.version += 1;
+        this.#sessionLeases.delete(sessionId);
       } catch (error) {
         if (isDurabilityFatal(error)) this.#tripDurability(sessionId, error);
         throw error;
@@ -1975,6 +2153,7 @@ export class RuntimeService {
       try {
         await this.#enqueueDurable(session.id, 0, () =>
           this.#durability?.markSessionReady(
+            this.#requireSessionFence(ready),
             ready,
             executor.shellPid,
             readyEvent,
@@ -2002,8 +2181,14 @@ export class RuntimeService {
         { persist: false },
       );
       await this.#enqueueDurable(session.id, 0, () =>
-        this.#durability?.markSessionBroken(broken, [brokenEvent], errorMessage(error)),
+        this.#durability?.markSessionBroken(
+          this.#requireSessionFence(broken),
+          broken,
+          [brokenEvent],
+          errorMessage(error),
+        ),
       ).catch((durableError: unknown) => this.#tripDurability(session.id, durableError));
+      this.#sessionLeases.delete(session.id);
       throw error;
     }
   }
@@ -2255,7 +2440,12 @@ export class RuntimeService {
     const event = this.#eventDraft(session, type, payload, undefined, undefined, actor);
     try {
       await this.#enqueueDurable(session.id, 0, () =>
-        this.#durability?.saveInteractionState(next, current.version, event),
+        this.#durability?.saveInteractionState(
+          this.#requireSessionFence(session),
+          next,
+          current.version,
+          event,
+        ),
       );
     } catch (error) {
       if (isDurabilityFatal(error)) this.#tripDurability(session.id, error);
@@ -2295,7 +2485,9 @@ export class RuntimeService {
       actor,
     );
     try {
-      await this.#enqueueDurable(session.id, 0, () => this.#durability?.appendEvent(event));
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.appendEvent(this.#requireSessionFence(session), event),
+      );
     } catch (error) {
       if (isDurabilityFatal(error)) this.#tripDurability(session.id, error);
       throw durabilityError(error);
@@ -2406,7 +2598,7 @@ export class RuntimeService {
           ? byteLength(payload.data)
           : 0;
       void this.#enqueueDurable(session.id, pendingBytes, () =>
-        this.#durability?.appendEvent(draft),
+        this.#durability?.appendEvent(this.#requireSessionFence(session), draft),
       ).catch((error: unknown) => this.#tripDurability(session.id, error));
     }
     return stored;
@@ -2524,6 +2716,7 @@ export class RuntimeService {
     }
     const state = this.#durableQueue(sessionId);
     state.failure ??= durabilityError(error);
+    this.#sessionLeases.delete(sessionId);
     const session = this.store.getSession(sessionId);
     if (session !== undefined) this.#breakLiveSession(session, errorMessage(error));
   }
@@ -2536,6 +2729,7 @@ export class RuntimeService {
       state.failure ??= ownerFailure;
       this.#breakLiveSession(session, ownerFailure.message);
     }
+    this.#sessionLeases.clear();
   }
 
   #breakLiveSession(session: Session, reason: string): void {
@@ -2551,6 +2745,18 @@ export class RuntimeService {
 
   #requireOwnerDurability(): void {
     if (this.#ownerDurabilityFailure !== undefined) throw this.#ownerDurabilityFailure;
+  }
+
+  #requireSessionFence(session: Pick<Session, "generation" | "id" | "ownerId">): SessionFence {
+    const lease = this.#sessionLeases.get(session.id);
+    if (
+      lease === undefined ||
+      lease.generation !== session.generation ||
+      lease.ownerId !== session.ownerId
+    ) {
+      throw missingSessionLease(session);
+    }
+    return lease;
   }
 
   #markActiveDispatchUnknown(session: Session, reason: string): void {
@@ -2992,7 +3198,14 @@ function errorMessage(error: unknown): string {
 }
 
 function durabilityError(error: unknown): RuntimeError {
-  if (error instanceof RuntimeError && error.code === "RUNTIME_UNAVAILABLE") return error;
+  if (
+    error instanceof RuntimeError &&
+    (error.code === "RUNTIME_UNAVAILABLE" ||
+      error.code === "OWNER_LEASE_LOST" ||
+      error.code === "SESSION_LEASE_LOST")
+  ) {
+    return error;
+  }
   return new RuntimeError(
     "RUNTIME_UNAVAILABLE",
     "PostgreSQL durable journal is unavailable",
@@ -3006,6 +3219,7 @@ function durabilityError(error: unknown): RuntimeError {
 
 function isOwnerDurabilityFailure(error: unknown): boolean {
   if (error instanceof RuntimeError) {
+    if (error.code === "OWNER_LEASE_LOST" || error.code === "SESSION_LEASE_LOST") return true;
     if (error.code !== "RUNTIME_UNAVAILABLE") return false;
     return error.details.durabilityScope !== "session";
   }
@@ -3033,8 +3247,34 @@ function isDurabilityFatal(error: unknown): boolean {
   return (
     !(error instanceof RuntimeError) ||
     error.code === "RUNTIME_UNAVAILABLE" ||
-    error.code === "DELIVERY_UNKNOWN"
+    error.code === "DELIVERY_UNKNOWN" ||
+    error.code === "OWNER_LEASE_LOST" ||
+    error.code === "SESSION_LEASE_LOST"
   );
+}
+
+function missingSessionLease(
+  session: Pick<Session, "generation" | "id" | "ownerId">,
+): RuntimeError {
+  return new RuntimeError(
+    "SESSION_LEASE_LOST",
+    "Runtime has no current fence for this Session generation",
+    { generation: session.generation, ownerId: session.ownerId, sessionId: session.id },
+    false,
+  );
+}
+
+function executionVersion(execution: Execution): Readonly<{ id: string; version: number }> {
+  return { id: execution.id, version: execution.version };
+}
+
+function requirePositiveInteger(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new RuntimeError("INVALID_REQUEST", `${name} must be a positive integer`, {
+      [name]: value,
+    });
+  }
+  return value;
 }
 
 function deferred<T>(): Deferred<T> {

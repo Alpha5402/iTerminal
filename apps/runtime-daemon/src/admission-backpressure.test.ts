@@ -89,6 +89,7 @@ describeAdmission("M8.4 admission outage and Outbox backpressure", () => {
       socketPath: fixture.socketPath,
     });
     daemons.push(replacement);
+    await replacement.waitUntilReady();
     expect(replacement.runtime.listSessions()).toContainEqual(
       expect.objectContaining({ id: session.id, status: "BROKEN" }),
     );

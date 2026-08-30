@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 
+import type { SessionFence } from "@iterminal/application";
 import type { Actor, SessionStatus, ShellKind } from "@iterminal/domain";
 import { RuntimeError } from "@iterminal/domain";
 import { Pool, type PoolClient } from "pg";
 
 import { migrateDatabase } from "./migrate.js";
 import { guardPostgresPool } from "./postgres-pool.js";
+import { assertSessionFence, throwSessionLeaseLost } from "./session-fencing.js";
 
 const DEFAULT_MAX_PENDING_OUTBOX = 10_000;
 const DEFAULT_STATEMENT_TIMEOUT_MS = 30_000;
@@ -15,6 +17,7 @@ export interface PostgresRuntimeRepositoryOptions {
   readonly beforeAcceptExecuteCommit?: () => void;
   readonly maxPendingOutbox?: number;
   readonly statementTimeoutMilliseconds?: number;
+  readonly requireSessionFence?: boolean;
 }
 
 export interface CreateDurableSession {
@@ -44,6 +47,7 @@ export interface AcceptExecuteTransaction {
   readonly dispatchingAt?: Date;
   readonly expectedActionSequence?: number;
   readonly failpoint?: "before_commit";
+  readonly fence?: SessionFence;
 }
 
 export interface AcceptedExecute {
@@ -85,9 +89,11 @@ export class PostgresRuntimeRepository {
   readonly #pool: Pool;
   readonly #beforeAcceptExecuteCommit: (() => void) | undefined;
   readonly #maxPendingOutbox: number;
+  readonly #requireSessionFence: boolean;
 
   public constructor(connectionString: string, options: PostgresRuntimeRepositoryOptions = {}) {
     this.#beforeAcceptExecuteCommit = options.beforeAcceptExecuteCommit;
+    this.#requireSessionFence = options.requireSessionFence ?? false;
     this.#maxPendingOutbox = positiveInteger(
       options.maxPendingOutbox ?? DEFAULT_MAX_PENDING_OUTBOX,
       "maxPendingOutbox",
@@ -154,6 +160,24 @@ export class PostgresRuntimeRepository {
 
   public async acceptExecute(input: AcceptExecuteTransaction): Promise<AcceptedExecute> {
     return this.#transaction(async (client) => {
+      if (input.fence === undefined) {
+        if (this.#requireSessionFence) {
+          throw new RuntimeError(
+            "SESSION_LEASE_LOST",
+            "Execute admission requires an explicit Session fence",
+            { generation: input.generation, sessionId: input.sessionId },
+            false,
+          );
+        }
+      } else {
+        if (
+          input.fence.sessionId !== input.sessionId ||
+          input.fence.generation !== input.generation
+        ) {
+          throwSessionLeaseLost(input.fence);
+        }
+        await assertSessionFence(client, input.fence);
+      }
       const replay = await findExecuteReplay(client, input);
       if (replay !== undefined) return replay;
 
@@ -306,10 +330,17 @@ export class PostgresRuntimeRepository {
   public async recoverLostOwner(ownerId: string, reason: string): Promise<RecoveryResult> {
     return this.#transaction(async (client) => {
       const executions = await client.query<{ id: string; session_id: string }>(
-        `UPDATE executions
-            SET status = 'UNKNOWN', unknown_reason = $2, finished_at = now(), version = version + 1
-          WHERE owner_id = $1 AND status IN ('DISPATCHING', 'RUNNING')
-        RETURNING id, session_id`,
+        `WITH current AS MATERIALIZED (
+           SELECT id, version FROM executions
+            WHERE owner_id = $1 AND status IN ('DISPATCHING', 'RUNNING')
+            FOR UPDATE
+         )
+         UPDATE executions execution
+            SET status = 'UNKNOWN', unknown_reason = $2, finished_at = now(),
+                version = execution.version + 1
+           FROM current
+          WHERE execution.id = current.id AND execution.version = current.version
+        RETURNING execution.id, execution.session_id`,
         [ownerId, reason],
       );
       await client.query(

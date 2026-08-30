@@ -1,17 +1,21 @@
 import { randomUUID } from "node:crypto";
 
 import type { Actor, ResizeAction, RuntimeError, Session } from "@iterminal/domain";
+import type { RuntimeOwnerRecord } from "@iterminal/application";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { PostgresRuntimeDurability } from "./postgres-runtime-durability.js";
+import { PostgresRuntimeOwnerRegistry } from "./postgres-runtime-owner-registry.js";
 
 const databaseUrl = process.env.ITERM_DATABASE_URL;
 const describeDatabase = databaseUrl === undefined ? describe.skip : describe;
 
 describeDatabase("PostgreSQL controlled terminal geometry", () => {
   const durability = new PostgresRuntimeDurability(databaseUrl ?? "");
+  const registry = new PostgresRuntimeOwnerRegistry(databaseUrl ?? "");
   const pool = new Pool({ connectionString: databaseUrl });
+  let owner: RuntimeOwnerRecord;
 
   beforeAll(async () => {
     const database = await pool.query<{ current_database: string }>("SELECT current_database()");
@@ -22,35 +26,53 @@ describeDatabase("PostgreSQL controlled terminal geometry", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("TRUNCATE sessions, actors, outbox RESTART IDENTITY CASCADE");
+    await pool.query("TRUNCATE sessions, actors, outbox, runtime_workers RESTART IDENTITY CASCADE");
+    owner = await registry.registerOwner({
+      endpoint: "/private/tmp/iterminal-geometry-test.sock",
+      instanceId: `geometry_${randomUUID()}`,
+      leaseMilliseconds: 60_000,
+      ownerId: "owner-postgres-geometry",
+    });
   });
 
   afterAll(async () => {
     await durability.close();
+    await registry.close();
     await pool.end();
   });
 
   it("admits exactly one concurrent resize for one expected geometry version", async () => {
     const starting = sessionFixture();
-    await durability.createSession(starting, [eventFixture(starting, "session.created")]);
+    const fence = await durability.createSession(
+      starting,
+      [eventFixture(starting, "session.created")],
+      owner,
+      60_000,
+    );
     const ready: Session = { ...starting, status: "READY" };
-    await durability.markSessionReady(ready, process.pid, eventFixture(ready, "session.ready"), {
-      contentHash: "0".repeat(64),
-      cwd: ready.workspaceRoot,
-      filteredEnvironment: {},
-      observedAt: ready.createdAt,
-      sessionId: ready.id,
-      shell: ready.shell,
-      sourceGeneration: ready.generation,
-      version: 1,
-      workspaceRoot: ready.workspaceRoot,
-    });
+    await durability.markSessionReady(
+      fence,
+      ready,
+      process.pid,
+      eventFixture(ready, "session.ready"),
+      {
+        contentHash: "0".repeat(64),
+        cwd: ready.workspaceRoot,
+        filteredEnvironment: {},
+        observedAt: ready.createdAt,
+        sessionId: ready.id,
+        shell: ready.shell,
+        sourceGeneration: ready.generation,
+        version: 1,
+        workspaceRoot: ready.workspaceRoot,
+      },
+    );
     const left = resizeFixture(ready, actorFixture("left"), 96, 30);
     const right = resizeFixture(ready, actorFixture("right"), 100, 32);
 
     const attempts = await Promise.allSettled([
-      durability.acceptResize(left, eventFixture(ready, "action.accepted", left), ready.ownerId),
-      durability.acceptResize(right, eventFixture(ready, "action.accepted", right), ready.ownerId),
+      durability.acceptResize(fence, left, eventFixture(ready, "action.accepted", left)),
+      durability.acceptResize(fence, right, eventFixture(ready, "action.accepted", right)),
     ]);
     expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
     const rejected = attempts.find((attempt) => attempt.status === "rejected");

@@ -79,12 +79,8 @@ describeDatabase("M4.1 durable Runtime daemon", () => {
       sessionId: session.id,
     });
     await waitUntilRunning(client, python.execution.id);
-    const interactive = await callTool<SessionResult>(client, "session_get", {
-      sessionId: session.id,
-    });
     await callTool(client, "input", {
       data: 'import os; print(os.getcwd()); print(os.environ["ITERM_DURABLE"]); print(6 * 7)\nexit()\n',
-      expectedScreenVersion: interactive.screenVersion,
       generation: session.generation,
       idempotencyKey: "durable-input",
       sessionId: session.id,

@@ -6,6 +6,7 @@ import {
   PostgresRuntimeDurability,
   PostgresRuntimeOwnerRegistry,
 } from "@iterminal/persistence-postgres";
+import type { SessionFence } from "@iterminal/application";
 import { UnixRuntimeClient } from "@iterminal/runtime-rpc";
 import { Pool } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -80,6 +81,16 @@ describeDatabase("M9.1 Runtime daemon owner registry lifecycle", () => {
       status: "ACTIVE",
     });
     expect((await requiredObserver().resolveLiveOwner(ownerId))?.version).toBeGreaterThan(1);
+    const renewedLease = await pool.query<{
+      lease_expires_at: Date;
+      version: string;
+    }>(
+      `SELECT lease_expires_at, version::text FROM session_leases
+        WHERE session_id = $1 AND session_generation = $2`,
+      [session.id, session.generation],
+    );
+    expect(Number.parseInt(renewedLease.rows[0]?.version ?? "0", 10)).toBeGreaterThan(1);
+    expect(renewedLease.rows[0]?.lease_expires_at.getTime()).toBeGreaterThan(Date.now());
 
     const conflicting = await startRuntimeDaemon({
       databaseHealthCheckMilliseconds: 50,
@@ -124,6 +135,13 @@ describeDatabase("M9.1 Runtime daemon owner registry lifecycle", () => {
       status: "STOPPED",
     });
     expect(stopped.rows[0]?.stopped_at).not.toBeNull();
+    const releasedLease = await pool.query<{ release_reason: string; released_at: Date | null }>(
+      `SELECT released_at, release_reason FROM session_leases
+        WHERE session_id = $1 AND session_generation = $2`,
+      [session.id, session.generation],
+    );
+    expect(releasedLease.rows[0]).toMatchObject({ release_reason: "session closed" });
+    expect(releasedLease.rows[0]?.released_at).not.toBeNull();
 
     const replacement = await startRuntimeDaemon({
       databaseHealthCheckMilliseconds: 50,
@@ -164,6 +182,25 @@ describeDatabase("M9.1 Runtime daemon owner registry lifecycle", () => {
     const session = await rpc.createSession({ shell: "zsh", workspaceRoot: workspace });
     const first = daemon.ownerRegistration();
     if (first === undefined) throw new Error("Daemon owner registration is missing");
+    const lease = await pool.query<{
+      fencing_token: string;
+      owner_instance_id: string;
+      owner_registry_epoch: string;
+    }>(
+      `SELECT fencing_token::text, owner_instance_id, owner_registry_epoch::text
+         FROM session_leases WHERE session_id = $1 AND session_generation = $2`,
+      [session.id, session.generation],
+    );
+    const leaseRow = lease.rows[0];
+    if (leaseRow === undefined) throw new Error("Session fence was not acquired");
+    const staleFence: SessionFence = {
+      epoch: Number.parseInt(leaseRow.owner_registry_epoch, 10),
+      fencingToken: leaseRow.fencing_token,
+      generation: session.generation,
+      instanceId: leaseRow.owner_instance_id,
+      ownerId,
+      sessionId: session.id,
+    };
 
     await requiredObserver().stopOwner(first);
     const replacement = await requiredObserver().registerOwner({
@@ -174,6 +211,38 @@ describeDatabase("M9.1 Runtime daemon owner registry lifecycle", () => {
     });
     expect(replacement.epoch).toBe(2);
 
+    const staleWriter = new PostgresRuntimeDurability(databaseUrl ?? "");
+    await expect(
+      staleWriter.appendEvent(staleFence, {
+        id: `evt_stale_${Date.now().toString()}`,
+        observedAt: new Date().toISOString(),
+        payload: { mustNotCommit: true },
+        sessionGeneration: session.generation,
+        sessionId: session.id,
+        type: "test.stale_write",
+      }),
+    ).rejects.toMatchObject({ code: "SESSION_LEASE_LOST", retryable: false });
+    const recovery = await staleWriter.recoverOwner(replacement, "replacement fenced old owner");
+    expect(recovery).toMatchObject({ brokenSessions: 1 });
+    const durable = await pool.query<{
+      event_count: string;
+      released_at: Date | null;
+      status: string;
+    }>(
+      `SELECT s.status, lease.released_at,
+              (SELECT count(*)::text FROM session_events event
+                WHERE event.session_id = s.id AND event.event_type = 'test.stale_write')
+                AS event_count
+         FROM sessions s
+         JOIN session_leases lease
+           ON lease.session_id = s.id AND lease.session_generation = s.current_generation
+        WHERE s.id = $1`,
+      [session.id],
+    );
+    expect(durable.rows[0]).toMatchObject({ event_count: "0", status: "BROKEN" });
+    expect(durable.rows[0]?.released_at).not.toBeNull();
+    await staleWriter.close();
+
     await waitUntil(() => daemon.runtime.getSession(session.id).status === "BROKEN");
     expect(daemon.runtime.isDurabilityHealthy()).toBe(false);
     expect(daemon.durabilityState().phase).not.toBe("READY");
@@ -182,6 +251,70 @@ describeDatabase("M9.1 Runtime daemon owner registry lifecycle", () => {
       epoch: 2,
       instanceId: "owner-m9-fenced-b",
     });
+  }, 30_000);
+
+  it("closes the local PTY and recovers only as a new Session after its Session fence is revoked", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "iterminal-m9-session-fence-")));
+    fixtures.push(root);
+    const workspace = join(root, "workspace");
+    await mkdir(workspace, { recursive: true });
+    const ownerId = "owner-m9-session-fence";
+    const daemon = await startRuntimeDaemon({
+      databaseHealthCheckMilliseconds: 25,
+      databaseReconnectInitialMilliseconds: 20,
+      databaseReconnectJitterRatio: 0,
+      databaseReconnectMaxMilliseconds: 20,
+      databaseUrl: databaseUrl ?? "",
+      ownerId,
+      ownerInstanceId: "owner-m9-session-fence-a",
+      ownerLeaseMilliseconds: 500,
+      sessionLeaseMilliseconds: 250,
+      socketPath: join(root, "a.sock"),
+    });
+    daemons.push(daemon);
+    const rpc = new UnixRuntimeClient(daemon.socketPath);
+    const session = await rpc.createSession({ shell: "zsh", workspaceRoot: workspace });
+    const sleeping = await rpc.startExecute({
+      actor: {
+        client: "m93-fence-test",
+        id: "agent-m93-fence-test",
+        principal: "m93-fence-test",
+        type: "agent",
+      },
+      command: "sleep 30",
+      idempotencyKey: "m93-revoked-sleep",
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+    });
+    await waitUntil(() => daemon.runtime.getExecution(sleeping.execution.id).status === "RUNNING");
+
+    await pool.query(
+      `UPDATE session_leases
+          SET released_at = now(), release_reason = 'injected revocation',
+              lease_expires_at = now(), version = version + 1
+        WHERE session_id = $1 AND session_generation = $2`,
+      [session.id, session.generation],
+    );
+
+    await waitUntil(() => daemon.runtime.getSession(session.id).status === "BROKEN");
+    await waitUntil(
+      () => daemon.durabilityState().phase === "READY" && daemon.runtime.isDurabilityHealthy(),
+    );
+    const durable = await pool.query<{ execution_status: string; session_status: string }>(
+      `SELECT s.status AS session_status, e.status AS execution_status
+         FROM sessions s JOIN executions e ON e.id = s.active_execution_id OR e.session_id = s.id
+        WHERE s.id = $1 LIMIT 1`,
+      [session.id],
+    );
+    expect(durable.rows[0]).toMatchObject({
+      execution_status: "UNKNOWN",
+      session_status: "BROKEN",
+    });
+
+    const replacement = await rpc.createSession({ shell: "zsh", workspaceRoot: workspace });
+    expect(replacement).toMatchObject({ generation: 1, ownerId, status: "READY" });
+    expect(replacement.id).not.toBe(session.id);
+    await rpc.closeSession(replacement.id, replacement.generation);
   }, 30_000);
 
   function requiredObserver(): PostgresRuntimeOwnerRegistry {

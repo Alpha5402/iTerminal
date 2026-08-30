@@ -145,6 +145,7 @@ function executionFixture(session: Session, command: string): Execution {
     sessionGeneration: session.generation,
     sessionId: session.id,
     status: "RUNNING",
+    version: 1,
   };
 }
 

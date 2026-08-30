@@ -2,6 +2,9 @@ import type {
   DurableExecuteAdmission,
   DurableExecuteAdmissionResult,
   RuntimeDurability,
+  RuntimeOwnerIdentity,
+  SessionFence,
+  SessionLease,
   ShellExecuteCallbacks,
   ShellExecutionResult,
   ShellExecutor,
@@ -288,13 +291,38 @@ class ControlledDurability implements RuntimeDurability {
   public failInteraction = false;
   public writeAttempts = 0;
   public interactionWriteAttempts = 0;
+  #nextFencingToken = 1;
 
-  public createSession(): Promise<void> {
-    return Promise.resolve();
+  public createSession(
+    session: { readonly generation: number; readonly id: string },
+    _events: readonly unknown[],
+    owner: RuntimeOwnerIdentity,
+  ): Promise<SessionLease> {
+    return Promise.resolve(this.#lease(session.id, session.generation, owner));
   }
 
-  public createForkSession(): Promise<void> {
-    return this.forkError === undefined ? Promise.resolve() : Promise.reject(this.forkError);
+  public createForkSession(
+    input: { readonly child: { readonly generation: number; readonly id: string } },
+    owner: RuntimeOwnerIdentity,
+  ): Promise<SessionLease> {
+    return this.forkError === undefined
+      ? Promise.resolve(this.#lease(input.child.id, input.child.generation, owner))
+      : Promise.reject(this.forkError);
+  }
+
+  public renewSessionLeases(
+    _owner: RuntimeOwnerIdentity,
+    leases: readonly SessionFence[],
+  ): Promise<readonly SessionLease[]> {
+    return Promise.resolve(
+      leases.map((lease) => ({
+        ...lease,
+        acquiredAt: new Date(0).toISOString(),
+        leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+        renewedAt: new Date().toISOString(),
+        version: 2,
+      })),
+    );
   }
 
   public markSessionReady(): Promise<void> {
@@ -309,7 +337,10 @@ class ControlledDurability implements RuntimeDurability {
     return Promise.resolve();
   }
 
-  public acceptExecute(input: DurableExecuteAdmission): Promise<DurableExecuteAdmissionResult> {
+  public acceptExecute(
+    _fence: SessionFence,
+    input: DurableExecuteAdmission,
+  ): Promise<DurableExecuteAdmissionResult> {
     if (this.executeError !== undefined) return Promise.reject(this.executeError);
     if (this.failExecute) return Promise.reject(unavailable());
     return Promise.resolve({
@@ -370,6 +401,10 @@ class ControlledDurability implements RuntimeDurability {
     return Promise.resolve();
   }
 
+  public appendOwnerEvent(): Promise<void> {
+    return Promise.resolve();
+  }
+
   public queryEvents(): Promise<EventPage> {
     return Promise.resolve({ events: [], truncated: false });
   }
@@ -380,6 +415,20 @@ class ControlledDurability implements RuntimeDurability {
     readonly unknownExecutions: number;
   }> {
     return Promise.resolve({ brokenSessions: 0, rebuildableSessions: [], unknownExecutions: 0 });
+  }
+
+  #lease(sessionId: string, generation: number, owner: RuntimeOwnerIdentity): SessionLease {
+    const now = new Date();
+    return {
+      acquiredAt: now.toISOString(),
+      ...owner,
+      fencingToken: (this.#nextFencingToken++).toString(),
+      generation,
+      leaseExpiresAt: new Date(now.getTime() + 60_000).toISOString(),
+      renewedAt: now.toISOString(),
+      sessionId,
+      version: 1,
+    };
   }
 }
 

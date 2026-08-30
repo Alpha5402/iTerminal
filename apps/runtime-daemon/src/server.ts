@@ -41,9 +41,11 @@ export interface RuntimeDaemonHandle extends RuntimeRpcServerHandle {
 }
 
 const DEFAULT_OWNER_LEASE_MILLISECONDS = 15_000;
+const DEFAULT_SESSION_LEASE_MILLISECONDS = 15_000;
 const DEFAULT_DATABASE_HEALTH_CHECK_MILLISECONDS = 1_000;
 
 export async function startRuntimeDaemon(options: {
+  readonly beforeAcceptExecuteCommit?: () => void;
   readonly checkpointEnvironmentKeys?: readonly string[];
   readonly databaseHealthCheckMilliseconds?: number;
   readonly databaseUrl?: string;
@@ -58,6 +60,7 @@ export async function startRuntimeDaemon(options: {
   readonly ownerId?: string;
   readonly ownerInstanceId?: string;
   readonly ownerLeaseMilliseconds?: number;
+  readonly sessionLeaseMilliseconds?: number;
   readonly socketPath: string;
   readonly runtime?: RuntimeService;
 }): Promise<RuntimeDaemonHandle> {
@@ -74,7 +77,10 @@ export async function startRuntimeDaemon(options: {
   }
   if (
     options.databaseUrl === undefined &&
-    (options.ownerInstanceId !== undefined || options.ownerLeaseMilliseconds !== undefined)
+    (options.beforeAcceptExecuteCommit !== undefined ||
+      options.ownerInstanceId !== undefined ||
+      options.ownerLeaseMilliseconds !== undefined ||
+      options.sessionLeaseMilliseconds !== undefined)
   ) {
     throw new RuntimeError(
       "INVALID_REQUEST",
@@ -84,6 +90,7 @@ export async function startRuntimeDaemon(options: {
   if (
     options.runtime !== undefined &&
     (options.databaseUrl !== undefined ||
+      options.beforeAcceptExecuteCommit !== undefined ||
       options.databaseHealthCheckMilliseconds !== undefined ||
       options.databaseStatementTimeoutMilliseconds !== undefined ||
       options.checkpointEnvironmentKeys !== undefined ||
@@ -95,7 +102,8 @@ export async function startRuntimeDaemon(options: {
       options.onDurabilityState !== undefined ||
       options.outboxMaxPending !== undefined ||
       options.ownerInstanceId !== undefined ||
-      options.ownerLeaseMilliseconds !== undefined)
+      options.ownerLeaseMilliseconds !== undefined ||
+      options.sessionLeaseMilliseconds !== undefined)
   ) {
     throw new RuntimeError(
       "INVALID_REQUEST",
@@ -106,6 +114,9 @@ export async function startRuntimeDaemon(options: {
     options.databaseUrl === undefined
       ? undefined
       : new PostgresRuntimeDurability(options.databaseUrl, {
+          ...(options.beforeAcceptExecuteCommit === undefined
+            ? {}
+            : { beforeAcceptExecuteCommit: options.beforeAcceptExecuteCommit }),
           ...(options.databaseStatementTimeoutMilliseconds === undefined
             ? {}
             : { statementTimeoutMilliseconds: options.databaseStatementTimeoutMilliseconds }),
@@ -127,19 +138,28 @@ export async function startRuntimeDaemon(options: {
     options.ownerLeaseMilliseconds ?? DEFAULT_OWNER_LEASE_MILLISECONDS,
     "ownerLeaseMilliseconds",
   );
+  const sessionLeaseMilliseconds = positiveInteger(
+    options.sessionLeaseMilliseconds ?? DEFAULT_SESSION_LEASE_MILLISECONDS,
+    "sessionLeaseMilliseconds",
+  );
   const databaseHealthCheckMilliseconds = positiveInteger(
     options.databaseHealthCheckMilliseconds ?? DEFAULT_DATABASE_HEALTH_CHECK_MILLISECONDS,
     "databaseHealthCheckMilliseconds",
   );
   if (
     ownerRegistry !== undefined &&
-    ownerLeaseMilliseconds <= databaseHealthCheckMilliseconds * 2
+    (ownerLeaseMilliseconds <= databaseHealthCheckMilliseconds * 2 ||
+      sessionLeaseMilliseconds <= databaseHealthCheckMilliseconds * 2)
   ) {
     await Promise.all([durability?.close(), ownerRegistry.close()]);
     throw new RuntimeError(
       "INVALID_REQUEST",
-      "Runtime owner lease must exceed two database health-check intervals",
-      { databaseHealthCheckMilliseconds, ownerLeaseMilliseconds },
+      "Runtime owner and Session leases must exceed two database health-check intervals",
+      {
+        databaseHealthCheckMilliseconds,
+        ownerLeaseMilliseconds,
+        sessionLeaseMilliseconds,
+      },
     );
   }
   const runtime =
@@ -155,6 +175,7 @@ export async function startRuntimeDaemon(options: {
       ...(options.hooks === undefined ? {} : { hooks: options.hooks }),
       ownerId,
       screenProjectionFactory: new XtermScreenProjectionFactory(),
+      sessionLeaseMilliseconds,
     });
   let rpc: RuntimeRpcServerHandle | undefined;
   let durabilityState: RuntimeDaemonDurabilityState =
@@ -290,6 +311,10 @@ async function closeDaemon(
   if (canPersistShutdown && ownerRegistry !== undefined && ownerRegistration !== undefined) {
     await ownerRegistry
       .beginOwnerDrain(ownerRegistration, ownerLeaseMilliseconds)
+      .then((draining) => {
+        runtime.activateDurableOwner(draining);
+        return runtime.renewDurableSessionLeases();
+      })
       .catch((error: unknown) => {
         errors.push(error);
         runtime.reportDurabilityUnavailable(error);

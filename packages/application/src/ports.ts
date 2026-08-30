@@ -193,6 +193,19 @@ export interface RuntimeOwnerRecord extends RuntimeOwnerRoute {
   readonly activeSessionCount: number;
 }
 
+export interface SessionFence extends RuntimeOwnerIdentity {
+  readonly fencingToken: string;
+  readonly generation: number;
+  readonly sessionId: string;
+}
+
+export interface SessionLease extends SessionFence {
+  readonly acquiredAt: string;
+  readonly leaseExpiresAt: string;
+  readonly renewedAt: string;
+  readonly version: number;
+}
+
 export interface RuntimeRouteResolution {
   readonly liveOwner?: RuntimeOwnerRoute;
   readonly ownerId: string;
@@ -222,35 +235,67 @@ export interface RuntimeOwnerRegistry {
 }
 
 export interface RuntimeDurability {
-  createSession(session: Session, events: readonly DurableSessionEvent[]): Promise<void>;
+  createSession(
+    session: Session,
+    events: readonly DurableSessionEvent[],
+    owner: RuntimeOwnerIdentity,
+    leaseMilliseconds: number,
+  ): Promise<SessionLease>;
+  renewSessionLeases(
+    owner: RuntimeOwnerIdentity,
+    leases: readonly SessionFence[],
+    leaseMilliseconds: number,
+  ): Promise<readonly SessionLease[]>;
   markSessionReady(
+    fence: SessionFence,
     session: Session,
     shellPid: number,
     event: DurableSessionEvent,
     checkpoint: ShellCheckpoint,
     additionalEvents?: readonly DurableSessionEvent[],
   ): Promise<void>;
-  createForkSession(input: DurableForkAdmission): Promise<void>;
+  createForkSession(
+    input: DurableForkAdmission,
+    owner: RuntimeOwnerIdentity,
+    leaseMilliseconds: number,
+    parentFence?: SessionFence,
+  ): Promise<SessionLease>;
   markSessionBroken(
+    fence: SessionFence,
     session: Session,
     events: readonly DurableSessionEvent[],
     reason: string,
+    activeExecution?: Readonly<{ readonly id: string; readonly version: number }>,
   ): Promise<void>;
-  closeSession(session: Session, event: DurableSessionEvent): Promise<void>;
-  acceptExecute(input: DurableExecuteAdmission): Promise<DurableExecuteAdmissionResult>;
+  closeSession(
+    fence: SessionFence,
+    session: Session,
+    event: DurableSessionEvent,
+    activeExecution?: Readonly<{ readonly id: string; readonly version: number }>,
+  ): Promise<void>;
+  acceptExecute(
+    fence: SessionFence,
+    input: DurableExecuteAdmission,
+  ): Promise<DurableExecuteAdmissionResult>;
   markExecutionRunning(input: {
+    readonly fence: SessionFence;
+    readonly expectedExecutionVersion: number;
     readonly session: Session;
     readonly action: ExecuteAction;
     readonly execution: Execution;
     readonly event: DurableSessionEvent;
   }): Promise<void>;
   markExecutionWriteAttempted(input: {
+    readonly fence: SessionFence;
+    readonly expectedExecutionVersion: number;
     readonly session: Session;
     readonly action: ExecuteAction;
     readonly execution: Execution;
     readonly event: DurableSessionEvent;
   }): Promise<void>;
   finishExecution(input: {
+    readonly fence: SessionFence;
+    readonly expectedExecutionVersion: number;
     readonly session: Session;
     readonly action: ExecuteAction;
     readonly execution: Execution;
@@ -258,44 +303,62 @@ export interface RuntimeDurability {
     readonly checkpoint?: ShellCheckpoint;
   }): Promise<void>;
   failExecution(input: {
+    readonly fence: SessionFence;
+    readonly expectedExecutionVersion: number;
     readonly session: Session;
     readonly action: ExecuteAction;
     readonly execution: Execution;
     readonly events: readonly DurableSessionEvent[];
     readonly reason: string;
   }): Promise<void>;
-  acceptInteraction(action: InputAction | ControlAction, event: DurableSessionEvent): Promise<void>;
-  markInteractionWriteAttempted(
+  acceptInteraction(
+    fence: SessionFence,
     action: InputAction | ControlAction,
     event: DurableSessionEvent,
-    ownerId: string,
   ): Promise<void>;
-  finishInteraction(action: InputAction | ControlAction, event: DurableSessionEvent): Promise<void>;
-  acceptResize(action: ResizeAction, event: DurableSessionEvent, ownerId: string): Promise<void>;
-  markResizeWriteAttempted(
+  markInteractionWriteAttempted(
+    fence: SessionFence,
+    action: InputAction | ControlAction,
+    event: DurableSessionEvent,
+  ): Promise<void>;
+  finishInteraction(
+    fence: SessionFence,
+    action: InputAction | ControlAction,
+    event: DurableSessionEvent,
+  ): Promise<void>;
+  acceptResize(
+    fence: SessionFence,
     action: ResizeAction,
     event: DurableSessionEvent,
-    ownerId: string,
+  ): Promise<void>;
+  markResizeWriteAttempted(
+    fence: SessionFence,
+    action: ResizeAction,
+    event: DurableSessionEvent,
   ): Promise<void>;
   finishResize(input: {
+    readonly fence: SessionFence;
     readonly action: ResizeAction;
     readonly event: DurableSessionEvent;
     readonly session: Session;
     readonly brokenEvent?: DurableSessionEvent;
+    readonly activeExecution?: Readonly<{ readonly id: string; readonly version: number }>;
   }): Promise<void>;
   saveInteractionState(
+    fence: SessionFence,
     state: InteractionState,
     expectedVersion: number,
     event: DurableSessionEvent,
   ): Promise<void>;
-  appendEvent(event: DurableSessionEvent): Promise<void>;
+  appendEvent(fence: SessionFence, event: DurableSessionEvent): Promise<void>;
+  appendOwnerEvent(owner: RuntimeOwnerIdentity, event: DurableSessionEvent): Promise<void>;
   queryEvents(
     sessionId: string,
     generation: number,
     after: number,
     limit: number,
   ): Promise<EventPage>;
-  recoverOwner(ownerId: string, reason: string): Promise<DurableOwnerRecoveryResult>;
+  recoverOwner(owner: RuntimeOwnerIdentity, reason: string): Promise<DurableOwnerRecoveryResult>;
 }
 
 export interface RuntimeServiceOptions {
@@ -310,6 +373,7 @@ export interface RuntimeServiceOptions {
     readonly beforeExecutionFinishPersist?: (execution: Execution) => void;
   }>;
   readonly ownerId?: string;
+  readonly sessionLeaseMilliseconds?: number;
   readonly screenProjectionFactory?: TerminalScreenProjectionFactory;
   readonly now?: () => Date;
 }

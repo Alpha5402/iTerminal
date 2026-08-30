@@ -70,6 +70,7 @@ const runtimeErrorCodes = new Set<RuntimeError["code"]>([
   "OWNER_CONFLICT",
   "OWNER_LEASE_LOST",
   "OWNER_ROUTE_UNAVAILABLE",
+  "SESSION_LEASE_LOST",
   "RUNTIME_UNAVAILABLE",
   "RESYNC_REQUIRED",
   "INVALID_REQUEST",

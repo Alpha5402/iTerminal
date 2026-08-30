@@ -83,6 +83,8 @@ export function startPostgresRecoverySupervisor(options: {
               ownerRegistration ?? missingOwnerRegistration(),
               options.ownership.leaseMilliseconds,
             );
+            options.runtime.activateDurableOwner(ownerRegistration);
+            await options.runtime.renewDurableSessionLeases();
           }
         } catch (error) {
           options.runtime.reportDurabilityUnavailable(error);
@@ -100,6 +102,7 @@ export function startPostgresRecoverySupervisor(options: {
             leaseMilliseconds: options.ownership.leaseMilliseconds,
             ownerId: options.ownership.ownerId,
           });
+          options.runtime.activateDurableOwner(ownerRegistration);
         }
         await options.runtime.recoverDurableOwner(
           recoveredOnce

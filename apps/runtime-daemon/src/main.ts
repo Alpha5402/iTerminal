@@ -9,6 +9,7 @@ const databaseUrl = process.env.ITERM_DATABASE_URL;
 const ownerId = process.env.ITERM_RUNTIME_OWNER_ID;
 const ownerInstanceId = process.env.ITERM_RUNTIME_OWNER_INSTANCE_ID;
 const ownerLeaseMilliseconds = optionalPositiveInteger("ITERM_RUNTIME_OWNER_LEASE_MS");
+const sessionLeaseMilliseconds = optionalPositiveInteger("ITERM_SESSION_LEASE_MS");
 const executionDispatch = parseExecutionDispatch(process.env.ITERM_EXECUTION_DISPATCH);
 const checkpointEnvironmentKeys = optionalEnvironmentKeys("ITERM_CHECKPOINT_ENV_KEYS");
 const databaseStatementTimeoutMilliseconds = optionalPositiveInteger(
@@ -37,6 +38,7 @@ const daemon = await startRuntimeDaemon({
   ...(ownerId === undefined ? {} : { ownerId }),
   ...(ownerInstanceId === undefined ? {} : { ownerInstanceId }),
   ...(ownerLeaseMilliseconds === undefined ? {} : { ownerLeaseMilliseconds }),
+  ...(sessionLeaseMilliseconds === undefined ? {} : { sessionLeaseMilliseconds }),
   onDurabilityState: reportDurabilityState,
 });
 process.stderr.write(

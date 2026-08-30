@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import type { Actor } from "@iterminal/domain";
+import type { SessionFence } from "@iterminal/application";
 import { RuntimeError } from "@iterminal/domain";
 import { Pool, type PoolClient } from "pg";
 
 import { guardPostgresPool } from "./postgres-pool.js";
+import { assertSessionFence, throwSessionLeaseLost } from "./session-fencing.js";
 
 const MAX_EVENT_LIMIT = 500;
 const MAX_SEARCH_LIMIT = 50;
@@ -85,10 +87,16 @@ interface EventRow {
   created_at: Date;
 }
 
+export interface PostgresObservationRepositoryOptions {
+  readonly requireSessionFence?: boolean;
+}
+
 export class PostgresObservationRepository {
   readonly #pool: Pool;
+  readonly #requireSessionFence: boolean;
 
-  public constructor(connectionString: string) {
+  public constructor(connectionString: string, options: PostgresObservationRepositoryOptions = {}) {
+    this.#requireSessionFence = options.requireSessionFence ?? false;
     this.#pool = guardPostgresPool(
       new Pool({
         connectionString,
@@ -266,6 +274,7 @@ export class PostgresObservationRepository {
   }
 
   public async appendOutput(input: {
+    readonly fence?: SessionFence;
     readonly actionId?: string;
     readonly actor?: Actor;
     readonly eventId?: string;
@@ -278,6 +287,24 @@ export class PostgresObservationRepository {
     readonly payload?: Readonly<Record<string, unknown>>;
   }): Promise<ArtifactWriteResult> {
     return this.#transaction(async (client) => {
+      if (input.fence === undefined) {
+        if (this.#requireSessionFence) {
+          throw new RuntimeError(
+            "SESSION_LEASE_LOST",
+            "A live Session fence is required for terminal output persistence",
+            { generation: input.generation, sessionId: input.sessionId },
+            false,
+          );
+        }
+      } else {
+        if (
+          input.fence.sessionId !== input.sessionId ||
+          input.fence.generation !== input.generation
+        ) {
+          throwSessionLeaseLost(input.fence);
+        }
+        await assertSessionFence(client, input.fence);
+      }
       if (input.actor !== undefined) {
         await client.query(
           `INSERT INTO actors (id, actor_type, principal, client)

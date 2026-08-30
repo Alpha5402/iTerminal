@@ -1,29 +1,20 @@
-import { RuntimeService } from "@iterminal/application";
-import { PtyShellExecutorFactory } from "@iterminal/executor-pty";
-import { PostgresRuntimeDurability } from "@iterminal/persistence-postgres";
-import { MemoryRuntimeStore } from "@iterminal/runtime-memory";
-
 import { startRuntimeDaemon } from "../server.js";
 
 const ownerId = requiredEnvironment("ITERM_RUNTIME_OWNER_ID");
-const durability = new PostgresRuntimeDurability(requiredEnvironment("ITERM_DATABASE_URL"), {
+const daemon = await startRuntimeDaemon({
   beforeAcceptExecuteCommit: () => process.kill(process.pid, "SIGKILL"),
-});
-await durability.migrate();
-const runtime = new RuntimeService(new MemoryRuntimeStore(), new PtyShellExecutorFactory(), {
-  durability,
+  databaseHealthCheckMilliseconds: 50,
+  databaseUrl: requiredEnvironment("ITERM_DATABASE_URL"),
   executionDispatch: "external",
   ownerId,
-});
-const daemon = await startRuntimeDaemon({
-  runtime,
+  ownerLeaseMilliseconds: 500,
+  sessionLeaseMilliseconds: 500,
   socketPath: requiredEnvironment("ITERM_RUNTIME_SOCKET"),
 });
 process.stderr.write("precommit-crash daemon ready\n");
 
 const shutdown = async (): Promise<void> => {
   await daemon.close();
-  await durability.close();
 };
 process.once("SIGINT", () => void shutdown().then(() => process.exit(130)));
 process.once("SIGTERM", () => void shutdown().then(() => process.exit(0)));

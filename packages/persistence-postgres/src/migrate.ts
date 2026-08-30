@@ -2,20 +2,48 @@ import { readFile } from "node:fs/promises";
 
 import type { Pool } from "pg";
 
+const MIGRATION_ADVISORY_LOCK = 1_769_238_388;
+
 const migrations = [
-  "001_initial.sql",
-  "002_bounded_observation.sql",
-  "003_reliable_messaging.sql",
-  "004_interaction_guards.sql",
-  "005_terminal_geometry.sql",
-  "006_session_fork.sql",
-  "007_runtime_owner_registry.sql",
-  "008_runtime_router_indexes.sql",
+  { file: "001_initial.sql", version: 1 },
+  { file: "002_bounded_observation.sql", version: 2 },
+  { file: "003_reliable_messaging.sql", version: 3 },
+  { file: "004_interaction_guards.sql", version: 4 },
+  { file: "005_terminal_geometry.sql", version: 5 },
+  { file: "006_session_fork.sql", version: 6 },
+  { file: "007_runtime_owner_registry.sql", version: 7 },
+  { file: "008_runtime_router_indexes.sql", version: 8 },
+  { file: "009_session_fencing.sql", version: 9 },
 ] as const;
 
 export async function migrateDatabase(pool: Pool): Promise<void> {
-  for (const migration of migrations) {
-    const sql = await readFile(new URL(`../migrations/${migration}`, import.meta.url), "utf8");
-    await pool.query(sql);
+  const client = await pool.connect();
+  try {
+    await client.query("SELECT pg_advisory_lock($1)", [MIGRATION_ADVISORY_LOCK]);
+    const table = await client.query<{ schema_migrations: string | null }>(
+      "SELECT to_regclass('public.schema_migrations')::text AS schema_migrations",
+    );
+    const applied = new Set<number>();
+    const schemaMigrations = table.rows[0]?.schema_migrations;
+    if (schemaMigrations !== undefined && schemaMigrations !== null) {
+      const versions = await client.query<{ version: number }>(
+        "SELECT version FROM schema_migrations ORDER BY version",
+      );
+      for (const row of versions.rows) applied.add(row.version);
+    }
+    for (const migration of migrations) {
+      if (applied.has(migration.version)) continue;
+      const sql = await readFile(
+        new URL(`../migrations/${migration.file}`, import.meta.url),
+        "utf8",
+      );
+      await client.query(sql);
+      applied.add(migration.version);
+    }
+  } finally {
+    await client.query("SELECT pg_advisory_unlock($1)", [MIGRATION_ADVISORY_LOCK]).catch(() => {
+      // Releasing the connection also releases this session-level advisory lock.
+    });
+    client.release();
   }
 }
