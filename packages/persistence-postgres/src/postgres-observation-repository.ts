@@ -59,6 +59,31 @@ export interface ArtifactWriteResult {
   readonly artifactRef?: string;
 }
 
+export interface ArtifactStoragePolicy {
+  readonly cleanupBatchSize: number;
+  readonly maxArtifactBytes: number;
+  readonly maxBytes: number;
+  readonly retentionMilliseconds: number;
+  readonly updatedAt: string;
+}
+
+export interface ArtifactStorageUsage {
+  readonly artifactCount: number;
+  readonly byteSize: number;
+  readonly updatedAt: string;
+}
+
+export interface ArtifactStorageState {
+  readonly policy: ArtifactStoragePolicy;
+  readonly usage: ArtifactStorageUsage;
+}
+
+export interface ArtifactStorageMaintenanceResult extends ArtifactStorageState {
+  readonly before: ArtifactStorageUsage;
+  readonly deletedArtifacts: number;
+  readonly deletedBytes: number;
+}
+
 interface CursorPayload {
   readonly version: 1;
   readonly sessionId: string;
@@ -82,6 +107,25 @@ interface EventRow {
   client: string | null;
   payload: Record<string, unknown>;
   created_at: Date;
+}
+
+interface ArtifactStorageStateRow {
+  artifact_count: string;
+  cleanup_batch_size: number;
+  max_artifact_bytes: string;
+  max_bytes: string;
+  policy_updated_at: Date;
+  retention_milliseconds: string;
+  usage_byte_size: string;
+  usage_updated_at: Date;
+}
+
+interface ArtifactAdmissionRejection {
+  readonly currentBytes: number;
+  readonly maxArtifactBytes: number;
+  readonly maxBytes: number;
+  readonly reason: "aggregate_budget" | "artifact_too_large";
+  readonly requestedBytes: number;
 }
 
 export interface PostgresObservationRepositoryOptions {
@@ -119,6 +163,27 @@ export class PostgresObservationRepository {
 
   public async healthCheck(): Promise<void> {
     await this.#pool.query("SELECT 1");
+  }
+
+  public async inspectArtifactStorage(): Promise<ArtifactStorageState> {
+    return mapArtifactStorageState(await artifactStorageState(this.#pool));
+  }
+
+  public async maintainArtifactStorage(now?: Date): Promise<ArtifactStorageMaintenanceResult> {
+    if (now !== undefined && Number.isNaN(now.getTime())) {
+      throw new RuntimeError("INVALID_REQUEST", "Artifact maintenance time must be valid");
+    }
+    return this.#transaction(async (client) => {
+      const beforeRow = await artifactStorageState(client);
+      const deleted = await deleteExpiredArtifacts(client, now, beforeRow.cleanup_batch_size);
+      const after = mapArtifactStorageState(await artifactStorageState(client, true));
+      return {
+        ...after,
+        before: mapArtifactStorageState(beforeRow).usage,
+        deletedArtifacts: deleted.count,
+        deletedBytes: deleted.bytes,
+      };
+    });
   }
 
   public async getEvent(eventId: string): Promise<EventObservation | undefined> {
@@ -295,7 +360,21 @@ export class PostgresObservationRepository {
     readonly inlineThresholdBytes?: number;
     readonly payload?: Readonly<Record<string, unknown>>;
   }): Promise<ArtifactWriteResult> {
-    return this.#transaction(async (client) => {
+    const threshold = input.inlineThresholdBytes ?? DEFAULT_INLINE_BYTES;
+    if (!Number.isSafeInteger(threshold) || threshold < 0) {
+      throw new RuntimeError(
+        "INVALID_REQUEST",
+        "Inline threshold must be a non-negative safe integer",
+      );
+    }
+    const content = Buffer.from(input.data, "utf8");
+    const tailPreview = content
+      .subarray(Math.max(0, content.length - DEFAULT_TAIL_BYTES))
+      .toString("utf8");
+    const outcome = await this.#transaction<
+      | Readonly<{ readonly kind: "accepted"; readonly result: ArtifactWriteResult }>
+      | Readonly<{ readonly kind: "rejected"; readonly rejection: ArtifactAdmissionRejection }>
+    >(async (client) => {
       if (input.fence === undefined) {
         if (this.#requireSessionFence) {
           throw new RuntimeError(
@@ -314,30 +393,47 @@ export class PostgresObservationRepository {
         }
         await assertSessionFence(client, input.fence);
       }
-      if (input.actor !== undefined) {
-        await persistActor(client, input.actor);
-      }
-      const content = Buffer.from(input.data, "utf8");
-      const tailPreview = content
-        .subarray(Math.max(0, content.length - DEFAULT_TAIL_BYTES))
-        .toString("utf8");
-      const sequence = await allocateEventSequence(client, input.sessionId, input.generation, 1);
-      const threshold = input.inlineThresholdBytes ?? DEFAULT_INLINE_BYTES;
-      if (!Number.isSafeInteger(threshold) || threshold < 0) {
-        throw new RuntimeError(
-          "INVALID_REQUEST",
-          "Inline threshold must be a non-negative safe integer",
-        );
-      }
       let artifactRef: string | undefined;
       if (content.length > threshold) {
+        const beforeCleanup = await artifactStorageState(client);
+        await deleteExpiredArtifacts(client, undefined, beforeCleanup.cleanup_batch_size);
+        const storage = await artifactStorageState(client, true);
+        const currentBytes = safeNonnegativeInteger(
+          storage.usage_byte_size,
+          "artifact storage byte size",
+        );
+        const maxArtifactBytes = positiveIntegerString(
+          storage.max_artifact_bytes,
+          "Artifact maxArtifactBytes",
+        );
+        const maxBytes = positiveIntegerString(storage.max_bytes, "Artifact maxBytes");
+        const rejection: ArtifactAdmissionRejection | undefined =
+          content.length > maxArtifactBytes
+            ? {
+                currentBytes,
+                maxArtifactBytes,
+                maxBytes,
+                reason: "artifact_too_large",
+                requestedBytes: content.length,
+              }
+            : currentBytes > maxBytes - content.length
+              ? {
+                  currentBytes,
+                  maxArtifactBytes,
+                  maxBytes,
+                  reason: "aggregate_budget",
+                  requestedBytes: content.length,
+                }
+              : undefined;
+        if (rejection !== undefined) return { kind: "rejected", rejection };
         artifactRef = `art_${randomUUID()}`;
         await client.query(
           `INSERT INTO artifacts
             (id, session_id, session_generation, execution_id, kind, content,
              content_type, byte_size, sha256, created_at, expires_at)
            VALUES ($1, $2, $3, $4, 'pty_output', $5, 'application/octet-stream',
-                   $6, $7, $8::timestamptz, $8::timestamptz + interval '7 days')`,
+                   $6, $7, $8::timestamptz,
+                   now() + $9::bigint * interval '1 millisecond')`,
           [
             artifactRef,
             input.sessionId,
@@ -347,9 +443,14 @@ export class PostgresObservationRepository {
             content.length,
             createHash("sha256").update(content).digest("hex"),
             input.createdAt,
+            storage.retention_milliseconds,
           ],
         );
       }
+      if (input.actor !== undefined) {
+        await persistActor(client, input.actor);
+      }
+      const sequence = await allocateEventSequence(client, input.sessionId, input.generation, 1);
       const payload = {
         ...(input.payload ?? {}),
         byteCount: content.length,
@@ -375,12 +476,17 @@ export class PostgresObservationRepository {
         ],
       );
       return {
-        byteCount: content.length,
-        eventSequence: sequence,
-        tailPreview,
-        ...(artifactRef === undefined ? {} : { artifactRef }),
+        kind: "accepted",
+        result: {
+          byteCount: content.length,
+          eventSequence: sequence,
+          tailPreview,
+          ...(artifactRef === undefined ? {} : { artifactRef }),
+        },
       };
     });
+    if (outcome.kind === "rejected") throw artifactStorageBackpressure(outcome.rejection);
+    return outcome.result;
   }
 
   public async readArtifact(
@@ -468,6 +574,120 @@ function positiveInteger(value: number, name: string): number {
     });
   }
   return value;
+}
+
+async function artifactStorageState(
+  database: Pick<PoolClient, "query">,
+  lock = false,
+): Promise<ArtifactStorageStateRow> {
+  if (lock) {
+    await database.query(
+      "SELECT scope FROM artifact_storage_policies WHERE scope = 'default' FOR UPDATE",
+    );
+    await database.query(
+      "SELECT scope FROM artifact_storage_usage WHERE scope = 'default' FOR UPDATE",
+    );
+  }
+  const result = await database.query<ArtifactStorageStateRow>(
+    `SELECT policy.max_bytes::text, policy.max_artifact_bytes::text,
+            policy.retention_milliseconds::text, policy.cleanup_batch_size,
+            policy.updated_at AS policy_updated_at,
+            usage.artifact_count::text, usage.byte_size::text AS usage_byte_size,
+            usage.updated_at AS usage_updated_at
+      FROM artifact_storage_policies policy
+      JOIN artifact_storage_usage usage USING (scope)
+      WHERE policy.scope = 'default'`,
+  );
+  const row = result.rows[0];
+  if (row === undefined) {
+    throw new RuntimeError("RUNTIME_UNAVAILABLE", "Artifact storage policy is unavailable", {
+      component: "artifact_storage",
+    });
+  }
+  return row;
+}
+
+function mapArtifactStorageState(row: ArtifactStorageStateRow): ArtifactStorageState {
+  return {
+    policy: {
+      cleanupBatchSize: positiveInteger(row.cleanup_batch_size, "Artifact cleanupBatchSize"),
+      maxArtifactBytes: positiveIntegerString(row.max_artifact_bytes, "Artifact maxArtifactBytes"),
+      maxBytes: positiveIntegerString(row.max_bytes, "Artifact maxBytes"),
+      retentionMilliseconds: positiveIntegerString(
+        row.retention_milliseconds,
+        "Artifact retentionMilliseconds",
+      ),
+      updatedAt: row.policy_updated_at.toISOString(),
+    },
+    usage: {
+      artifactCount: safeNonnegativeInteger(row.artifact_count, "Artifact count"),
+      byteSize: safeNonnegativeInteger(row.usage_byte_size, "Artifact byte size"),
+      updatedAt: row.usage_updated_at.toISOString(),
+    },
+  };
+}
+
+async function deleteExpiredArtifacts(
+  client: PoolClient,
+  now: Date | undefined,
+  limit: number,
+): Promise<Readonly<{ readonly bytes: number; readonly count: number }>> {
+  const result = await client.query<{ byte_size: string }>(
+    `WITH candidates AS (
+       SELECT id
+         FROM artifacts
+        WHERE expires_at <= coalesce($1::timestamptz, now())
+        ORDER BY expires_at ASC, id ASC
+        LIMIT $2
+        FOR UPDATE SKIP LOCKED
+     )
+     DELETE FROM artifacts artifact
+      USING candidates
+      WHERE artifact.id = candidates.id
+     RETURNING artifact.byte_size::text`,
+    [now ?? null, limit],
+  );
+  return {
+    bytes: result.rows.reduce(
+      (total, row) => total + safeNonnegativeInteger(row.byte_size, "Deleted Artifact byte size"),
+      0,
+    ),
+    count: result.rowCount ?? 0,
+  };
+}
+
+function artifactStorageBackpressure(rejection: ArtifactAdmissionRejection): RuntimeError {
+  return new RuntimeError(
+    "BACKPRESSURE",
+    rejection.reason === "artifact_too_large"
+      ? "Artifact exceeds the configured per-row storage limit"
+      : "Artifact storage budget is exhausted",
+    {
+      component: "artifact_storage",
+      currentBytes: rejection.currentBytes,
+      maxArtifactBytes: rejection.maxArtifactBytes,
+      maxBytes: rejection.maxBytes,
+      phase: "artifact_admission",
+      requestedBytes: rejection.requestedBytes,
+    },
+    true,
+  );
+}
+
+function positiveIntegerString(value: string, name: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new RuntimeError("RUNTIME_UNAVAILABLE", `${name} is invalid`, { [name]: value });
+  }
+  return parsed;
+}
+
+function safeNonnegativeInteger(value: string, name: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new RuntimeError("RUNTIME_UNAVAILABLE", `${name} is invalid`, { [name]: value });
+  }
+  return parsed;
 }
 
 function eventSelect(): string {

@@ -1585,20 +1585,35 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
   public async appendEvent(fence: SessionFence, event: DurableSessionEvent): Promise<void> {
     assertFenceScope(fence, event.sessionId, event.sessionGeneration);
     if (event.type === "terminal.pty_output" && typeof event.payload.data === "string") {
-      await this.#observation.appendOutput({
-        fence,
-        ...(event.actionId === undefined ? {} : { actionId: event.actionId }),
-        ...(event.actor === undefined ? {} : { actor: event.actor }),
-        createdAt: new Date(event.observedAt),
-        data: event.payload.data,
-        eventId: event.id,
-        ...(event.executionId === undefined ? {} : { executionId: event.executionId }),
-        generation: event.sessionGeneration,
-        payload: Object.fromEntries(
-          Object.entries(event.payload).filter(([key]) => key !== "data" && key !== "byteLength"),
-        ),
-        sessionId: event.sessionId,
-      });
+      try {
+        await this.#observation.appendOutput({
+          fence,
+          ...(event.actionId === undefined ? {} : { actionId: event.actionId }),
+          ...(event.actor === undefined ? {} : { actor: event.actor }),
+          createdAt: new Date(event.observedAt),
+          data: event.payload.data,
+          eventId: event.id,
+          ...(event.executionId === undefined ? {} : { executionId: event.executionId }),
+          generation: event.sessionGeneration,
+          payload: Object.fromEntries(
+            Object.entries(event.payload).filter(([key]) => key !== "data" && key !== "byteLength"),
+          ),
+          sessionId: event.sessionId,
+        });
+      } catch (error) {
+        if (!(error instanceof RuntimeError) || error.code !== "BACKPRESSURE") throw error;
+        await this.#breakSessionForArtifactBackpressure(fence, event, error);
+        throw new RuntimeError(
+          "RUNTIME_UNAVAILABLE",
+          "Artifact storage backpressure broke the Session generation",
+          {
+            component: "artifact_storage",
+            durabilityScope: "session",
+            phase: "durable_output_admission",
+          },
+          false,
+        );
+      }
       const screenVersion = event.payload.screenVersion;
       if (typeof screenVersion === "number" && Number.isSafeInteger(screenVersion)) {
         await this.#transaction(async (client) => {
@@ -1615,6 +1630,80 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
     await this.#transaction(async (client) => {
       await assertSessionFence(client, fence);
       await insertEvents(client, [event]);
+    });
+  }
+
+  async #breakSessionForArtifactBackpressure(
+    fence: SessionFence,
+    event: DurableSessionEvent,
+    backpressure: RuntimeError,
+  ): Promise<void> {
+    await this.#transaction(async (client) => {
+      await assertSessionFence(client, fence);
+      const active = await client.query<{ id: string; version: number }>(
+        `SELECT id, version
+           FROM executions
+          WHERE session_id = $1 AND session_generation = $2
+            AND owner_id = $3 AND status IN ('DISPATCHING', 'RUNNING')
+          FOR UPDATE`,
+        [event.sessionId, event.sessionGeneration, fence.ownerId],
+      );
+      if (active.rows.length > 1) {
+        throw new RuntimeError(
+          "DELIVERY_UNKNOWN",
+          "Session has multiple active Executions during Artifact backpressure",
+          { generation: event.sessionGeneration, sessionId: event.sessionId },
+        );
+      }
+      const currentExecution = active.rows[0];
+      await markActiveExecutionUnknown(
+        client,
+        { generation: event.sessionGeneration, id: event.sessionId, ownerId: fence.ownerId },
+        currentExecution,
+        "durable Artifact output admission failed",
+      );
+      await client.query(
+        `UPDATE sensitive_inputs
+            SET status = 'UNKNOWN', version = version + 1, finished_at = now()
+          WHERE session_id = $1 AND session_generation = $2 AND status = 'ACTIVE'`,
+        [event.sessionId, event.sessionGeneration],
+      );
+      await client.query(
+        `UPDATE sessions
+            SET status = 'BROKEN', active_execution_id = NULL, updated_at = now()
+          WHERE id = $1 AND current_generation = $2 AND status <> 'CLOSED'`,
+        [event.sessionId, event.sessionGeneration],
+      );
+      await client.query(
+        `UPDATE session_generations
+            SET status = 'BROKEN', broken_at = now(),
+                broken_reason = 'durable Artifact output admission failed'
+          WHERE session_id = $1 AND generation = $2 AND status <> 'CLOSED'`,
+        [event.sessionId, event.sessionGeneration],
+      );
+      await client.query(
+        `UPDATE session_forks SET status = 'FAILED', updated_at = now()
+          WHERE child_session_id = $1 AND status = 'STARTING'`,
+        [event.sessionId],
+      );
+      await insertEvents(client, [
+        {
+          id: `evt_artifact_backpressure_${randomUUID()}`,
+          observedAt: new Date().toISOString(),
+          payload: {
+            component: "artifact_storage",
+            currentBytes: backpressure.details.currentBytes,
+            maxArtifactBytes: backpressure.details.maxArtifactBytes,
+            maxBytes: backpressure.details.maxBytes,
+            requestedBytes: backpressure.details.requestedBytes,
+          },
+          sessionGeneration: event.sessionGeneration,
+          sessionId: event.sessionId,
+          type: "session.broken",
+          ...(currentExecution === undefined ? {} : { executionId: currentExecution.id }),
+        },
+      ]);
+      await releaseSessionLease(client, fence, "durable Artifact output admission failed");
     });
   }
 

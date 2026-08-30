@@ -2,42 +2,44 @@
 
 These terms are protocol contracts. Avoid synonyms in code and public APIs unless an adapter must translate them.
 
-| Term                   | Meaning                                                                                                |
-| ---------------------- | ------------------------------------------------------------------------------------------------------ |
-| Actor                  | Human, Agent, Scheduler, or System identity plus an explicit canonical capability set.                 |
-| Capability             | Closed affirmative grant required in addition to role, Input Policy, and Guard admission.              |
-| Session                | Durable collaboration identity bound to a workspace and a sequence of generations.                     |
-| Session generation     | One live incarnation of a Session. It owns exactly one PTY, Shell, and Executor owner.                 |
-| PTY                    | The operating-system pseudo-terminal carrying one merged input/output terminal stream.                 |
-| Shell                  | The persistent top-level bash/zsh process inside the PTY. It owns the real cwd/env/job state.          |
-| Action                 | Immutable Actor request: Execute, Input, SecretInput, Control, or Resize.                              |
-| ExecuteAction          | Request for the persistent Shell to evaluate new top-level Shell input.                                |
-| InputAction            | Atomic byte/key batch targeting the current foreground Execution.                                      |
-| SecretInputAction      | Human-only metadata request to deliver transient secret bytes during a sensitive input period.         |
-| ControlAction          | Explicit TTY control bytes or process-group signal targeting the current Execution.                    |
-| ResizeAction           | Explicit version-guarded request to change one generation's canonical terminal geometry.               |
-| Execution              | Observed attempt to run one ExecuteAction in a specific Session generation.                            |
-| Event                  | Append-only durable fact observed or accepted by the Runtime.                                          |
-| Snapshot               | Best-effort materialized observation of current Session state; not the live truth itself.              |
-| Shell Checkpoint       | Filtered, reconstructable cwd/shell/env state used to fork or rebuild a Session.                       |
-| Session fork           | New independent Session rebuilt from one exact Shell Checkpoint; never a PTY/process clone.            |
-| Virtual Screen         | Versioned VT/ANSI projection of what the terminal currently displays.                                  |
-| Canonical geometry     | Runtime-owned PTY/Virtual Screen rows and columns shared by every viewer of one generation.            |
-| TerminalState          | Exact-generation advisory classification built from Runtime facts and bounded terminal signals.        |
-| Interaction Guard      | Short-lived coordination policy that prevents semantically unsafe competing input.                     |
-| Sensitive input period | Exact-generation, exact-Execution fail-closed output-redaction state opened and finished by one Human. |
-| Owner                  | Worker/process that physically holds a generation's live PTY. It is not a Human/Agent role.            |
-| Owner instance         | One boot-unique Runtime process incarnation registered beneath a stable logical owner ID.              |
-| Registry epoch         | Monotonic owner-incarnation number; fences registry writes but is not a Session fencing token.         |
-| Session lease          | Database-time authority held by one exact owner incarnation for one Session generation.                |
-| Fencing token          | Globally monotonic Session-lease token checked inside every live durable mutation transaction.         |
-| Execution version      | Optimistic version for one Execution transition; independent of owner identity and fencing.            |
-| Runtime Router         | Stateless local RPC adapter that resolves durable owner routes and forwards to the exact daemon.       |
-| Runtime RPC grant      | Signed, expiring operation allowlist bound to an exact or bounded-prefix Actor scope.                  |
-| Placement claim        | Atomic weighted assignment attempt for one new root Session using stable historical attempt debt.      |
-| Action rate limit      | Durable database-time admission bound scoped independently to one Actor and one Session.               |
-| `UNKNOWN`              | The Runtime cannot prove whether a write or external side effect occurred/completed.                   |
-| `BROKEN`               | The generation's PTY/Shell/owner/control protocol is lost or no longer trustworthy.                    |
+| Term                    | Meaning                                                                                                             |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Actor                   | Human, Agent, Scheduler, or System identity plus an explicit canonical capability set.                              |
+| Capability              | Closed affirmative grant required in addition to role, Input Policy, and Guard admission.                           |
+| Session                 | Durable collaboration identity bound to a workspace and a sequence of generations.                                  |
+| Session generation      | One live incarnation of a Session. It owns exactly one PTY, Shell, and Executor owner.                              |
+| PTY                     | The operating-system pseudo-terminal carrying one merged input/output terminal stream.                              |
+| Shell                   | The persistent top-level bash/zsh process inside the PTY. It owns the real cwd/env/job state.                       |
+| Action                  | Immutable Actor request: Execute, Input, SecretInput, Control, or Resize.                                           |
+| ExecuteAction           | Request for the persistent Shell to evaluate new top-level Shell input.                                             |
+| InputAction             | Atomic byte/key batch targeting the current foreground Execution.                                                   |
+| SecretInputAction       | Human-only metadata request to deliver transient secret bytes during a sensitive input period.                      |
+| ControlAction           | Explicit TTY control bytes or process-group signal targeting the current Execution.                                 |
+| ResizeAction            | Explicit version-guarded request to change one generation's canonical terminal geometry.                            |
+| Execution               | Observed attempt to run one ExecuteAction in a specific Session generation.                                         |
+| Event                   | Append-only durable fact observed or accepted by the Runtime.                                                       |
+| Artifact                | Bounded durable binary content referenced by an Event when one persisted output chunk exceeds the inline threshold. |
+| Artifact storage budget | PostgreSQL-authoritative limit over Artifact logical content bytes; not a whole-database or filesystem quota.       |
+| Snapshot                | Best-effort materialized observation of current Session state; not the live truth itself.                           |
+| Shell Checkpoint        | Filtered, reconstructable cwd/shell/env state used to fork or rebuild a Session.                                    |
+| Session fork            | New independent Session rebuilt from one exact Shell Checkpoint; never a PTY/process clone.                         |
+| Virtual Screen          | Versioned VT/ANSI projection of what the terminal currently displays.                                               |
+| Canonical geometry      | Runtime-owned PTY/Virtual Screen rows and columns shared by every viewer of one generation.                         |
+| TerminalState           | Exact-generation advisory classification built from Runtime facts and bounded terminal signals.                     |
+| Interaction Guard       | Short-lived coordination policy that prevents semantically unsafe competing input.                                  |
+| Sensitive input period  | Exact-generation, exact-Execution fail-closed output-redaction state opened and finished by one Human.              |
+| Owner                   | Worker/process that physically holds a generation's live PTY. It is not a Human/Agent role.                         |
+| Owner instance          | One boot-unique Runtime process incarnation registered beneath a stable logical owner ID.                           |
+| Registry epoch          | Monotonic owner-incarnation number; fences registry writes but is not a Session fencing token.                      |
+| Session lease           | Database-time authority held by one exact owner incarnation for one Session generation.                             |
+| Fencing token           | Globally monotonic Session-lease token checked inside every live durable mutation transaction.                      |
+| Execution version       | Optimistic version for one Execution transition; independent of owner identity and fencing.                         |
+| Runtime Router          | Stateless local RPC adapter that resolves durable owner routes and forwards to the exact daemon.                    |
+| Runtime RPC grant       | Signed, expiring operation allowlist bound to an exact or bounded-prefix Actor scope.                               |
+| Placement claim         | Atomic weighted assignment attempt for one new root Session using stable historical attempt debt.                   |
+| Action rate limit       | Durable database-time admission bound scoped independently to one Actor and one Session.                            |
+| `UNKNOWN`               | The Runtime cannot prove whether a write or external side effect occurred/completed.                                |
+| `BROKEN`                | The generation's PTY/Shell/owner/control protocol is lost or no longer trustworthy.                                 |
 
 ## Forbidden conflations
 
@@ -58,6 +60,7 @@ These terms are protocol contracts. Avoid synonyms in code and public APIs unles
 - Host-local Process Guardian != whole-host fencing, live PTY migration, or Session takeover.
 - `RATE_LIMITED` != `BACKPRESSURE`, `PTY_BUSY`, or an interaction-policy denial.
 - Actor identity != Runtime RPC grant != Application capability admission; all three must agree.
+- Artifact storage budget != PostgreSQL heap/index/WAL size, filesystem free space, or recording budget.
 
 ## TerminalState evidence boundary
 

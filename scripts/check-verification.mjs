@@ -54,6 +54,10 @@ const requiredReports = [
     level: "L3",
     path: "docs/verification/M10/2026-08-31-human-secret-input-redaction.md",
   },
+  {
+    level: "L2",
+    path: "docs/verification/M10/2026-08-31-bounded-artifact-storage.md",
+  },
 ];
 
 for (const report of requiredReports) {

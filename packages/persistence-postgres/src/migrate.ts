@@ -21,6 +21,7 @@ const migrations = [
   { file: "014_actor_capabilities.sql", version: 14 },
   { file: "015_execute_approvals.sql", version: 15 },
   { file: "016_sensitive_inputs.sql", version: 16 },
+  { file: "017_artifact_storage_budget.sql", version: 17 },
 ] as const;
 
 export async function migrateDatabase(pool: Pool): Promise<void> {

@@ -26,6 +26,20 @@ describeDatabase("PostgresObservationRepository", () => {
 
   beforeEach(async () => {
     await pool.query("TRUNCATE sessions, actors, outbox, artifacts RESTART IDENTITY CASCADE");
+    await pool.query(
+      `UPDATE artifact_storage_policies
+          SET max_bytes = 1073741824,
+              max_artifact_bytes = 16777216,
+              retention_milliseconds = 604800000,
+              cleanup_batch_size = 1000,
+              updated_at = now()
+        WHERE scope = 'default'`,
+    );
+    await pool.query(
+      `UPDATE artifact_storage_usage
+          SET artifact_count = 0, byte_size = 0, updated_at = now()
+        WHERE scope = 'default'`,
+    );
   });
 
   afterAll(async () => {
@@ -148,6 +162,144 @@ describeDatabase("PostgresObservationRepository", () => {
         sessionId: session,
       }),
     ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+  });
+
+  it("serializes concurrent Artifact admission, commits cleanup, and keeps exact usage", async () => {
+    const session = await createSession(runtime);
+    await pool.query(
+      `UPDATE artifact_storage_policies
+          SET max_bytes = 9000, max_artifact_bytes = 7000,
+              retention_milliseconds = 60000, cleanup_batch_size = 2,
+              updated_at = now()
+        WHERE scope = 'default'`,
+    );
+    const content = "x".repeat(6000);
+    const concurrent = await Promise.allSettled([
+      observation.appendOutput({
+        createdAt: new Date(),
+        data: content,
+        generation: 1,
+        inlineThresholdBytes: 1,
+        sessionId: session,
+      }),
+      observation.appendOutput({
+        createdAt: new Date(),
+        data: content,
+        generation: 1,
+        inlineThresholdBytes: 1,
+        sessionId: session,
+      }),
+    ]);
+    expect(concurrent.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = concurrent.find((result) => result.status === "rejected");
+    expect(rejected).toMatchObject({
+      reason: {
+        code: "BACKPRESSURE",
+        details: {
+          component: "artifact_storage",
+          currentBytes: 6000,
+          maxArtifactBytes: 7000,
+          maxBytes: 9000,
+          phase: "artifact_admission",
+          requestedBytes: 6000,
+        },
+        retryable: true,
+      },
+      status: "rejected",
+    });
+    expect(await observation.inspectArtifactStorage()).toMatchObject({
+      usage: { artifactCount: 1, byteSize: 6000 },
+    });
+    expect(
+      (await observation.queryEvents({ generation: 1, sessionId: session })).events,
+    ).toHaveLength(1);
+
+    await expect(
+      observation.appendOutput({
+        createdAt: new Date(),
+        data: "y".repeat(7001),
+        generation: 1,
+        inlineThresholdBytes: 1,
+        sessionId: session,
+      }),
+    ).rejects.toMatchObject({
+      code: "BACKPRESSURE",
+      details: { currentBytes: 6000, maxArtifactBytes: 7000, requestedBytes: 7001 },
+    });
+
+    await expect(
+      pool.query(
+        `INSERT INTO artifacts
+          (id, session_id, session_generation, kind, content, content_type,
+           byte_size, sha256, created_at, expires_at)
+         VALUES ($1, $2, 1, 'pty_output', $3, 'application/octet-stream',
+                 $4, $5, now(), now() + interval '1 day')`,
+        [`art_${randomUUID()}`, session, Buffer.from(content), content.length, "0".repeat(64)],
+      ),
+    ).rejects.toMatchObject({ code: "23514", constraint: "artifacts_storage_budget" });
+
+    await pool.query("UPDATE artifacts SET expires_at = now() - interval '1 second'");
+    await expect(
+      observation.appendOutput({
+        createdAt: new Date(),
+        data: "z".repeat(7001),
+        generation: 1,
+        inlineThresholdBytes: 1,
+        sessionId: session,
+      }),
+    ).rejects.toMatchObject({ code: "BACKPRESSURE" });
+    expect(await observation.inspectArtifactStorage()).toMatchObject({
+      usage: { artifactCount: 0, byteSize: 0 },
+    });
+
+    await observation.appendOutput({
+      createdAt: new Date(),
+      data: content,
+      generation: 1,
+      inlineThresholdBytes: 1,
+      sessionId: session,
+    });
+    expect(await observation.inspectArtifactStorage()).toMatchObject({
+      usage: { artifactCount: 1, byteSize: 6000 },
+    });
+    await pool.query("DELETE FROM sessions WHERE id = $1", [session]);
+    expect(await observation.inspectArtifactStorage()).toMatchObject({
+      usage: { artifactCount: 0, byteSize: 0 },
+    });
+  });
+
+  it("deletes only one configured expired-Artifact batch per maintenance run", async () => {
+    const session = await createSession(runtime);
+    await pool.query(
+      `UPDATE artifact_storage_policies
+          SET max_bytes = 30000, max_artifact_bytes = 10000,
+              retention_milliseconds = 60000, cleanup_batch_size = 1,
+              updated_at = now()
+        WHERE scope = 'default'`,
+    );
+    for (const data of ["a".repeat(5000), "b".repeat(5000)]) {
+      await observation.appendOutput({
+        createdAt: new Date(),
+        data,
+        generation: 1,
+        inlineThresholdBytes: 1,
+        sessionId: session,
+      });
+    }
+    await pool.query("UPDATE artifacts SET expires_at = now() - interval '1 second'");
+    const first = await observation.maintainArtifactStorage();
+    expect(first).toMatchObject({
+      deletedArtifacts: 1,
+      deletedBytes: 5000,
+      usage: { artifactCount: 1, byteSize: 5000 },
+    });
+    const second = await observation.maintainArtifactStorage();
+    expect(second).toMatchObject({
+      deletedArtifacts: 1,
+      deletedBytes: 5000,
+      usage: { artifactCount: 0, byteSize: 0 },
+    });
+    expect((await observation.maintainArtifactStorage()).deletedArtifacts).toBe(0);
   });
 
   it("finds sparse failures in 100k lines without returning the full stream", async () => {

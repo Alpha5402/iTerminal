@@ -70,3 +70,7 @@ ALTER TABLE actors
       'terminal.resize'
     ]::text[]
   );
+
+INSERT INTO schema_migrations (version)
+VALUES (14)
+ON CONFLICT (version) DO NOTHING;

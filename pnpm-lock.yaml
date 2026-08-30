@@ -290,6 +290,12 @@ importers:
         specifier: ^8.16.3
         version: 8.23.0
 
+  apps/storage-maintenance:
+    dependencies:
+      '@iterminal/persistence-postgres':
+        specifier: workspace:*
+        version: link:../../packages/persistence-postgres
+
   packages/application:
     dependencies:
       '@iterminal/domain':
