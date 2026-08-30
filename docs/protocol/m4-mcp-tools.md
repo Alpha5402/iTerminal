@@ -1,13 +1,13 @@
 # M4 MCP stdio protocol
 
-M6.1–M6.4 extend this protocol with bounded read-only screen observation, synchronization, and stable styled-cell metadata while preserving the M4 Action and Event contracts.
+M6.1–M6.5 extend this protocol with bounded read-only screen observation, synchronization, stable styled-cell metadata, and generation-scoped interaction policy while preserving the M4 Action and Event contracts.
 
 iTerminal uses the official Model Context Protocol TypeScript SDK v2 and `serveStdio`. The bridge logs only to stderr because stdout is the MCP framing channel. A separate Runtime daemon owns all live state; set `ITERM_RUNTIME_SOCKET` to its absolute Unix socket path before starting the bridge.
 
 The daemon has two explicit storage modes:
 
 - Without `ITERM_DATABASE_URL`, it is a development-only in-memory live Runtime.
-- With `ITERM_DATABASE_URL`, Execute/Input/Control admission and lifecycle facts are committed to PostgreSQL, PTY output enters a bounded per-Session ingest loop, and `events_query` reads the durable Event stream.
+- With `ITERM_DATABASE_URL`, Execute/Input/Control admission, interaction policy/Guard state, and lifecycle facts are committed to PostgreSQL, PTY output enters a bounded per-Session ingest loop, and `events_query` reads the durable Event stream.
 
 In both modes the PTY remains process-local live truth. Restart recovery marks the previous stable owner generation `BROKEN` and ambiguous work `UNKNOWN`; it never rebuilds a fake live Session from rows.
 
@@ -25,24 +25,25 @@ The Actor type is always `agent` in M4. Tool arguments cannot claim to be Human 
 
 ## Tools
 
-| Tool             | Result/behavior                                                                       |
-| ---------------- | ------------------------------------------------------------------------------------- |
-| `session_create` | Starts one persistent bash/zsh PTY at an existing workspace                           |
-| `session_get`    | Returns current live projection and active Execution                                  |
-| `session_list`   | Lists daemon-owned Sessions                                                           |
-| `session_close`  | Terminates the exact generation's PTY/process group                                   |
-| `execute`        | Returns accepted Action and DISPATCHING/RUNNING Execution immediately                 |
-| `execution_get`  | Reads current bounded Execution projection                                            |
-| `execution_wait` | Waits for a terminal Execution state without replay                                   |
-| `input`          | Writes one batch to an exact generation/Execution, optionally screen-version guarded  |
-| `control`        | Delivers explicit TTY control bytes or process-group signal                           |
-| `events_query`   | Returns at most 500 Events after a generation-scoped sequence                         |
-| `screen_get`     | Returns the bounded live ANSI/VT viewport, cursor, buffer, and screen version         |
-| `screen_region`  | Reads a bounded rectangle using zero-based terminal-cell coordinates                  |
-| `screen_cells`   | Reads sparse material cells with palette/RGB colors and standard SGR attributes       |
-| `screen_diff`    | Returns retained row replacements or an explicit full-snapshot resync                 |
-| `screen_search`  | Searches literal text in the current viewport with bounded terminal-cell coordinates  |
-| `screen_wait`    | Reactively waits for text, version, stability, or an exact Execution's terminal state |
+| Tool              | Result/behavior                                                                       |
+| ----------------- | ------------------------------------------------------------------------------------- |
+| `session_create`  | Starts one persistent bash/zsh PTY at an existing workspace                           |
+| `session_get`     | Returns current live projection and active Execution                                  |
+| `session_list`    | Lists daemon-owned Sessions                                                           |
+| `session_close`   | Terminates the exact generation's PTY/process group                                   |
+| `execute`         | Returns accepted Action and DISPATCHING/RUNNING Execution immediately                 |
+| `execution_get`   | Reads current bounded Execution projection                                            |
+| `execution_wait`  | Waits for a terminal Execution state without replay                                   |
+| `interaction_get` | Reads exact-generation policy, state version, and active short Human Guard            |
+| `input`           | Writes one batch to an exact generation/Execution, optionally screen-version guarded  |
+| `control`         | Delivers explicit TTY control bytes or process-group signal                           |
+| `events_query`    | Returns at most 500 Events after a generation-scoped sequence                         |
+| `screen_get`      | Returns the bounded live ANSI/VT viewport, cursor, buffer, and screen version         |
+| `screen_region`   | Reads a bounded rectangle using zero-based terminal-cell coordinates                  |
+| `screen_cells`    | Reads sparse material cells with palette/RGB colors and standard SGR attributes       |
+| `screen_diff`     | Returns retained row replacements or an explicit full-snapshot resync                 |
+| `screen_search`   | Searches literal text in the current viewport with bounded terminal-cell coordinates  |
+| `screen_wait`     | Reactively waits for text, version, stability, or an exact Execution's terminal state |
 
 Every successful tool result contains a JSON text block and `structuredContent: { result }`. Domain failures are tool-level errors with a JSON text envelope:
 
@@ -61,6 +62,10 @@ Every successful tool result contains a JSON text block and `structuredContent: 
 ```
 
 `execute`, `input`, and `control` require caller-generated idempotency keys. The namespace is one Session + Actor across all three Action kinds, so reusing a key for another kind or payload returns `IDEMPOTENCY_KEY_REUSED`. A transport disconnect after a mutating RPC returns `DELIVERY_UNKNOWN`; inspect state using the same idempotency key or Events before any deliberate retry.
+
+Every generation starts with `human_guarded`, interaction state version `1`, and no Guard. `common` allows Human/Agent interaction; `human_only` and `agent_only` admit only the named Actor type; Scheduler/System interaction is denied until explicit capability policy exists. A short Human Guard under `human_guarded` blocks other Actors with retryable `INPUT_GUARDED`; policy denial is non-retryable `POLICY_DENIED`. The MCP bridge is always an Agent and exposes only `interaction_get`: policy changes and Guard acquire/renew/release are Human/System Runtime RPC operations, not Agent tools. MCP `control` cannot request emergency Guard bypass.
+
+Guard expiry is bounded and versioned, not ownership: default TTL is 500 ms, accepted range is 50 ms–5 s, and one Guard may renew at most three times. Clients re-read `interaction_get` after `INPUT_GUARDED` or an uncertain mutation. They never replay Input/Control merely because a Guard expired.
 
 `BACKPRESSURE` means the durable delivery backlog is at its configured bound. No new Action or Session reservation was created, the READY Session remains usable, and the caller may retry the same request/idempotency key after Outbox capacity drains. `RUNTIME_UNAVAILABLE` instead means the durable journal or Runtime boundary is unhealthy; callers must inspect/reconnect rather than assuming the old PTY survived.
 

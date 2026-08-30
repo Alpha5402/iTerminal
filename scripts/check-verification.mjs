@@ -13,6 +13,7 @@ const requiredReports = [
   "docs/verification/M6/2026-08-30-reactive-screen-observation.md",
   "docs/verification/M6/2026-08-30-bounded-screen-sync.md",
   "docs/verification/M6/2026-08-30-styled-screen-cells.md",
+  "docs/verification/M6/2026-08-30-interaction-guard.md",
   "docs/verification/M8/2026-08-30-reliable-messaging.md",
   "docs/verification/M8/2026-08-30-owner-dispatch.md",
   "docs/verification/M8/2026-08-30-interaction-crash-retry-outage.md",

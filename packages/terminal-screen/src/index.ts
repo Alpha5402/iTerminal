@@ -17,11 +17,13 @@ import {
   type TerminalScreenSearchResult,
   type TerminalScreenSnapshot,
 } from "@iterminal/domain";
-import { Terminal, type IBufferCell } from "@xterm/headless";
+import headless from "@xterm/headless";
+import type { IBufferCell, Terminal as XtermTerminal } from "@xterm/headless";
 
 export { CANONICAL_TERMINAL_COLUMNS, CANONICAL_TERMINAL_ROWS } from "@iterminal/domain";
 const DEFAULT_SCROLLBACK_LINES = 5_000;
 const MAX_SCREEN_HISTORY_ENTRIES = 1_024;
+const { Terminal } = headless;
 
 interface VersionWaiter {
   readonly afterVersion: number;
@@ -39,7 +41,7 @@ export class XtermScreenProjectionFactory implements TerminalScreenProjectionFac
 }
 
 export class XtermScreenProjection implements TerminalScreenProjection {
-  readonly #terminal: Terminal;
+  readonly #terminal: XtermTerminal;
   #appliedVersion = 0;
   #scheduledVersion = 0;
   #disposed = false;
@@ -474,7 +476,7 @@ function validRange(start: number, count: number, maximum: number): boolean {
 }
 
 function sliceTerminalCells(
-  line: ReturnType<Terminal["buffer"]["active"]["getLine"]>,
+  line: ReturnType<XtermTerminal["buffer"]["active"]["getLine"]>,
   startColumn: number,
   endColumn: number,
 ): string {

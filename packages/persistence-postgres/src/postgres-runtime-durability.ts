@@ -7,11 +7,14 @@ import type {
   RuntimeDurability,
 } from "@iterminal/application";
 import type {
+  Actor,
   ControlAction,
   ActorType,
   EventPage,
   Execution,
   InputAction,
+  InputPolicyMode,
+  InteractionState,
   Session,
   SessionAction,
   SessionStatus,
@@ -90,6 +93,12 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
           (session_id, generation, owner_id, integration_version, status, started_at)
          VALUES ($1, $2, $3, 'runtime-v1', 'STARTING', $4)`,
         [session.id, session.generation, session.ownerId, session.createdAt],
+      );
+      await client.query(
+        `INSERT INTO interaction_guards
+          (session_id, session_generation, input_policy, state_version)
+         VALUES ($1, $2, 'human_guarded', 1)`,
+        [session.id, session.generation],
       );
       await insertEvents(client, events);
     });
@@ -372,6 +381,70 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
     });
   }
 
+  public async saveInteractionState(
+    state: InteractionState,
+    expectedVersion: number,
+    event: DurableSessionEvent,
+  ): Promise<void> {
+    if (state.version !== expectedVersion + 1) {
+      throw new RuntimeError(
+        "INVALID_REQUEST",
+        "Interaction state version must advance exactly once",
+        { expectedVersion, nextVersion: state.version },
+      );
+    }
+    await this.#transaction(async (client) => {
+      if (state.guard !== undefined) await upsertActor(client, state.guard.actor);
+      const updated = await client.query(
+        `UPDATE interaction_guards AS interaction
+            SET input_policy = $4,
+                state_version = $5,
+                guard_id = $6,
+                guard_actor_id = $7,
+                guard_reason = $8,
+                guard_acquired_at = $9,
+                guard_expires_at = $10,
+                guard_renewals = $11,
+                guard_max_renewals = $12,
+                updated_at = now()
+           FROM sessions AS session
+          WHERE interaction.session_id = $1
+            AND interaction.session_generation = $2
+            AND interaction.state_version = $3
+            AND session.id = interaction.session_id
+            AND session.current_generation = interaction.session_generation
+            AND session.status NOT IN ('BROKEN', 'CLOSED')`,
+        [
+          state.sessionId,
+          state.sessionGeneration,
+          expectedVersion,
+          state.policy,
+          state.version,
+          state.guard?.id ?? null,
+          state.guard?.actor.id ?? null,
+          state.guard?.reason ?? null,
+          state.guard?.acquiredAt ?? null,
+          state.guard?.expiresAt ?? null,
+          state.guard?.renewals ?? 0,
+          state.guard?.maxRenewals ?? 3,
+        ],
+      );
+      if (updated.rowCount !== 1) {
+        throw new RuntimeError(
+          "INTERACTION_GUARD_CHANGED",
+          "Durable Interaction state is no longer current",
+          {
+            expectedVersion,
+            generation: state.sessionGeneration,
+            sessionId: state.sessionId,
+          },
+          true,
+        );
+      }
+      await insertEvents(client, [event]);
+    });
+  }
+
   public async acceptInteraction(
     action: InputAction | ControlAction,
     event: DurableSessionEvent,
@@ -396,13 +469,24 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
       const session = await client.query<{
         active_execution_id: string | null;
         current_generation: number;
+        database_now: Date;
+        guard_actor_id: string | null;
+        guard_expires_at: Date | null;
+        input_policy: InputPolicyMode;
         next_action_sequence: string;
         screen_version: string;
         status: SessionStatus;
       }>(
-        `SELECT current_generation, status, active_execution_id,
-                next_action_sequence, screen_version
-           FROM sessions WHERE id = $1 FOR UPDATE`,
+        `SELECT session.current_generation, session.status, session.active_execution_id,
+                session.next_action_sequence, session.screen_version,
+                interaction.input_policy, interaction.guard_actor_id,
+                interaction.guard_expires_at, now() AS database_now
+           FROM sessions AS session
+           JOIN interaction_guards AS interaction
+             ON interaction.session_id = session.id
+            AND interaction.session_generation = session.current_generation
+          WHERE session.id = $1
+          FOR UPDATE OF session, interaction`,
         [action.sessionId],
       );
       const current = session.rows[0];
@@ -433,6 +517,7 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
           expectedScreenVersion: action.expectedScreenVersion,
         });
       }
+      assertDurableInteractionAllowed(action, current);
       const durableSequence = Number.parseInt(current.next_action_sequence, 10) + 1;
       if (durableSequence !== action.actionSequence) {
         throw new RuntimeError("DELIVERY_UNKNOWN", "Live and durable Action sequence diverged", {
@@ -444,7 +529,7 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
         `UPDATE sessions SET next_action_sequence = $2, updated_at = now() WHERE id = $1`,
         [action.sessionId, action.actionSequence],
       );
-      await upsertActor(client, action);
+      await upsertActor(client, action.actor);
       await client.query(
         `INSERT INTO actions
           (id, session_id, session_generation, actor_id, kind, action_sequence,
@@ -706,7 +791,7 @@ async function nextEventSequence(
   return Number.parseInt(row.next_event_sequence, 10);
 }
 
-async function upsertActor(client: PoolClient, action: SessionAction): Promise<void> {
+async function upsertActor(client: PoolClient, actor: Actor): Promise<void> {
   await client.query(
     `INSERT INTO actors (id, actor_type, principal, client)
      VALUES ($1, $2, $3, $4)
@@ -714,8 +799,59 @@ async function upsertActor(client: PoolClient, action: SessionAction): Promise<v
        SET actor_type = EXCLUDED.actor_type,
            principal = EXCLUDED.principal,
            client = EXCLUDED.client`,
-    [action.actor.id, action.actor.type, action.actor.principal, action.actor.client],
+    [actor.id, actor.type, actor.principal, actor.client],
   );
+}
+
+function assertDurableInteractionAllowed(
+  action: InputAction | ControlAction,
+  state: Readonly<{
+    database_now: Date;
+    guard_actor_id: string | null;
+    guard_expires_at: Date | null;
+    input_policy: InputPolicyMode;
+  }>,
+): void {
+  if (action.type === "control" && action.bypassGuard && action.actor.type !== "human") {
+    throw new RuntimeError("POLICY_DENIED", "Only Human Control may request Guard bypass", {
+      policy: state.input_policy,
+    });
+  }
+  const allowed =
+    (state.input_policy === "common" &&
+      (action.actor.type === "human" || action.actor.type === "agent")) ||
+    (state.input_policy === "human_guarded" &&
+      (action.actor.type === "human" || action.actor.type === "agent")) ||
+    (state.input_policy === "human_only" && action.actor.type === "human") ||
+    (state.input_policy === "agent_only" && action.actor.type === "agent");
+  if (!allowed) {
+    throw new RuntimeError(
+      "POLICY_DENIED",
+      `Actor type ${action.actor.type} cannot ${action.type} under ${state.input_policy}`,
+      { policy: state.input_policy },
+    );
+  }
+  const guardActive =
+    state.input_policy === "human_guarded" &&
+    state.guard_actor_id !== null &&
+    state.guard_expires_at !== null &&
+    state.guard_expires_at.getTime() > state.database_now.getTime();
+  if (
+    guardActive &&
+    state.guard_actor_id !== action.actor.id &&
+    !(action.type === "control" && action.bypassGuard && action.actor.type === "human")
+  ) {
+    throw new RuntimeError(
+      "INPUT_GUARDED",
+      "Interaction is protected by an active Human Guard",
+      {
+        expiresAt: state.guard_expires_at?.toISOString(),
+        guardActorId: state.guard_actor_id,
+        policy: state.input_policy,
+      },
+      true,
+    );
+  }
 }
 
 async function findReplay(
@@ -803,7 +939,11 @@ function actionPayload(action: InputAction | ControlAction): Readonly<Record<str
           ? {}
           : { expectedScreenVersion: action.expectedScreenVersion }),
       }
-    : { delivery: action.delivery, targetExecutionId: action.targetExecutionId };
+    : {
+        bypassGuard: action.bypassGuard,
+        delivery: action.delivery,
+        targetExecutionId: action.targetExecutionId,
+      };
 }
 
 function eventSearchText(event: DurableSessionEvent): string {

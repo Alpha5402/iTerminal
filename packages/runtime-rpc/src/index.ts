@@ -3,15 +3,19 @@ import { createConnection, createServer, type Server, type Socket } from "node:n
 import { createHash, randomUUID } from "node:crypto";
 
 import type {
+  AcquireInteractionGuardRequest,
   ControlRequest,
   CreateSessionRequest,
   ExecuteRequest,
   InputRequest,
+  ReleaseInteractionGuardRequest,
+  RenewInteractionGuardRequest,
   ScreenCellsRequest,
   ScreenDiffRequest,
   ScreenRegionRequest,
   ScreenSearchRequest,
   ScreenWaitRequest,
+  SetInputPolicyRequest,
 } from "@iterminal/application";
 import type { RuntimeService } from "@iterminal/application";
 import type {
@@ -20,6 +24,7 @@ import type {
   ExecuteAction,
   Execution,
   InputAction,
+  InteractionState,
   Session,
   TerminalScreenCellsResult,
   TerminalScreenDiffResult,
@@ -43,6 +48,9 @@ const runtimeErrorCodes = new Set<RuntimeError["code"]>([
   "PTY_BUSY",
   "EXECUTION_CHANGED",
   "SCREEN_CHANGED",
+  "INPUT_GUARDED",
+  "INTERACTION_GUARD_CHANGED",
+  "POLICY_DENIED",
   "IDEMPOTENCY_KEY_REUSED",
   "DELIVERY_UNKNOWN",
   "BACKPRESSURE",
@@ -74,6 +82,7 @@ const screenRectangleSchema = sessionIdentitySchema.extend({
 const operationSchemas = {
   "control.send": sessionIdentitySchema.extend({
     actor: actorSchema,
+    bypassGuard: z.boolean().default(false),
     delivery: z.discriminatedUnion("mode", [
       z.strictObject({
         control: z.enum(["CTRL_C", "CTRL_D", "CTRL_Z", "ESC"]),
@@ -105,6 +114,29 @@ const operationSchemas = {
     expectedScreenVersion: z.number().int().nonnegative().optional(),
     idempotencyKey: z.string().min(1).max(256),
     targetExecutionId: z.string().min(1).max(256),
+  }),
+  "interaction.get": sessionIdentitySchema,
+  "interaction.guard.acquire": sessionIdentitySchema.extend({
+    actor: actorSchema,
+    expectedVersion: z.number().int().positive(),
+    reason: z.string().min(1).max(256),
+    ttlMilliseconds: z.number().int().min(50).max(5_000).optional(),
+  }),
+  "interaction.guard.release": sessionIdentitySchema.extend({
+    actor: actorSchema,
+    expectedVersion: z.number().int().positive(),
+    guardId: z.string().min(1).max(256),
+  }),
+  "interaction.guard.renew": sessionIdentitySchema.extend({
+    actor: actorSchema,
+    expectedVersion: z.number().int().positive(),
+    guardId: z.string().min(1).max(256),
+    ttlMilliseconds: z.number().int().min(50).max(5_000).optional(),
+  }),
+  "interaction.policy.set": sessionIdentitySchema.extend({
+    actor: actorSchema,
+    expectedVersion: z.number().int().positive(),
+    mode: z.enum(["common", "human_guarded", "human_only", "agent_only"]),
   }),
   "screen.cells": screenRectangleSchema,
   "screen.diff": sessionIdentitySchema.extend({
@@ -174,6 +206,11 @@ export interface RuntimeGateway {
   waitExecution(executionId: string): Promise<Execution>;
   sendInput(request: InputRequest): Promise<InputAction>;
   sendControl(request: ControlRequest): Promise<ControlAction>;
+  getInteractionState(sessionId: string, generation: number): Promise<InteractionState>;
+  setInputPolicy(request: SetInputPolicyRequest): Promise<InteractionState>;
+  acquireInteractionGuard(request: AcquireInteractionGuardRequest): Promise<InteractionState>;
+  renewInteractionGuard(request: RenewInteractionGuardRequest): Promise<InteractionState>;
+  releaseInteractionGuard(request: ReleaseInteractionGuardRequest): Promise<InteractionState>;
   queryEvents(
     sessionId: string,
     generation: number,
@@ -249,6 +286,30 @@ export class LocalRuntimeGateway implements RuntimeGateway {
 
   public sendControl(request: ControlRequest): Promise<ControlAction> {
     return this.runtime.sendControl(request);
+  }
+
+  public getInteractionState(sessionId: string, generation: number): Promise<InteractionState> {
+    return this.runtime.getInteractionState(sessionId, generation);
+  }
+
+  public setInputPolicy(request: SetInputPolicyRequest): Promise<InteractionState> {
+    return this.runtime.setInputPolicy(request);
+  }
+
+  public acquireInteractionGuard(
+    request: AcquireInteractionGuardRequest,
+  ): Promise<InteractionState> {
+    return this.runtime.acquireInteractionGuard(request);
+  }
+
+  public renewInteractionGuard(request: RenewInteractionGuardRequest): Promise<InteractionState> {
+    return this.runtime.renewInteractionGuard(request);
+  }
+
+  public releaseInteractionGuard(
+    request: ReleaseInteractionGuardRequest,
+  ): Promise<InteractionState> {
+    return this.runtime.releaseInteractionGuard(request);
   }
 
   public queryEvents(
@@ -413,11 +474,66 @@ export class UnixRuntimeClient implements RuntimeGateway {
   public sendControl(request: ControlRequest): Promise<ControlAction> {
     return this.#request("control.send", {
       actor: request.actor,
+      bypassGuard: request.bypassGuard ?? false,
       delivery: request.delivery,
       generation: request.sessionGeneration,
       idempotencyKey: request.idempotencyKey,
       sessionId: request.sessionId,
       targetExecutionId: request.targetExecutionId,
+    });
+  }
+
+  public getInteractionState(sessionId: string, generation: number): Promise<InteractionState> {
+    return this.#request("interaction.get", { generation, sessionId });
+  }
+
+  public setInputPolicy(request: SetInputPolicyRequest): Promise<InteractionState> {
+    return this.#request("interaction.policy.set", {
+      actor: request.actor,
+      expectedVersion: request.expectedVersion,
+      generation: request.sessionGeneration,
+      mode: request.mode,
+      sessionId: request.sessionId,
+    });
+  }
+
+  public acquireInteractionGuard(
+    request: AcquireInteractionGuardRequest,
+  ): Promise<InteractionState> {
+    return this.#request("interaction.guard.acquire", {
+      actor: request.actor,
+      expectedVersion: request.expectedVersion,
+      generation: request.sessionGeneration,
+      reason: request.reason,
+      sessionId: request.sessionId,
+      ...(request.ttlMilliseconds === undefined
+        ? {}
+        : { ttlMilliseconds: request.ttlMilliseconds }),
+    });
+  }
+
+  public renewInteractionGuard(request: RenewInteractionGuardRequest): Promise<InteractionState> {
+    return this.#request("interaction.guard.renew", {
+      actor: request.actor,
+      expectedVersion: request.expectedVersion,
+      generation: request.sessionGeneration,
+      guardId: request.guardId,
+      sessionId: request.sessionId,
+      ...(request.ttlMilliseconds === undefined
+        ? {}
+        : { ttlMilliseconds: request.ttlMilliseconds }),
+    });
+  }
+
+  public releaseInteractionGuard(
+    request: ReleaseInteractionGuardRequest,
+  ): Promise<InteractionState> {
+    return this.#request("interaction.guard.release", {
+      actor: request.actor,
+      expectedVersion: request.expectedVersion,
+      generation: request.sessionGeneration,
+      guardId: request.guardId,
+      sessionId: request.sessionId,
     });
   }
 
@@ -640,11 +756,62 @@ async function dispatch(
       const request = operationSchemas[operation].parse(input);
       return gateway.sendControl({
         actor: request.actor,
+        bypassGuard: request.bypassGuard,
         delivery: request.delivery,
         idempotencyKey: request.idempotencyKey,
         sessionGeneration: request.generation,
         sessionId: request.sessionId,
         targetExecutionId: request.targetExecutionId,
+      });
+    }
+    case "interaction.get": {
+      const request = operationSchemas[operation].parse(input);
+      return gateway.getInteractionState(request.sessionId, request.generation);
+    }
+    case "interaction.policy.set": {
+      const request = operationSchemas[operation].parse(input);
+      return gateway.setInputPolicy({
+        actor: request.actor,
+        expectedVersion: request.expectedVersion,
+        mode: request.mode,
+        sessionGeneration: request.generation,
+        sessionId: request.sessionId,
+      });
+    }
+    case "interaction.guard.acquire": {
+      const request = operationSchemas[operation].parse(input);
+      return gateway.acquireInteractionGuard({
+        actor: request.actor,
+        expectedVersion: request.expectedVersion,
+        reason: request.reason,
+        sessionGeneration: request.generation,
+        sessionId: request.sessionId,
+        ...(request.ttlMilliseconds === undefined
+          ? {}
+          : { ttlMilliseconds: request.ttlMilliseconds }),
+      });
+    }
+    case "interaction.guard.renew": {
+      const request = operationSchemas[operation].parse(input);
+      return gateway.renewInteractionGuard({
+        actor: request.actor,
+        expectedVersion: request.expectedVersion,
+        guardId: request.guardId,
+        sessionGeneration: request.generation,
+        sessionId: request.sessionId,
+        ...(request.ttlMilliseconds === undefined
+          ? {}
+          : { ttlMilliseconds: request.ttlMilliseconds }),
+      });
+    }
+    case "interaction.guard.release": {
+      const request = operationSchemas[operation].parse(input);
+      return gateway.releaseInteractionGuard({
+        actor: request.actor,
+        expectedVersion: request.expectedVersion,
+        guardId: request.guardId,
+        sessionGeneration: request.generation,
+        sessionId: request.sessionId,
       });
     }
     case "events.query": {
@@ -780,7 +947,11 @@ function isMutating(operation: RuntimeOperation): boolean {
     operation === "execution.dispatch" ||
     operation === "execution.start" ||
     operation === "input.send" ||
-    operation === "control.send"
+    operation === "control.send" ||
+    operation === "interaction.policy.set" ||
+    operation === "interaction.guard.acquire" ||
+    operation === "interaction.guard.renew" ||
+    operation === "interaction.guard.release"
   );
 }
 

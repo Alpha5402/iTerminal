@@ -1,10 +1,10 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
-> 状态：Planning Baseline v5.5 / Implementation Baseline v5.4 — M0–M4.1、M6.4 stable styled-cell observation 与 M8.9 RabbitMQ quorum leader failover 已通过 L2，M4 L3 待真实模型调用
+> 状态：Implementation Baseline v5.5 — M0–M4.1、M6.5 interaction policy/short Human Guard 与 M8.9 RabbitMQ quorum leader failover 已通过 L2，M4 L3 待真实模型调用
 >
 > 基线日期：2026-08-30
 >
-> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live MCP daemon 已接入 PostgreSQL write-ahead journal、bounded ingest loop，以及固定 120×40 的 live ANSI/VT Virtual Screen。Agent 可经 exact-generation `screen_get` 读完整 viewport，经 `screen_region` 读 terminal-cell rectangle，经 `screen_cells` 读取 sparse material cells、palette/RGB colors 与标准 SGR attributes，经 64-revision `screen_diff` 获得 bounded plain-text row replacement 或显式 resync snapshot，经 `screen_search` 做有界 literal search，并用非轮询 `screen_wait` 等待 visible text、version、stable interval 或 Execution terminal state。M8.9 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放、DB pre-commit crash/lock timeout/Outbox backlog admission、单节点 RabbitMQ/PostgreSQL 自动重连、standalone relay/Worker 恢复、真实 TCP byte-drop silent blackhole，以及三节点 RabbitMQ quorum 的实际 leader 停机、重新选举与多端点客户端恢复。M6.5 Input Policy/Interaction Guard 目前仅完成规划，尚未实现。Virtual Screen resize/reflow、style diff、hyperlink/image、durable wait/subscription、Human Console，以及非对称/minority partition、相关性故障、long soak、M9 fencing、多 Worker 与完整 L3/L4 仍未完成。
+> 当前仓库状态：M0–M4.1 已实现并保存 L2 证据；live MCP daemon 已接入 PostgreSQL write-ahead journal、bounded ingest loop、固定 120×40 的 live ANSI/VT Virtual Screen，以及 generation-scoped Input Policy/Interaction Guard。Agent 可经 exact-generation `screen_get` 读完整 viewport，经 `screen_region` 读 terminal-cell rectangle，经 `screen_cells` 读取 sparse material cells、palette/RGB colors 与标准 SGR attributes，经 64-revision `screen_diff` 获得 bounded plain-text row replacement 或显式 resync snapshot，经 `screen_search` 做有界 literal search，用非轮询 `screen_wait` 等待 visible text、version、stable interval 或 Execution terminal state，并经只读 `interaction_get` 观察 policy/Guard。M8.9 已证明 queue-driven owner-local Execute、Input/Control 写后 owner 崩溃不重放、DB pre-commit crash/lock timeout/Outbox backlog admission、单节点 RabbitMQ/PostgreSQL 自动重连、standalone relay/Worker 恢复、真实 TCP byte-drop silent blackhole，以及三节点 RabbitMQ quorum 的实际 leader 停机、重新选举与多端点客户端恢复。Virtual Screen resize/reflow、style diff、hyperlink/image、durable wait/subscription、Human Console，以及非对称/minority partition、相关性故障、long soak、M9 fencing、多 Worker 与完整 L3/L4 仍未完成。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -498,7 +498,7 @@ PTY bytes -> ANSI/VT parser -> versioned screen buffer -> full/diff/region/searc
 - [x] `session_snapshots`：cwd、foreground observation、last exit、screen version、confidence、observed time。
 - [ ] `shell_checkpoints`：基础表与 newest-observation 更新已完成；filtered context/staleness 生成待 M7。
 - [ ] `screen_snapshots`：geometry/cursor/content or artifact ref、screen version。
-- [ ] `interaction_guards`：generation-scoped policy、guard actor/reason/TTL/renewal、state version；M6.5 实现。
+- [x] `interaction_guards`：generation-scoped policy、guard actor/reason/TTL/renewal、state version。
 - [ ] `approvals`：exact action hash、actor/approver、expiry、one-time use。
 - [x] `outbox`：`ExecutionReady`、leased claim、confirm publish、mark/retry 与 publish Event。
 - [x] `consumer_inbox`：payload hash、processing lease、attempt/outcome 与完成去重。
@@ -869,7 +869,7 @@ Exit Gate：真实 Human +真实 MCP Agent 共享 cwd/env/REPL；所有 Action �
 - [x] exact-generation Runtime RPC/MCP reactive wait for visible text/version/stable interval/Execution exit；timeout 返回最新 bounded snapshot，RPC disconnect 取消服务端 wait。
 - [ ] Human Console screen resync/subscription 与 daemon restart 后的 durable wait。
 - [x] expected screen version 与 `SCREEN_CHANGED`：Agent 读屏后 Human Actor 经 Runtime RPC 改屏，Agent stale input 被拒绝。
-- [ ] common/human_guarded/human_only/agent_only 与短期 Guard。
+- [x] common/human_guarded/human_only/agent_only 与短期 Guard（L2；Human Console L3 待 M5）。
 - [ ] TerminalState heuristic + confidence/evidence。
 - [ ] shell/REPL/vim/nano/top/pager/confirm/password-like fixtures。
 
@@ -877,7 +877,7 @@ Exit Gate：真实 Human +真实 MCP Agent 共享 cwd/env/REPL；所有 Action �
 
 - [x] Agent read screen v100，Human 改到 v105，Agent stale input 被拒绝（L2 RPC/MCP Actor 路径；Human Console L3 仍待 M5）。
 - [ ] Agent 看到 psql exec_101，Human Ctrl+C 后启动 python exec_102，旧 SQL 被拒绝。
-- [ ] Human raw input 活跃时 Agent input 不插入半行；guard 释放后可继续。
+- [x] Human raw input 活跃时 Agent input 不插入半行；guard 过期/释放后可继续（L2 Human RPC + Agent MCP）。
 - [ ] Human xterm.js 与 Agent headless screen 在固定 geometry 下内容一致。
 
 #### M6.5 — Input Policy 与 Interaction Guard（下一可执行切片，目标：L2）
@@ -919,25 +919,25 @@ interface InteractionState {
 
 实现 TODO：
 
-- [ ] ADR-0023 冻结 policy 矩阵、授权者、TTL/续租、emergency bypass、expiry 与幂等顺序；若选择直接扩展 ADR-0005，必须写清兼容与迁移影响。
-- [ ] Domain 增加 `InputPolicyMode`、`InteractionState/Guard`、`INPUT_GUARDED`、`POLICY_DENIED`、`INTERACTION_GUARD_CHANGED`；Control request/action 记录显式 `bypassGuard` 审计字段。
-- [ ] 每个新 Session generation 初始化 `human_guarded` + version 1；policy change 清除现有 Guard、version +1，并形成 durable event。
-- [ ] Application 在同一 per-session mutation serialization 内完成 idempotency replay、generation/execution/screen 校验、policy/guard 判定与 Action admission；已接受 Action 的同 key/hash replay 先返回原结果，不被后来 policy 变化改写。
-- [ ] Guard acquire/renew/release 使用 guard id + expected state version；仅 Human capability 可 acquire，renew/release 必须匹配完整 Actor identity；活跃 Guard 冲突返回 `INPUT_GUARDED`，stale guard/version 返回 `INTERACTION_GUARD_CHANGED`。
-- [ ] PostgreSQL migration 增加 generation-scoped `interaction_guards` 状态行与约束；policy/guard state update + Event 同事务提交，并在 `acceptInteraction` 事务内再次校验，避免 Application 检查与 durable admission 的 TOCTOU。
-- [ ] Runtime RPC 增加 `interaction.get`、`interaction.policy.set`、`interaction.guard.acquire|renew|release`；把它们纳入 mutating-operation delivery uncertainty 判定。
-- [ ] MCP 增加只读 `interaction_get`；`input`/`control` Tool description 与结构化 error 暴露 retryability、guard expiry/current version、allowed next actions，不给 Agent 暴露 Human Guard mutation。
+- [x] ADR-0023 冻结 policy 矩阵、授权者、TTL/续租、emergency bypass、expiry 与幂等顺序。
+- [x] Domain 增加 `InputPolicyMode`、`InteractionState/Guard`、`INPUT_GUARDED`、`POLICY_DENIED`、`INTERACTION_GUARD_CHANGED`；Control request/action 记录显式 `bypassGuard` 审计字段。
+- [x] 每个新 Session generation 初始化 `human_guarded` + version 1；policy change 清除现有 Guard、version +1，并形成 durable event。
+- [x] Application 在同一 per-session mutation serialization 内完成 idempotency replay、generation/execution/screen 校验、policy/guard 判定与 Action admission；已接受 Action 的同 key/hash replay 先返回原结果，不被后来 policy 变化改写。
+- [x] Guard acquire/renew/release 使用 guard id + expected state version；仅 Human capability 可 acquire，renew/release 必须匹配完整 Actor identity；活跃 Guard 冲突返回 `INPUT_GUARDED`，stale guard/version 返回 `INTERACTION_GUARD_CHANGED`。
+- [x] PostgreSQL migration 增加 generation-scoped `interaction_guards` 状态行与约束；policy/guard state update + Event 同事务提交，并在 `acceptInteraction` 事务内再次校验，避免 Application 检查与 durable admission 的 TOCTOU。
+- [x] Runtime RPC 增加 `interaction.get`、`interaction.policy.set`、`interaction.guard.acquire|renew|release`；把它们纳入 mutating-operation delivery uncertainty 判定。
+- [x] MCP 增加只读 `interaction_get`；`input`/`control` Tool description 与结构化 error 暴露 retryability、guard expiry/current version、allowed next actions，不给 Agent 暴露 Human Guard mutation。
 - [ ] Human Console 后续通过 HTTP/RPC 持有和续租 Guard；raw key batch 开始前 acquire，提交/blur/disconnect 时 release，断线不依赖 release 而由 TTL 收敛。
-- [ ] denied/guarded 请求不分配 accepted Action sequence、不触碰 PTY；记录不含 raw secret/input data 的 bounded rejection/security event。
-- [ ] 统一 clock 注入或受控 fake clock，覆盖 TTL 边界；数据库时间与 Runtime 时间差异不得造成已过期 Guard 永久阻塞。
+- [x] denied/guarded 请求不分配 accepted Action sequence、不触碰 PTY；记录不含 raw secret/input data 的 bounded rejection/security event。
+- [x] 统一 clock 注入或受控 fake clock，覆盖 TTL 边界；数据库时间与 Runtime 时间差异不得造成已过期 Guard 永久阻塞。
 
 测试与证据：
 
-- [ ] L1 Domain/Application：四种 policy × Human/Agent/Scheduler/System 矩阵；acquire/renew/release/expire/version race；policy change 清 Guard；emergency Control 只绕过 Guard；rejected input 零 PTY write。
-- [ ] L1 Durability：migration constraints、state/event 原子性、expected-version CAS、事务回滚、idempotent accepted replay、并发 Guard acquire 只有一个成功。
-- [ ] L2 real PostgreSQL + PTY + official MCP Client：Human RPC 持有 Guard 时 Agent MCP input 返回 `INPUT_GUARDED` 且画面无半行；Guard 到期/释放后 Agent 可继续；`human_only/agent_only/common` 行为与矩阵一致。
+- [x] L1 Domain/Application：四种 policy × Human/Agent/Scheduler/System 矩阵；acquire/renew/release/expire/version race；policy change 清 Guard；emergency Control 只绕过 Guard；rejected input 零 PTY write。
+- [x] L1 Durability：migration constraints、state/event 原子性、expected-version CAS、事务回滚、idempotent accepted replay、并发 Guard acquire 只有一个成功。
+- [x] L2 real PostgreSQL + PTY + official MCP Client：Human RPC 持有 Guard 时 Agent MCP input 返回 `INPUT_GUARDED` 且画面无半行；Guard 到期/释放后 Agent 可继续；`human_only/agent_only/common` 行为与矩阵一致。
 - [ ] L2 crash/restart：Guard 与 policy durable 可观察；旧 generation Guard 不影响新 generation；未知 Input/Control 仍遵守 ADR-0011，绝不因 Guard 过期自动重放。
-- [ ] 功能闭合后运行受影响测试、`pnpm verify`、`git diff --check`，保存 `docs/verification/M6/<date>-interaction-guard.md`；Human Console 尚未接入时只声明 L2，不声明 L3。
+- [x] 功能闭合后运行受影响测试、`pnpm verify`、`git diff --check`，保存 `docs/verification/M6/2026-08-30-interaction-guard.md`；Human Console 尚未接入，因此只声明 L2，不声明 L3。
 
 Exit Gate：M0–M6 的 L3 证据齐全；到此才能称为 MVP。
 
@@ -1105,8 +1105,8 @@ Exit Gate：3+ Worker chaos 下每个 generation 最多一个有效 PTY owner；
 - [x] Persistent Shell ExecuteAction 接受 Shell command string；不与 direct argv API 混为一谈。
 - [x] Session 忙时 fail-fast，不建 Execute Queue；并行用 fork Session。
 - [ ] Human READY 使用 composer，RUNNING 使用 interactive input。
-- [ ] ADR-0023 冻结 M6.5 policy/Guard 精确契约；建议默认 `human_guarded`、TTL 500 ms（50 ms–5 s）、最多续租 3 次。
-- [ ] Human emergency Control 的 `bypassGuard` 仅按 capability 绕过 Guard，不绕过 policy/stale/approval。
+- [x] ADR-0023 冻结 M6.5 policy/Guard 精确契约；默认 `human_guarded`、TTL 500 ms（50 ms–5 s）、最多续租 3 次。
+- [x] Human emergency Control 的 `bypassGuard` 仅按 trusted-local Human role 绕过 Guard，不绕过 policy/stale/approval；完整 capability 待 M10。
 - [ ] Checkpoint 只保存 cwd + shell + filtered exported env + workspace。
 - [x] PostgreSQL 为 durable truth；raw output 达阈值转 artifact。
 - [x] MCP M4 先 stdio；对外 HTTP 后续实现 Origin/Auth。
@@ -1149,7 +1149,7 @@ v1.0 还必须满足 M7–M10、fork 语义、故障矩阵、owner routing、mul
 
 下一批按依赖顺序推进：
 
-9. `feat(interaction): enforce generation-scoped input policy and guards`：完成 M6.5 Domain/Application/PostgreSQL/RPC/MCP 与 L2 场景，不包含 Human Console。
+9. [x] `feat(interaction): enforce generation-scoped input policy and guards`：完成 M6.5 Domain/Application/PostgreSQL/RPC/MCP 与 L2 场景，不包含 Human Console。
 10. `feat(console): add shared human terminal path`：完成 M5 最小 HTTP/WS、composer、interactive focus、actor/timeline 与 policy/guard UI，形成首条 L3 Human + MCP Agent 路径。
 11. `feat(screen): add controlled resize and geometry ownership`：完成 canonical geometry owner、resize/reflow 与 Human/headless fixture 对照。
 12. `feat(screen): classify bounded terminal state evidence`：只实现有 confidence/evidence 的 heuristic 与 shell/REPL/TUI fixtures，不把 heuristic 当权限事实。

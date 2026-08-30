@@ -290,6 +290,10 @@ class ControlledDurability implements RuntimeDurability {
     return Promise.resolve();
   }
 
+  public saveInteractionState(): Promise<void> {
+    return Promise.resolve();
+  }
+
   public markInteractionWriteAttempted(): Promise<void> {
     this.interactionWriteAttempts += 1;
     return Promise.resolve();

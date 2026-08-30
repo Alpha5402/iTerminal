@@ -28,13 +28,14 @@ const screenRectangle = z.strictObject({
 
 export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServer {
   const server = new McpServer(
-    { name: "iterminal", version: "0.6.4" },
+    { name: "iterminal", version: "0.6.5" },
     {
       instructions:
         "Create or select one shared Session, then pass its exact generation to every operation. " +
         "execute starts one top-level Shell command and returns immediately; use execution_wait or events_query to observe it. " +
         "PTY_BUSY means another Execute is active: wait for it, send targeted input/control if appropriate, or use another Session. " +
         "BACKPRESSURE means no Action was admitted; wait for durable delivery capacity and retry the identical idempotency key. " +
+        "Before interactive input, inspect interaction_get; INPUT_GUARDED is retryable only after the Guard expires or changes, while POLICY_DENIED requires a Human policy decision. " +
         "Never retry a mutating call after DELIVERY_UNKNOWN without first inspecting the idempotency key or durable events.",
     },
   );
@@ -143,12 +144,25 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
   );
 
   server.registerTool(
+    "interaction_get",
+    {
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      description:
+        "Read the exact Session generation's input policy, version, and active short Human Interaction Guard. Use this before targeted input/control and after INPUT_GUARDED or uncertain Guard changes. This tool cannot mutate Human policy or acquire a Guard.",
+      inputSchema: z.strictObject({ generation, sessionId }),
+      title: "Get terminal interaction policy",
+    },
+    async ({ generation: requestedGeneration, sessionId: requestedSessionId }) =>
+      call(() => gateway.getInteractionState(requestedSessionId, requestedGeneration)),
+  );
+
+  server.registerTool(
     "input",
     {
       annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: true },
       description:
         "Atomically write one input batch to the exact active foreground Execution. Pass expectedScreenVersion when acting on observed screen state. " +
-        "EXECUTION_CHANGED or SCREEN_CHANGED means refresh before deciding again.",
+        "EXECUTION_CHANGED or SCREEN_CHANGED means refresh before deciding again. INPUT_GUARDED means wait for Guard expiry/change and re-observe; POLICY_DENIED requires a Human policy change.",
       inputSchema: z.strictObject({
         data: z.string().max(64 * 1024),
         expectedScreenVersion: z.number().int().nonnegative().optional(),
@@ -180,7 +194,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
     {
       annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: true },
       description:
-        "Deliver either explicit TTY control bytes or a process-group signal to the exact active Execution. Ctrl+D is a TTY byte, not a guaranteed EOF event. Prefer CTRL_C before stronger signals.",
+        "Deliver either explicit TTY control bytes or a process-group signal to the exact active Execution. Ctrl+D is a TTY byte, not a guaranteed EOF event. Prefer CTRL_C before stronger signals. Agent MCP Control cannot bypass Human Guards or policy.",
       inputSchema: z.strictObject({
         delivery: z.discriminatedUnion("mode", [
           z.strictObject({

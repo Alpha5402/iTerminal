@@ -8,6 +8,9 @@ import type {
   ExecuteAction,
   Execution,
   InputAction,
+  InputPolicyMode,
+  InteractionGuard,
+  InteractionState,
   Session,
   SessionAction,
   SessionEvent,
@@ -22,6 +25,10 @@ import type {
 import {
   CANONICAL_TERMINAL_COLUMNS,
   CANONICAL_TERMINAL_ROWS,
+  DEFAULT_INTERACTION_GUARD_TTL_MS,
+  MAX_INTERACTION_GUARD_RENEWALS,
+  MAX_INTERACTION_GUARD_TTL_MS,
+  MIN_INTERACTION_GUARD_TTL_MS,
   RuntimeError,
 } from "@iterminal/domain";
 
@@ -77,7 +84,42 @@ export interface ControlRequest {
   readonly actor: Actor;
   readonly targetExecutionId: string;
   readonly delivery: ControlDelivery;
+  readonly bypassGuard?: boolean;
   readonly idempotencyKey: string;
+}
+
+export interface SetInputPolicyRequest {
+  readonly actor: Actor;
+  readonly expectedVersion: number;
+  readonly mode: InputPolicyMode;
+  readonly sessionGeneration: number;
+  readonly sessionId: string;
+}
+
+export interface AcquireInteractionGuardRequest {
+  readonly actor: Actor;
+  readonly expectedVersion: number;
+  readonly reason: string;
+  readonly sessionGeneration: number;
+  readonly sessionId: string;
+  readonly ttlMilliseconds?: number;
+}
+
+export interface RenewInteractionGuardRequest {
+  readonly actor: Actor;
+  readonly expectedVersion: number;
+  readonly guardId: string;
+  readonly sessionGeneration: number;
+  readonly sessionId: string;
+  readonly ttlMilliseconds?: number;
+}
+
+export interface ReleaseInteractionGuardRequest {
+  readonly actor: Actor;
+  readonly expectedVersion: number;
+  readonly guardId: string;
+  readonly sessionGeneration: number;
+  readonly sessionId: string;
 }
 
 export interface ScreenSearchRequest {
@@ -134,6 +176,7 @@ export interface StartedExecution {
 
 interface EventOptions {
   readonly action?: SessionAction;
+  readonly actor?: Actor;
   readonly execution?: Execution;
   readonly persist?: boolean;
 }
@@ -166,6 +209,7 @@ export class RuntimeService {
   readonly #started = new Map<string, Promise<void>>();
   readonly #durableQueues = new Map<string, DurableQueueState>();
   readonly #mutationTails = new Map<string, Promise<void>>();
+  readonly #interactionStates = new Map<string, InteractionState>();
   readonly #durability: RuntimeDurability | undefined;
   #ownerDurabilityFailure: RuntimeError | undefined;
   readonly #dispatchStates = new Map<string, ExecutionDispatchState>();
@@ -205,6 +249,12 @@ export class RuntimeService {
       status: "STARTING",
       workspaceRoot: request.workspaceRoot,
     };
+    this.#interactionStates.set(sessionId, {
+      policy: "human_guarded",
+      sessionGeneration: generation,
+      sessionId,
+      version: 1,
+    });
     this.store.createSession(session);
     const createdEvent = this.#event(
       session,
@@ -221,6 +271,7 @@ export class RuntimeService {
         this.#durability?.createSession(session, [createdEvent, startingEvent]),
       );
     } catch (error) {
+      this.#interactionStates.delete(sessionId);
       this.store.breakSession(sessionId, generation);
       if (isDurabilityFatal(error)) this.#tripDurability(sessionId, error);
       throw durabilityError(error);
@@ -826,6 +877,196 @@ export class RuntimeService {
     return (await this.startExecute(request)).completion;
   }
 
+  public getInteractionState(sessionId: string, generation: number): Promise<InteractionState> {
+    return this.#withMutationLock(sessionId, async () => {
+      await this.#flushDurable(sessionId);
+      const session = this.#requireGeneration(sessionId, generation);
+      return cloneInteractionState(await this.#reconcileExpiredGuard(session));
+    });
+  }
+
+  public setInputPolicy(request: SetInputPolicyRequest): Promise<InteractionState> {
+    return this.#withMutationLock(request.sessionId, async () => {
+      await this.#flushDurable(request.sessionId);
+      const session = this.#requireGeneration(request.sessionId, request.sessionGeneration);
+      let current = await this.#reconcileExpiredGuard(session);
+      this.#requireInteractionStateVersion(current, request.expectedVersion);
+      if (request.actor.type !== "human" && request.actor.type !== "system") {
+        await this.#rejectInteraction(
+          session,
+          current,
+          request.actor,
+          "interaction.policy_denied",
+          "Only Human or System may change input policy",
+          "policy_change",
+        );
+      }
+      if (current.policy === request.mode) return cloneInteractionState(current);
+      const next: InteractionState = {
+        policy: request.mode,
+        sessionGeneration: current.sessionGeneration,
+        sessionId: current.sessionId,
+        version: current.version + 1,
+      };
+      current = await this.#commitInteractionState(
+        session,
+        current,
+        next,
+        "interaction.policy_changed",
+        {
+          from: current.policy,
+          to: request.mode,
+          ...(current.guard === undefined ? {} : { clearedGuardId: current.guard.id }),
+        },
+        request.actor,
+      );
+      return cloneInteractionState(current);
+    });
+  }
+
+  public acquireInteractionGuard(
+    request: AcquireInteractionGuardRequest,
+  ): Promise<InteractionState> {
+    return this.#withMutationLock(request.sessionId, async () => {
+      await this.#flushDurable(request.sessionId);
+      const session = this.#requireGeneration(request.sessionId, request.sessionGeneration);
+      if (session.status !== "RUNNING") {
+        throw new RuntimeError(
+          "SESSION_NOT_READY",
+          "Interaction Guard requires a RUNNING foreground Execution",
+          { sessionStatus: session.status },
+        );
+      }
+      const current = await this.#reconcileExpiredGuard(session);
+      this.#requireInteractionStateVersion(current, request.expectedVersion);
+      if (request.actor.type !== "human" || current.policy !== "human_guarded") {
+        await this.#rejectInteraction(
+          session,
+          current,
+          request.actor,
+          "interaction.policy_denied",
+          "Only Human may acquire a Guard under human_guarded policy",
+          "guard_acquire",
+        );
+      }
+      if (current.guard !== undefined) {
+        await this.#rejectInteraction(
+          session,
+          current,
+          request.actor,
+          "interaction.input_guarded",
+          "Another Interaction Guard is active",
+          "guard_acquire",
+        );
+      }
+      const ttlMilliseconds = validateGuardTtl(request.ttlMilliseconds);
+      const reason = validateGuardReason(request.reason);
+      const acquiredAt = this.#now();
+      const next: InteractionState = {
+        guard: {
+          acquiredAt: acquiredAt.toISOString(),
+          actor: request.actor,
+          expiresAt: new Date(acquiredAt.getTime() + ttlMilliseconds).toISOString(),
+          id: `grd_${randomUUID()}`,
+          maxRenewals: MAX_INTERACTION_GUARD_RENEWALS,
+          reason,
+          renewals: 0,
+        },
+        policy: current.policy,
+        sessionGeneration: current.sessionGeneration,
+        sessionId: current.sessionId,
+        version: current.version + 1,
+      };
+      return cloneInteractionState(
+        await this.#commitInteractionState(
+          session,
+          current,
+          next,
+          "interaction.guard_acquired",
+          {
+            expiresAt: next.guard?.expiresAt,
+            guardId: next.guard?.id,
+            reason,
+            ttlMilliseconds,
+          },
+          request.actor,
+        ),
+      );
+    });
+  }
+
+  public renewInteractionGuard(request: RenewInteractionGuardRequest): Promise<InteractionState> {
+    return this.#withMutationLock(request.sessionId, async () => {
+      await this.#flushDurable(request.sessionId);
+      const session = this.#requireGeneration(request.sessionId, request.sessionGeneration);
+      const current = await this.#reconcileExpiredGuard(session);
+      this.#requireInteractionStateVersion(current, request.expectedVersion);
+      const guard = this.#requireCurrentGuard(current, request.guardId);
+      this.#requireGuardActor(guard.actor, request.actor);
+      if (guard.renewals >= guard.maxRenewals) {
+        throw new RuntimeError("POLICY_DENIED", "Interaction Guard renewal limit reached", {
+          guardId: guard.id,
+          maxRenewals: guard.maxRenewals,
+        });
+      }
+      const ttlMilliseconds = validateGuardTtl(request.ttlMilliseconds);
+      const renewalBase = Math.max(this.#now().getTime(), Date.parse(guard.acquiredAt));
+      const next: InteractionState = {
+        ...current,
+        guard: {
+          ...guard,
+          expiresAt: new Date(renewalBase + ttlMilliseconds).toISOString(),
+          renewals: guard.renewals + 1,
+        },
+        version: current.version + 1,
+      };
+      return cloneInteractionState(
+        await this.#commitInteractionState(
+          session,
+          current,
+          next,
+          "interaction.guard_renewed",
+          {
+            expiresAt: next.guard?.expiresAt,
+            guardId: guard.id,
+            renewals: next.guard?.renewals,
+            ttlMilliseconds,
+          },
+          request.actor,
+        ),
+      );
+    });
+  }
+
+  public releaseInteractionGuard(
+    request: ReleaseInteractionGuardRequest,
+  ): Promise<InteractionState> {
+    return this.#withMutationLock(request.sessionId, async () => {
+      await this.#flushDurable(request.sessionId);
+      const session = this.#requireGeneration(request.sessionId, request.sessionGeneration);
+      const current = await this.#reconcileExpiredGuard(session);
+      this.#requireInteractionStateVersion(current, request.expectedVersion);
+      const guard = this.#requireCurrentGuard(current, request.guardId);
+      this.#requireGuardActor(guard.actor, request.actor);
+      const next: InteractionState = {
+        policy: current.policy,
+        sessionGeneration: current.sessionGeneration,
+        sessionId: current.sessionId,
+        version: current.version + 1,
+      };
+      return cloneInteractionState(
+        await this.#commitInteractionState(
+          session,
+          current,
+          next,
+          "interaction.guard_released",
+          { guardId: guard.id, reason: guard.reason },
+          request.actor,
+        ),
+      );
+    });
+  }
+
   public sendInput(request: InputRequest): Promise<InputAction> {
     return this.#withMutationLock(request.sessionId, () => this.#sendInputLocked(request));
   }
@@ -854,6 +1095,7 @@ export class RuntimeService {
       request.targetExecutionId,
       request.expectedScreenVersion,
     );
+    await this.#assertInteractionAllowed(session, request.actor, "input", false);
     const action: InputAction = {
       acceptedAt: this.#timestamp(),
       actionSequence: this.store.nextActionSequence(session.id, session.generation),
@@ -929,6 +1171,7 @@ export class RuntimeService {
   async #sendControlLocked(request: ControlRequest): Promise<ControlAction> {
     await this.#flushDurable(request.sessionId);
     const requestHash = hashRequest({
+      bypassGuard: request.bypassGuard ?? false,
       delivery: request.delivery,
       targetExecutionId: request.targetExecutionId,
     });
@@ -945,10 +1188,17 @@ export class RuntimeService {
       request.sessionGeneration,
       request.targetExecutionId,
     );
+    await this.#assertInteractionAllowed(
+      session,
+      request.actor,
+      "control",
+      request.bypassGuard ?? false,
+    );
     const action: ControlAction = {
       acceptedAt: this.#timestamp(),
       actionSequence: this.store.nextActionSequence(session.id, session.generation),
       actor: request.actor,
+      bypassGuard: request.bypassGuard ?? false,
       delivery: request.delivery,
       id: `act_${randomUUID()}`,
       idempotencyKey: request.idempotencyKey,
@@ -1190,6 +1440,210 @@ export class RuntimeService {
     return session;
   }
 
+  async #assertInteractionAllowed(
+    session: Session,
+    actor: Actor,
+    interactionType: "input" | "control",
+    bypassGuard: boolean,
+  ): Promise<void> {
+    const state = await this.#reconcileExpiredGuard(session);
+    if (bypassGuard && actor.type !== "human") {
+      await this.#rejectInteraction(
+        session,
+        state,
+        actor,
+        "interaction.policy_denied",
+        "Only Human Control may request Guard bypass",
+        interactionType,
+      );
+    }
+    const policyAllows =
+      (state.policy === "common" && (actor.type === "human" || actor.type === "agent")) ||
+      (state.policy === "human_guarded" && (actor.type === "human" || actor.type === "agent")) ||
+      (state.policy === "human_only" && actor.type === "human") ||
+      (state.policy === "agent_only" && actor.type === "agent");
+    if (!policyAllows) {
+      await this.#rejectInteraction(
+        session,
+        state,
+        actor,
+        "interaction.policy_denied",
+        `Actor type ${actor.type} cannot ${interactionType} under ${state.policy}`,
+        interactionType,
+      );
+    }
+    if (
+      state.policy === "human_guarded" &&
+      state.guard !== undefined &&
+      !sameActor(state.guard.actor, actor) &&
+      !(interactionType === "control" && bypassGuard && actor.type === "human")
+    ) {
+      await this.#rejectInteraction(
+        session,
+        state,
+        actor,
+        "interaction.input_guarded",
+        "Interaction is protected by an active Human Guard",
+        interactionType,
+      );
+    }
+  }
+
+  #requireInteractionStateVersion(state: InteractionState, expectedVersion: number): void {
+    if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+      throw new RuntimeError(
+        "INVALID_REQUEST",
+        "Interaction expectedVersion must be a positive integer",
+        { expectedVersion },
+      );
+    }
+    if (state.version !== expectedVersion) {
+      throw new RuntimeError(
+        "INTERACTION_GUARD_CHANGED",
+        "Interaction state version changed",
+        { currentVersion: state.version, expectedVersion },
+        true,
+      );
+    }
+  }
+
+  #requireCurrentGuard(state: InteractionState, guardId: string): InteractionGuard {
+    if (guardId.length === 0 || guardId.length > 256) {
+      throw new RuntimeError("INVALID_REQUEST", "Interaction guardId is invalid");
+    }
+    if (state.guard === undefined || state.guard.id !== guardId) {
+      throw new RuntimeError(
+        "INTERACTION_GUARD_CHANGED",
+        "Interaction Guard is no longer current",
+        { currentGuardId: state.guard?.id, guardId, stateVersion: state.version },
+        true,
+      );
+    }
+    return state.guard;
+  }
+
+  #requireGuardActor(holder: Actor, actor: Actor): void {
+    if (!sameActor(holder, actor)) {
+      throw new RuntimeError(
+        "POLICY_DENIED",
+        "Only the exact Interaction Guard holder may renew or release it",
+        { guardActorId: holder.id },
+      );
+    }
+  }
+
+  async #reconcileExpiredGuard(session: Session): Promise<InteractionState> {
+    const current = this.#requireInteractionState(session.id, session.generation);
+    if (
+      current.guard === undefined ||
+      Date.parse(current.guard.expiresAt) > this.#now().getTime()
+    ) {
+      return current;
+    }
+    const next: InteractionState = {
+      policy: current.policy,
+      sessionGeneration: current.sessionGeneration,
+      sessionId: current.sessionId,
+      version: current.version + 1,
+    };
+    return this.#commitInteractionState(session, current, next, "interaction.guard_expired", {
+      expiredAt: current.guard.expiresAt,
+      guardActorId: current.guard.actor.id,
+      guardId: current.guard.id,
+    });
+  }
+
+  #requireInteractionState(sessionId: string, generation: number): InteractionState {
+    const state = this.#interactionStates.get(sessionId);
+    if (state === undefined || state.sessionGeneration !== generation) {
+      throw new RuntimeError(
+        "RUNTIME_UNAVAILABLE",
+        "Live Interaction state is unavailable for this Session generation",
+        { generation, sessionId },
+      );
+    }
+    return state;
+  }
+
+  async #commitInteractionState(
+    session: Session,
+    current: InteractionState,
+    next: InteractionState,
+    type: string,
+    payload: Readonly<Record<string, unknown>>,
+    actor?: Actor,
+  ): Promise<InteractionState> {
+    const event = this.#eventDraft(session, type, payload, undefined, undefined, actor);
+    try {
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.saveInteractionState(next, current.version, event),
+      );
+    } catch (error) {
+      if (isDurabilityFatal(error)) this.#tripDurability(session.id, error);
+      throw error instanceof RuntimeError ? error : durabilityError(error);
+    }
+    this.#interactionStates.set(session.id, next);
+    this.store.appendEvent(session.id, session.generation, event);
+    return next;
+  }
+
+  async #rejectInteraction(
+    session: Session,
+    state: InteractionState,
+    actor: Actor,
+    eventType: "interaction.input_guarded" | "interaction.policy_denied",
+    message: string,
+    interactionType: string,
+  ): Promise<never> {
+    const event = this.#eventDraft(
+      session,
+      eventType,
+      {
+        interactionType,
+        policy: state.policy,
+        reason: message,
+        stateVersion: state.version,
+        ...(state.guard === undefined
+          ? {}
+          : {
+              guardActorId: state.guard.actor.id,
+              guardExpiresAt: state.guard.expiresAt,
+              guardId: state.guard.id,
+            }),
+      },
+      undefined,
+      undefined,
+      actor,
+    );
+    try {
+      await this.#enqueueDurable(session.id, 0, () => this.#durability?.appendEvent(event));
+    } catch (error) {
+      if (isDurabilityFatal(error)) this.#tripDurability(session.id, error);
+      throw durabilityError(error);
+    }
+    this.store.appendEvent(session.id, session.generation, event);
+    if (eventType === "interaction.input_guarded") {
+      throw new RuntimeError(
+        "INPUT_GUARDED",
+        message,
+        {
+          expiresAt: state.guard?.expiresAt,
+          guardActorId: state.guard?.actor.id,
+          guardId: state.guard?.id,
+          interactionStateVersion: state.version,
+          policy: state.policy,
+        },
+        true,
+      );
+    }
+    throw new RuntimeError(
+      "POLICY_DENIED",
+      message,
+      { interactionStateVersion: state.version, policy: state.policy },
+      false,
+    );
+  }
+
   #requireExecutor(sessionId: string): ShellExecutor {
     const executor = this.#executors.get(sessionId);
     if (executor === undefined) {
@@ -1257,7 +1711,14 @@ export class RuntimeService {
     payload: Readonly<Record<string, unknown>>,
     options: EventOptions = {},
   ): SessionEvent {
-    const draft = this.#eventDraft(session, type, payload, options.action, options.execution);
+    const draft = this.#eventDraft(
+      session,
+      type,
+      payload,
+      options.action,
+      options.execution,
+      options.actor,
+    );
     const stored = this.store.appendEvent(session.id, session.generation, draft);
     if (options.persist !== false && this.#durability !== undefined) {
       const pendingBytes =
@@ -1277,6 +1738,7 @@ export class RuntimeService {
     payload: Readonly<Record<string, unknown>>,
     action?: SessionAction,
     execution?: Execution,
+    actor?: Actor,
   ): DurableSessionEvent {
     return {
       id: `evt_${randomUUID()}`,
@@ -1285,7 +1747,11 @@ export class RuntimeService {
       sessionGeneration: session.generation,
       sessionId: session.id,
       type,
-      ...(action === undefined ? {} : { actionId: action.id, actor: action.actor }),
+      ...(action === undefined
+        ? actor === undefined
+          ? {}
+          : { actor }
+        : { actionId: action.id, actor: action.actor }),
       ...(execution === undefined ? {} : { executionId: execution.id }),
     };
   }
@@ -1446,6 +1912,51 @@ export class RuntimeService {
   #timestamp(): string {
     return this.#now().toISOString();
   }
+}
+
+function validateGuardTtl(value: number | undefined): number {
+  const ttlMilliseconds = value ?? DEFAULT_INTERACTION_GUARD_TTL_MS;
+  if (
+    !Number.isSafeInteger(ttlMilliseconds) ||
+    ttlMilliseconds < MIN_INTERACTION_GUARD_TTL_MS ||
+    ttlMilliseconds > MAX_INTERACTION_GUARD_TTL_MS
+  ) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      `Interaction Guard TTL must be between ${MIN_INTERACTION_GUARD_TTL_MS.toString()} and ${MAX_INTERACTION_GUARD_TTL_MS.toString()} milliseconds`,
+      { ttlMilliseconds },
+    );
+  }
+  return ttlMilliseconds;
+}
+
+function validateGuardReason(value: string): string {
+  const reason = value.trim();
+  if (reason.length < 1 || reason.length > 256 || reason.includes("\0")) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      "Interaction Guard reason must contain 1 to 256 non-NUL characters",
+    );
+  }
+  return reason;
+}
+
+function sameActor(left: Actor, right: Actor): boolean {
+  return (
+    left.id === right.id &&
+    left.type === right.type &&
+    left.principal === right.principal &&
+    left.client === right.client
+  );
+}
+
+function cloneInteractionState(state: InteractionState): InteractionState {
+  return {
+    ...state,
+    ...(state.guard === undefined
+      ? {}
+      : { guard: { ...state.guard, actor: { ...state.guard.actor } } }),
+  };
 }
 
 function validateScreenWait(request: ScreenWaitRequest): void {

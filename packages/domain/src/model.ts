@@ -11,6 +11,7 @@ export type ExecuteActionStatus =
   | "UNKNOWN"
   | "CANCELLED";
 export type InteractionActionStatus = "ACCEPTED" | "DELIVERED" | "REJECTED" | "UNKNOWN";
+export type InputPolicyMode = "common" | "human_guarded" | "human_only" | "agent_only";
 export type ExecutionStatus =
   "DISPATCHING" | "RUNNING" | "COMPLETED" | "FAILED" | "INTERRUPTED" | "UNKNOWN";
 export type TtyControl = "CTRL_C" | "CTRL_D" | "CTRL_Z" | "ESC";
@@ -22,6 +23,10 @@ export type ControlDelivery =
 export const CANONICAL_TERMINAL_COLUMNS = 120;
 export const CANONICAL_TERMINAL_ROWS = 40;
 export const TERMINAL_SCREEN_HISTORY_ENTRIES = 64;
+export const DEFAULT_INTERACTION_GUARD_TTL_MS = 500;
+export const MIN_INTERACTION_GUARD_TTL_MS = 50;
+export const MAX_INTERACTION_GUARD_TTL_MS = 5_000;
+export const MAX_INTERACTION_GUARD_RENEWALS = 3;
 
 export interface TerminalScreenFrame {
   readonly buffer: "normal" | "alternate";
@@ -128,6 +133,24 @@ export interface Actor {
   readonly client: string;
 }
 
+export interface InteractionGuard {
+  readonly id: string;
+  readonly actor: Actor;
+  readonly reason: string;
+  readonly acquiredAt: string;
+  readonly expiresAt: string;
+  readonly renewals: number;
+  readonly maxRenewals: number;
+}
+
+export interface InteractionState {
+  readonly sessionId: string;
+  readonly sessionGeneration: number;
+  readonly policy: InputPolicyMode;
+  readonly version: number;
+  readonly guard?: InteractionGuard;
+}
+
 export interface Session {
   readonly id: string;
   readonly generation: number;
@@ -191,6 +214,7 @@ export interface ControlAction extends ActionBase {
   readonly type: "control";
   readonly targetExecutionId: string;
   readonly delivery: ControlDelivery;
+  readonly bypassGuard: boolean;
   status: InteractionActionStatus;
 }
 

@@ -311,7 +311,9 @@ async function startDaemonChild(
     child.once("exit", (code, signal) => {
       clearTimeout(timeout);
       rejectReady(
-        new Error(`Durable daemon exited before ready (code=${String(code)}, signal=${signal})`),
+        new Error(
+          `Durable daemon exited before ready (code=${String(code)}, signal=${signal}): ${stderr}`,
+        ),
       );
     });
   });

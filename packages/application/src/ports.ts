@@ -5,6 +5,7 @@ import type {
   ExecuteAction,
   Execution,
   InputAction,
+  InteractionState,
   Session,
   SessionAction,
   SessionEvent,
@@ -173,6 +174,11 @@ export interface RuntimeDurability {
     ownerId: string,
   ): Promise<void>;
   finishInteraction(action: InputAction | ControlAction, event: DurableSessionEvent): Promise<void>;
+  saveInteractionState(
+    state: InteractionState,
+    expectedVersion: number,
+    event: DurableSessionEvent,
+  ): Promise<void>;
   appendEvent(event: DurableSessionEvent): Promise<void>;
   queryEvents(
     sessionId: string,

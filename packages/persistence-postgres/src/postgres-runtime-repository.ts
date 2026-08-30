@@ -142,6 +142,12 @@ export class PostgresRuntimeRepository {
           input.createdAt,
         ],
       );
+      await client.query(
+        `INSERT INTO interaction_guards
+          (session_id, session_generation, input_policy, state_version)
+         VALUES ($1, $2, 'human_guarded', 1)`,
+        [input.id, input.generation],
+      );
     });
   }
 
