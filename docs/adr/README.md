@@ -55,6 +55,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0049](./0049-durable-agent-execute-approval.md)                         | Bind Human Approval atomically to one Agent Execute        | Accepted for M10.3       |
 | [0050](./0050-human-only-secret-input-and-sensitive-output-redaction.md) | Keep Human secret bytes out of ordinary observations       | Accepted for M10.4       |
 | [0051](./0051-bounded-artifact-storage-and-maintenance.md)               | Bound Artifact bytes and reclaim expired content           | Accepted for M10.5       |
+| [0052](./0052-bounded-pty-output-event-coalescing.md)                    | Coalesce PTY callbacks without crossing truth boundaries   | Accepted for M10.6       |
 
 Statuses:
 

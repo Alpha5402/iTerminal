@@ -73,7 +73,8 @@ by the live PTY.
 
 - Real `node-pty` output crossing the Artifact threshold after time/byte aggregation. On this host,
   a one-million-byte PTY write arrived as roughly 1 KiB callbacks, so the current direct-callback
-  ingest path kept them inline. Cross-callback aggregation remains open.
+  ingest path kept them inline. This was not proven by M10.5; it is subsequently closed by the
+  separate M10.6 verification report.
 - Whole-database heap/index/WAL/filesystem bounds, disk-full behavior, alarms, backups, or secure
   erase. The M10.5 budget counts only logical Artifact content bytes.
 - Event/Action/Approval/Outbox/Inbox retention, Artifact/recording export, legal hold, per-tenant

@@ -5,6 +5,8 @@ import type {
   DurableApprovalRequest,
   DurableExecuteAdmission,
   DurableExecuteAdmissionResult,
+  DurableSessionEvent,
+  CreateExecutorOptions,
   RuntimeDurability,
   RuntimeOwnerIdentity,
   SessionFence,
@@ -30,6 +32,80 @@ const actor = {
 };
 
 describe("Runtime durable write-ahead boundary", () => {
+  it("coalesces callback-sized PTY output with hard UTF-8 byte and time bounds", async () => {
+    const durability = new ControlledDurability();
+    const executor = new RecordingExecutor();
+    const store = new MemoryRuntimeStore();
+    const runtime = new RuntimeService(store, new RecordingFactory(executor), {
+      durability,
+      ownerId: "owner-output-coalescing-test",
+    });
+    const session = await runtime.createSession({ shell: "zsh", workspaceRoot: "/tmp" });
+
+    for (let index = 0; index < 8; index += 1) executor.emitOutput("x".repeat(1024));
+    executor.emitOutput("鲸".repeat(3000));
+    await waitUntil(() => durability.outputEvents.length === 3);
+
+    expect(durability.outputEvents.map((event) => event.payload.byteLength)).toEqual([
+      8192, 8190, 810,
+    ]);
+    expect(durability.outputEvents.map((event) => event.payload.data).join("")).toBe(
+      `${"x".repeat(8192)}${"鲸".repeat(3000)}`,
+    );
+    expect(durability.outputEvents.at(-1)?.payload.screenVersion).toBe(9);
+    expect(
+      store
+        .queryEvents(session.id, session.generation, 0, 100)
+        .filter((event) => event.type === "terminal.pty_output")
+        .map((event) => event.id),
+    ).toEqual(durability.outputEvents.map((event) => event.id));
+    await runtime.closeSession(session.id, session.generation);
+  });
+
+  it("flushes output before Execution boundaries and preserves exact attribution", async () => {
+    const durability = new ControlledDurability();
+    const executor = new RecordingExecutor();
+    const store = new MemoryRuntimeStore();
+    const runtime = new RuntimeService(store, new RecordingFactory(executor), {
+      durability,
+      ownerId: "owner-output-boundary-test",
+    });
+    const session = await runtime.createSession({ shell: "zsh", workspaceRoot: "/tmp" });
+    executor.emitOutput("ready-tail");
+    const started = await runtime.startExecute({
+      actor,
+      command: "printf execution-output",
+      idempotencyKey: "output-attribution",
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+    });
+    await within(started.started, "Execution start");
+    executor.emitOutput("execution-");
+    executor.emitOutput("tail");
+    executor.complete();
+    await within(started.completion, "Execution completion");
+
+    const events = store.queryEvents(session.id, session.generation, 0, 100);
+    const outputs = events.filter((event) => event.type === "terminal.pty_output");
+    expect(outputs).toHaveLength(2);
+    expect(outputs[0]).toMatchObject({ payload: { data: "ready-tail" } });
+    expect(outputs[0]?.actionId).toBeUndefined();
+    expect(outputs[0]?.executionId).toBeUndefined();
+    expect(outputs[1]).toMatchObject({
+      actionId: started.action.id,
+      actor: { id: actor.id },
+      executionId: started.execution.id,
+      payload: { data: "execution-tail" },
+    });
+    expect(events.findIndex((event) => event.id === outputs[0]?.id)).toBeLessThan(
+      events.findIndex((event) => event.type === "action.accepted"),
+    );
+    expect(events.findIndex((event) => event.id === outputs[1]?.id)).toBeLessThan(
+      events.findIndex((event) => event.type === "execution.completed"),
+    );
+    await within(runtime.closeSession(session.id, session.generation), "Session close");
+  });
+
   it("keeps external Execute reserved until one idempotent owner dispatch", async () => {
     const durability = new ControlledDurability();
     const executor = new RecordingExecutor();
@@ -241,7 +317,8 @@ describe("Runtime durable write-ahead boundary", () => {
 class RecordingFactory implements ShellExecutorFactory {
   public constructor(private readonly executor: RecordingExecutor) {}
 
-  public create(): Promise<ShellExecutor> {
+  public create(options: CreateExecutorOptions): Promise<ShellExecutor> {
+    this.executor.bindOutput(options.onOutput);
     return Promise.resolve(this.executor);
   }
 }
@@ -249,8 +326,9 @@ class RecordingFactory implements ShellExecutorFactory {
 class TrackingFactory implements ShellExecutorFactory {
   public readonly executors: RecordingExecutor[] = [];
 
-  public create(): Promise<ShellExecutor> {
+  public create(options: CreateExecutorOptions): Promise<ShellExecutor> {
     const executor = new RecordingExecutor();
+    executor.bindOutput(options.onOutput);
     this.executors.push(executor);
     return Promise.resolve(executor);
   }
@@ -262,6 +340,26 @@ class RecordingExecutor implements ShellExecutor {
   public readonly commands: string[] = [];
   public readonly inputs: string[] = [];
   public closed = false;
+  #complete: ((result: ShellExecutionResult) => void) | undefined;
+  #onOutput: ((data: string) => void) | undefined;
+
+  public bindOutput(onOutput: (data: string) => void): void {
+    this.#onOutput = onOutput;
+  }
+
+  public emitOutput(data: string): void {
+    this.#onOutput?.(data);
+  }
+
+  public complete(): void {
+    this.#complete?.({
+      cwd: "/tmp",
+      exitCode: 0,
+      filteredEnvironment: {},
+      output: "",
+      outputTruncated: false,
+    });
+  }
 
   public checkpoint(): Readonly<{
     cwd: string;
@@ -273,7 +371,9 @@ class RecordingExecutor implements ShellExecutor {
   public execute(command: string, callbacks: ShellExecuteCallbacks): Promise<ShellExecutionResult> {
     this.commands.push(command);
     callbacks.onStarted(command);
-    return new Promise(() => undefined);
+    return new Promise((resolve) => {
+      this.#complete = resolve;
+    });
   }
 
   public writeInput(data: string): void {
@@ -302,6 +402,7 @@ class ControlledDurability implements RuntimeDurability {
   public failInteraction = false;
   public writeAttempts = 0;
   public interactionWriteAttempts = 0;
+  public readonly outputEvents: DurableSessionEvent[] = [];
   #nextFencingToken = 1;
 
   public requestApproval(
@@ -439,7 +540,8 @@ class ControlledDurability implements RuntimeDurability {
     return Promise.resolve();
   }
 
-  public appendEvent(): Promise<void> {
+  public appendEvent(_fence: SessionFence, event: DurableSessionEvent): Promise<void> {
+    if (event.type === "terminal.pty_output") this.outputEvents.push(event);
     return Promise.resolve();
   }
 
@@ -476,4 +578,27 @@ class ControlledDurability implements RuntimeDurability {
 
 function unavailable(): RuntimeError {
   return new RuntimeError("RUNTIME_UNAVAILABLE", "injected durable failure", {}, true);
+}
+
+async function waitUntil(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("Timed out waiting for Runtime output aggregation");
+}
+
+async function within<T>(work: Promise<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out`)), 1_000);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }

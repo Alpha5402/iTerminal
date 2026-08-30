@@ -132,5 +132,7 @@ Rolling back schema protection without stopping writers is unsupported.
 - Event/Action/Approval/Outbox/Inbox retention and cursor-safe deletion.
 - Artifact/recording export, legal hold, secure erase, encryption policy, and object-store offload.
 - Whole-database and filesystem capacity monitoring, WAL/backup retention, and disk-full drills.
-- PTY callback aggregation: on this macOS host, `node-pty` commonly emitted roughly 1 KiB callbacks,
-  below the current 4 KiB per-persisted-chunk Artifact threshold.
+
+PTY callback aggregation was subsequently implemented by M10.6; see
+[ADR-0052](../adr/0052-bounded-pty-output-event-coalescing.md). Cross-platform performance and soak
+remain outside this M10.5 operations slice.

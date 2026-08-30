@@ -78,6 +78,8 @@ const DEFAULT_EVENT_LIMIT = 100;
 const MAX_EVENT_LIMIT = 500;
 const MAX_PENDING_DURABLE_EVENTS = 10_000;
 const MAX_PENDING_DURABLE_BYTES = 8 * 1024 * 1024;
+const MAX_PTY_OUTPUT_EVENT_BYTES = 8 * 1024;
+const PTY_OUTPUT_FLUSH_MILLISECONDS = 50;
 const DURABLE_FLUSH_TIMEOUT_MS = 30_000;
 const DEFAULT_SESSION_LEASE_MILLISECONDS = 15_000;
 const MAX_SCREEN_QUERY_LENGTH = 1_024;
@@ -310,6 +312,18 @@ interface DurableQueueState {
   tail: Promise<void>;
 }
 
+interface PtyOutputBuffer {
+  readonly actionId?: string;
+  readonly actor?: Actor;
+  byteLength: number;
+  data: string;
+  readonly executionId?: string;
+  readonly generation: number;
+  readonly observedAt: string;
+  screenVersion: number;
+  readonly timer: ReturnType<typeof setTimeout>;
+}
+
 interface ExecutionDispatchState {
   readonly action: ExecuteAction;
   readonly completion: Deferred<Execution>;
@@ -349,6 +363,7 @@ export class RuntimeService {
   readonly #completions = new Map<string, Promise<Execution>>();
   readonly #started = new Map<string, Promise<void>>();
   readonly #durableQueues = new Map<string, DurableQueueState>();
+  readonly #ptyOutputBuffers = new Map<string, PtyOutputBuffer>();
   readonly #actors = new Map<string, Actor>();
   readonly #approvals = new Map<string, Approval>();
   readonly #approvalRequestReplays = new Map<string, ApprovalRequestReplay>();
@@ -2781,20 +2796,7 @@ export class RuntimeService {
         ? undefined
         : this.store.getExecution(current.activeExecutionId);
     const action = execution === undefined ? undefined : this.store.getAction(execution.actionId);
-    this.#event(
-      current,
-      "terminal.pty_output",
-      {
-        byteLength: byteLength(data),
-        data,
-        screenVersion,
-      },
-      {
-        persist: true,
-        ...(action === undefined ? {} : { action }),
-        ...(execution === undefined ? {} : { execution }),
-      },
-    );
+    this.#appendPtyOutput(current, data, screenVersion, action, execution);
   }
 
   async #launchSession(
@@ -3515,6 +3517,7 @@ export class RuntimeService {
     payload: Readonly<Record<string, unknown>>,
     options: EventOptions = {},
   ): SessionEvent {
+    this.#flushPtyOutput(session.id);
     const draft = this.#eventDraft(
       session,
       type,
@@ -3523,12 +3526,116 @@ export class RuntimeService {
       options.execution,
       options.actor,
     );
+    return this.#storeAndPersistEvent(session, draft, options.persist !== false, 0);
+  }
+
+  #appendPtyOutput(
+    session: Session,
+    data: string,
+    screenVersion: number,
+    action: SessionAction | undefined,
+    execution: Execution | undefined,
+  ): void {
+    const observedAt = this.#timestamp();
+    let offset = 0;
+    while (offset < data.length) {
+      let buffer = this.#ptyOutputBuffers.get(session.id);
+      if (
+        buffer !== undefined &&
+        (buffer.generation !== session.generation ||
+          buffer.actionId !== action?.id ||
+          buffer.executionId !== execution?.id)
+      ) {
+        this.#flushPtyOutput(session.id);
+        buffer = undefined;
+      }
+      if (buffer === undefined) {
+        buffer = this.#newPtyOutputBuffer(session, observedAt, screenVersion, action, execution);
+        this.#ptyOutputBuffers.set(session.id, buffer);
+      }
+      const availableBytes = MAX_PTY_OUTPUT_EVENT_BYTES - buffer.byteLength;
+      const chunk = utf8Prefix(data, offset, availableBytes);
+      if (chunk.codeUnits === 0) {
+        this.#flushPtyOutput(session.id);
+        continue;
+      }
+      buffer.data += data.slice(offset, offset + chunk.codeUnits);
+      buffer.byteLength += chunk.byteLength;
+      buffer.screenVersion = screenVersion;
+      offset += chunk.codeUnits;
+      if (buffer.byteLength === MAX_PTY_OUTPUT_EVENT_BYTES) {
+        this.#flushPtyOutput(session.id);
+      }
+    }
+  }
+
+  #newPtyOutputBuffer(
+    session: Session,
+    observedAt: string,
+    screenVersion: number,
+    action: SessionAction | undefined,
+    execution: Execution | undefined,
+  ): PtyOutputBuffer {
+    const timer = setTimeout(() => {
+      try {
+        this.#flushPtyOutput(session.id);
+      } catch (error) {
+        this.#tripDurability(session.id, error);
+      }
+    }, PTY_OUTPUT_FLUSH_MILLISECONDS);
+    timer.unref();
+    return {
+      byteLength: 0,
+      data: "",
+      generation: session.generation,
+      observedAt,
+      screenVersion,
+      timer,
+      ...(action === undefined ? {} : { actionId: action.id, actor: cloneActor(action.actor) }),
+      ...(execution === undefined ? {} : { executionId: execution.id }),
+    };
+  }
+
+  #flushPtyOutput(sessionId: string): void {
+    const buffer = this.#ptyOutputBuffers.get(sessionId);
+    if (buffer === undefined) return;
+    this.#ptyOutputBuffers.delete(sessionId);
+    clearTimeout(buffer.timer);
+    const session = this.store.getSession(sessionId);
+    if (session === undefined || session.generation !== buffer.generation) {
+      throw new RuntimeError(
+        "RUNTIME_UNAVAILABLE",
+        "PTY output accumulator crossed a Session generation boundary",
+        { bufferedGeneration: buffer.generation, sessionId },
+        false,
+      );
+    }
+    const draft: DurableSessionEvent = {
+      id: `evt_${randomUUID()}`,
+      observedAt: buffer.observedAt,
+      payload: {
+        byteLength: buffer.byteLength,
+        data: buffer.data,
+        screenVersion: buffer.screenVersion,
+      },
+      sessionGeneration: buffer.generation,
+      sessionId,
+      type: "terminal.pty_output",
+      ...(buffer.actionId === undefined ? {} : { actionId: buffer.actionId }),
+      ...(buffer.actor === undefined ? {} : { actor: buffer.actor }),
+      ...(buffer.executionId === undefined ? {} : { executionId: buffer.executionId }),
+    };
+    this.#storeAndPersistEvent(session, draft, true, buffer.byteLength);
+  }
+
+  #storeAndPersistEvent(
+    session: Session,
+    draft: DurableSessionEvent,
+    persist: boolean,
+    pendingBytes: number,
+  ): SessionEvent {
     const stored = this.store.appendEvent(session.id, session.generation, draft);
-    if (options.persist !== false && this.#durability !== undefined) {
-      const pendingBytes =
-        type === "terminal.pty_output" && typeof payload.data === "string"
-          ? byteLength(payload.data)
-          : 0;
+    if (persist && this.#durability !== undefined) {
       void this.#enqueueDurable(session.id, pendingBytes, () =>
         this.#durability?.appendEvent(this.#requireSessionFence(session), draft),
       ).catch((error: unknown) => this.#tripDurability(session.id, error));
@@ -3615,6 +3722,7 @@ export class RuntimeService {
   }
 
   async #flushDurable(sessionId: string): Promise<void> {
+    this.#flushPtyOutput(sessionId);
     if (this.#durability === undefined) return;
     this.#requireOwnerDurability();
     const state = this.#durableQueue(sessionId);
@@ -3665,6 +3773,7 @@ export class RuntimeService {
   }
 
   #breakLiveSession(session: Session, reason: string): void {
+    this.#clearPtyOutput(session.id);
     this.#markActiveDispatchUnknown(session, reason);
     this.#markSensitiveInputUnknown(session.id);
     this.#executors.get(session.id)?.close();
@@ -3674,6 +3783,13 @@ export class RuntimeService {
     if (session.status !== "CLOSED" && session.status !== "BROKEN") {
       this.store.breakSession(session.id, session.generation);
     }
+  }
+
+  #clearPtyOutput(sessionId: string): void {
+    const buffer = this.#ptyOutputBuffers.get(sessionId);
+    if (buffer === undefined) return;
+    this.#ptyOutputBuffers.delete(sessionId);
+    clearTimeout(buffer.timer);
   }
 
   #markSensitiveInputUnknown(sessionId: string): void {
@@ -4252,6 +4368,26 @@ function canonicalJson(value: unknown): string {
 
 function byteLength(value: string): number {
   return Buffer.byteLength(value, "utf8");
+}
+
+function utf8Prefix(
+  value: string,
+  start: number,
+  maximumBytes: number,
+): Readonly<{ byteLength: number; codeUnits: number }> {
+  let bytes = 0;
+  let codeUnits = 0;
+  while (start + codeUnits < value.length) {
+    const codePoint = value.codePointAt(start + codeUnits);
+    if (codePoint === undefined) break;
+    const width = codePoint > 0xffff ? 2 : 1;
+    const codePointText = value.slice(start + codeUnits, start + codeUnits + width);
+    const codePointBytes = byteLength(codePointText);
+    if (bytes + codePointBytes > maximumBytes) break;
+    bytes += codePointBytes;
+    codeUnits += width;
+  }
+  return { byteLength: bytes, codeUnits };
 }
 
 function isInterrupt(delivery: ControlDelivery): boolean {

@@ -1,10 +1,10 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
-> 状态：Implementation Baseline v6.21 — M10.5 bounded Artifact storage 已通过真实 PostgreSQL 17 的并发预算、清理和 durability failure L2 路径；M10.4 Human-only Secret Input 已通过 Browser Human 与 official MCP Agent L3 路径；M9.18 已闭合本机 failure/pressure L4 gate；M4 autonomous-model L3 与 repository release L4 仍待完成
+> 状态：Implementation Baseline v6.22 — M10.6 bounded PTY output coalescing 已通过真实 node-pty/zsh/PostgreSQL 17 L2 路径并稳定进入 Artifact；M10.5 已闭合 Artifact storage budget/cleanup，M10.4 Human-only Secret Input 已通过 Browser Human 与 official MCP Agent L3 路径；M9.18 已闭合本机 failure/pressure L4 gate；M4 autonomous-model L3 与 repository release L4 仍待完成
 >
 > 基线日期：2026-08-31
 >
-> 当前仓库状态：M0–M9 的既有实现与证据保持不变。M10.1 已完成 closed/canonical Actor capability 与 immutable durable identity；M10.2 已完成 signed/expiring operation + Actor scoped Runtime RPC grant；M10.3b 已完成 durable Agent Execute Approval；M10.4 已完成 metadata-only Human SecretInputAction、显式敏感期、Executor-first 全量输出抑制、PostgreSQL/RPC/Router/Console 接入，以及真实 Chrome Human + official MCP 只读观察的无明文抽检；M10.5 已完成 PostgreSQL-authoritative Artifact logical-byte budget、per-row limit、bounded expiry cleanup、operator maintenance command，以及预算拒绝后的 Session `BROKEN`/Execution `UNKNOWN` durability transaction。完整 Event retention、Artifact/export/recording 生命周期、whole-database disk limit/alert、PTY 小分块聚合、跨操作 Capability/Policy/Approval 矩阵、其他 hostile-input 安全项与 release/dogfood 仍未完成。真正整机/VM fencing、跨主机/跨平台 soak、autonomous model 授权、daemon restart 后 durable wait 与 repository release L4 仍未证明。
+> 当前仓库状态：M0–M9 的既有实现与证据保持不变。M10.1 已完成 closed/canonical Actor capability 与 immutable durable identity；M10.2 已完成 signed/expiring operation + Actor scoped Runtime RPC grant；M10.3b 已完成 durable Agent Execute Approval；M10.4 已完成 metadata-only Human SecretInputAction、显式敏感期、Executor-first 全量输出抑制、PostgreSQL/RPC/Router/Console 接入，以及真实 Chrome Human + official MCP 只读观察的无明文抽检；M10.5 已完成 PostgreSQL-authoritative Artifact logical-byte budget、per-row limit、bounded expiry cleanup、operator maintenance command，以及预算拒绝后的 Session `BROKEN`/Execution `UNKNOWN` durability transaction；M10.6 已完成 Application-owned 8 KiB/50 ms PTY output Event coalescing，保持 live screen callback-real-time、exact attribution/ordering/secret boundaries，并让真实一百万字节 node-pty 输出进入 Artifact。完整 Event retention、Artifact/export/recording 生命周期、whole-database disk limit/alert、跨操作 Capability/Policy/Approval 矩阵、其他 hostile-input 安全项与 release/dogfood 仍未完成。真正整机/VM fencing、跨主机/跨平台 soak、autonomous model 授权、daemon restart 后 durable wait 与 repository release L4 仍未证明。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -433,7 +433,7 @@ Human 默认消费实时 PTY bytes +结构化 Action/Event metadata；Agent 默�
 - Reliability：owner_acquired/lost、outbox_published、delivery_ambiguous。
 - Security：policy_denied、approval_requested/granted/expired、secret_input_completed/cancelled。
 
-PTY output 的目标形态是以 4–16 KiB 或 50–100 ms 聚合为 chunk；具体阈值仍需 benchmark。当前 Runtime 按 `node-pty` 回调直接入 ingest loop，本机可观察到约 1 KiB 分块，因此只有单个持久化 chunk 超过 4 KiB 时才转 Artifact；跨回调聚合仍是显式待办。Event payload 默认不存 secret 原文，大内容只保存 artifact ref/metadata。
+PTY output 在 M10.6 由 Application 以 8 KiB 或 50 ms 先到者聚合为 Event chunk；Virtual Screen 仍同步消费每个 sanitized `node-pty` callback。聚合按 generation/Action/Execution attribution 隔离，并在所有非输出 Event、durable mutation、secret begin/finish 与 close 前 flush。Event payload 默认不存 secret 原文，大内容只保存 artifact ref/metadata。
 
 ### 7.3 Event 序号
 
@@ -853,7 +853,7 @@ Exit Gate：已在 PostgreSQL 17 通过。Agent 测试程序只靠 metadata/quer
 - [x] OpenCode 1.18.25 与 Claude Code 2.1.251 完成本地 stdio handshake。
 - [x] MCP Client 重启后凭 Action/Execution/Event cursor 恢复观察。
 - [x] `ITERM_DATABASE_URL` durable daemon：Session/Execute/Input/Control/Execution 状态接入 PostgreSQL。
-- [x] PTY output 经每 Session 有界有序 ingest loop 进入 Event；单个持久化 chunk 超过阈值时进入 Artifact，durable admission 失败熔断 live generation。跨 `node-pty` 小回调聚合未完成。
+- [x] PTY output 经每 Session 有界有序 ingest loop 进入 Event；M10.6 将 sanitized `node-pty` 小回调按 8 KiB/50 ms 聚合，超过阈值时进入 Artifact，durable admission 失败熔断 live generation。
 - [x] 真实 MCP + PostgreSQL 证明 write-ahead Action、attribution 与 durable cursor 重连。
 - [x] daemon `SIGKILL` 后同 owner 重启将旧 generation/Execution 标为 `BROKEN/UNKNOWN`，不伪恢复 PTY。
 - [ ] 真实模型驱动 Agent 自主完成完整工具路径（需要显式外发授权）。
@@ -1050,9 +1050,9 @@ Exit Gate：已通过 8 Worker 持续 chaos/pressure；每个 generation 最多�
 - [x] M10.4 secret channel、敏感期 recording redaction、Action/Event/search/Artifact/Execution/Screen/sensitive state 自动抽检（L3 local Browser Human + official MCP observation；不等于 OS memory/swap/core protection）。
 - [x] M10.4 Human-only secret input 与敏感期交互：metadata-only Action、exact Human finish、普通 Input 阻断、Human Control 保留、disconnect/Execution exit fail-closed。
 - [x] M10.5 bounded Artifact storage：PostgreSQL-authoritative aggregate/per-row logical-byte budget、exact usage accounting、bounded expiry cleanup、metadata-only operator command；live durability admission failure 原子落下 Session `BROKEN`、Execution/Action `UNKNOWN` 并释放 lease（L2；不等于 whole-database 磁盘预算、告警或 PTY 小分块聚合）。
+- [x] M10.6 bounded PTY output coalescing：live screen 每 callback 同步更新，Event/durable journal 按 exact generation/attribution 以 8 KiB/50 ms 聚合；真实一百万字节 node-pty 输出形成 124 个有界 Events、122 个 Artifacts，最大 8 KiB（L2；不等于跨平台性能/soak）。
 - [ ] origin/DNS rebinding/WS hijack/token/log/marker/path/resource exhaustion 测试。
 - [ ] Event/Action/Approval/Outbox 等 retention、Artifact/recording export/legal hold、whole-database 磁盘上限与容量告警；Artifact expiry cleanup 与 logical content budget 已由 M10.5 完成。
-- [ ] 对 `node-pty` 小回调做有界时间/字节聚合，再决定 Event/Artifact chunk；证明真实 PTY 输出可稳定进入 Artifact，而不是依赖单次回调大于 4 KiB。
 - [ ] 一条命令启动 PostgreSQL + Runtime + Web；MCP 配置可复制。
 - [ ] macOS/Linux clean-machine install、node-pty platform matrix。
 - [ ] 至少两个真实 MCP Client 版本矩阵。
@@ -1221,5 +1221,6 @@ v1.0 还必须满足 M7–M10、fork 语义、故障矩阵、owner routing、mul
 30. [x] `feat(runtime): reclaim unreachable owner process trees`：host-local Guardian、PID/start + PPID/PTY snapshot、stop-before-kill、frozen PostgreSQL transaction timeout、旧 Runtime `SIGSTOP` 与 replacement new-PTY-only recovery（M9.17 L2）。
 31. [x] `perf(runtime): bound database pools under rolling soak`：每 role/endpoint pool budget、8-owner high gate、1,043 次滚动 replacement、33,400 unique Sessions 与未缩短 30 分钟 soak（M9.18 本机 L4 failure/pressure）。
 32. [x] `feat(storage): bound Artifact content and cleanup`：migration 017、跨 owner aggregate/per-row admission、exact usage trigger、bounded expiry maintenance 与 live durability fail-closed（M10.5 L2；PTY 小回调聚合和 whole-database disk/alert 未包含）。
+33. [x] `feat(runtime): coalesce bounded PTY output Events`：Application-owned 8 KiB/50 ms accumulator、UTF-8 safe split、exact attribution/order/secret/close flush boundary，以及真实 node-pty 一百万字节 Artifact 路径（M10.6 L2；跨平台 soak 未包含）。
 
 M5 shared path 已闭合，但 M6 完整 L3 与其余 MVP Gate 未闭合前，不因为 M8 已有故障证据就宣称 MVP。

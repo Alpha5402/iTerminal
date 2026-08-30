@@ -59,6 +59,7 @@
     "test:m9:rolling:soak": "ITERM_M9_ROLLING_PROFILE=soak vitest run --maxWorkers=1 apps/runtime-router/src/high-cardinality-rolling.test.ts",
     "test:m10:approval": "vitest run --maxWorkers=1 packages/application/src/approval.test.ts packages/persistence-postgres/src/postgres-runtime-repository.test.ts apps/runtime-daemon/src/approval-durable.test.ts apps/mcp/src/mcp-stdio.test.ts apps/console/src/server.test.ts",
     "test:m10:artifact": "vitest run --maxWorkers=1 packages/persistence-postgres/src/postgres-observation-repository.test.ts apps/runtime-daemon/src/artifact-storage-backpressure.test.ts",
+    "test:m10:output": "vitest run --maxWorkers=1 packages/application/src/runtime-durability.test.ts apps/runtime-daemon/src/artifact-storage-backpressure.test.ts",
     "test:m10:secret": "vitest run --maxWorkers=1 packages/executor-pty/src/sensitive-output-sanitizer.test.ts packages/application/src/secret-input.test.ts apps/runtime-daemon/src/secret-input-durable.test.ts packages/runtime-rpc/src/index.test.ts apps/console/src/server.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm verify:docs && pnpm build",

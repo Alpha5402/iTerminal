@@ -58,6 +58,10 @@ const requiredReports = [
     level: "L2",
     path: "docs/verification/M10/2026-08-31-bounded-artifact-storage.md",
   },
+  {
+    level: "L2",
+    path: "docs/verification/M10/2026-08-31-pty-output-event-coalescing.md",
+  },
 ];
 
 for (const report of requiredReports) {

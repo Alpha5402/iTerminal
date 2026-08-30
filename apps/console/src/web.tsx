@@ -343,6 +343,7 @@ function App(): React.JSX.Element {
     }
     const selected = sessions.find((candidate) => candidate.id === selectedId);
     if (selected === undefined) return;
+    setError(undefined);
     const saved = readResume(selected.id, selected.generation);
     setSession(selected);
     setInteraction(undefined);

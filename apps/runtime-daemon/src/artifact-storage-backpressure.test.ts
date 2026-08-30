@@ -22,7 +22,7 @@ const actor: Actor = {
   type: "agent",
 };
 
-describeDatabase("M10.5 durable Artifact storage backpressure", () => {
+describeDatabase("M10.5/M10.6 durable Artifact storage and PTY output coalescing", () => {
   const pool = new Pool({ connectionString: databaseUrl });
   const fixtures: string[] = [];
   let daemon: RuntimeDaemonHandle | undefined;
@@ -197,6 +197,73 @@ describeDatabase("M10.5 durable Artifact storage backpressure", () => {
       [session.id, sentinel],
     );
     expect(rejectedContent.rows[0]?.matches).toBe("0");
+  }, 30_000);
+
+  it("coalesces real node-pty callbacks into bounded durable Artifacts", async () => {
+    await pool.query(
+      `UPDATE artifact_storage_policies
+          SET max_bytes = 1073741824, max_artifact_bytes = 16777216,
+              retention_milliseconds = 604800000, cleanup_batch_size = 1000,
+              updated_at = now()
+        WHERE scope = 'default'`,
+    );
+    const root = await realpath(await mkdtemp(join(tmpdir(), "iterminal-m10-output-")));
+    fixtures.push(root);
+    const workspace = join(root, "workspace");
+    await mkdir(workspace, { recursive: true });
+    daemon = await startRuntimeDaemon({
+      databaseUrl: databaseUrl ?? "",
+      ownerId: "owner-m10-output",
+      socketPath: join(root, "runtime.sock"),
+    });
+    await daemon.waitUntilReady();
+    const rpc = new UnixRuntimeClient(daemon.socketPath);
+    const session = await rpc.createSession({
+      idempotencyKey: "m10-output-session",
+      shell: "zsh",
+      workspaceRoot: workspace,
+    });
+    const started = await rpc.startExecute({
+      actor,
+      command: `python3 -c 'import os; os.write(1, b"X" * 1000000)'`,
+      idempotencyKey: "m10-output-million-bytes",
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+    });
+    await rpc.waitExecution(started.execution.id);
+
+    const aggregate = await pool.query<{
+      artifact_events: string;
+      max_artifact_bytes: string;
+      max_event_bytes: string;
+      missing_artifacts: string;
+      output_bytes: string;
+      output_events: string;
+    }>(
+      `SELECT count(*)::text AS output_events,
+              coalesce(sum((event.payload->>'byteCount')::bigint), 0)::text AS output_bytes,
+              count(*) FILTER (WHERE event.payload ? 'artifactRef')::text AS artifact_events,
+              coalesce(max((event.payload->>'byteCount')::bigint), 0)::text AS max_event_bytes,
+              coalesce(max(artifact.byte_size), 0)::text AS max_artifact_bytes,
+              count(*) FILTER (
+                WHERE event.payload ? 'artifactRef' AND artifact.id IS NULL
+              )::text AS missing_artifacts
+         FROM session_events event
+         LEFT JOIN artifacts artifact ON artifact.id = event.payload->>'artifactRef'
+        WHERE event.execution_id = $1 AND event.event_type = 'terminal.pty_output'`,
+      [started.execution.id],
+    );
+    const observed = aggregate.rows[0];
+    if (observed === undefined) throw new Error("Expected durable output aggregation metrics");
+    expect(Number.parseInt(observed.output_events, 10)).toBeGreaterThan(100);
+    expect(Number.parseInt(observed.output_events, 10)).toBeLessThan(150);
+    expect(Number.parseInt(observed.output_bytes, 10)).toBeGreaterThanOrEqual(1_000_000);
+    expect(Number.parseInt(observed.artifact_events, 10)).toBeGreaterThan(100);
+    expect(Number.parseInt(observed.max_event_bytes, 10)).toBeLessThanOrEqual(8192);
+    expect(Number.parseInt(observed.max_artifact_bytes, 10)).toBeLessThanOrEqual(8192);
+    expect(observed.missing_artifacts).toBe("0");
+
+    await rpc.closeSession(session.id, session.generation);
   }, 30_000);
 });
 
