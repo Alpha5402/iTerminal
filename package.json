@@ -49,6 +49,7 @@
     "test:m9:router": "vitest run --maxWorkers=1 apps/runtime-router/src/server.test.ts apps/runtime-router/src/runtime-router.test.ts apps/mcp/src/router-routing.test.ts apps/execution-worker/src/execution-worker.test.ts",
     "test:m9:fencing": "vitest run --maxWorkers=1 packages/persistence-postgres/src/postgres-session-fencing.test.ts apps/runtime-daemon/src/owner-registry.test.ts",
     "test:m9:fairness": "vitest run --maxWorkers=1 packages/persistence-postgres/src/postgres-runtime-owner-registry.test.ts packages/persistence-postgres/src/postgres-action-rate-limit.test.ts apps/runtime-router/src/runtime-router.test.ts",
+    "test:m9:process-chaos": "vitest run --maxWorkers=1 apps/runtime-router/src/process-chaos.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm verify:docs && pnpm build",
     "verify:docs": "node scripts/check-verification.mjs"

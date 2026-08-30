@@ -23,6 +23,8 @@ M9.3 adds a separate generation-scoped Session lease. Root/fork creation acquire
 
 M9.4 replaces Router-side list-and-pick with an atomic PostgreSQL placement claim. New root Sessions are assigned by monotonic attempt count across unexpired ACTIVE owners; DRAINING owners serve only exact existing routes. This is deterministic round-robin fairness, not capacity or active-load scheduling.
 
+M9.5 validates the same contracts with an independent Router process and three independent Runtime processes. Router restart is stateless. After Runtime `SIGKILL`, exact targets fail closed until owner-lease expiry; a boot-unique same-owner replacement advances registry epoch, exposes only bounded `BROKEN` Session reconstruction evidence, and creates a new PTY only for a newly placed Session. Historical durable `UNKNOWN` Executions are not reconstructed as fake live Execution objects. Graceful `SIGTERM` drains, closes local Sessions, releases leases, and persists `STOPPED`.
+
 | Environment variable                | Default                         |
 | ----------------------------------- | ------------------------------- |
 | `ITERM_RUNTIME_OWNER_ID`            | derived from the Runtime socket |

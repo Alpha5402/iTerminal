@@ -36,6 +36,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0030](./0030-central-runtime-router-forwarding.md)               | Forward exact Session and Execution calls through Router | Accepted for M9.2        |
 | [0031](./0031-generation-scoped-session-fencing.md)               | Fence generation writes with an exact Session lease      | Accepted for M9.3        |
 | [0032](./0032-atomic-placement-and-durable-action-rate-limits.md) | Claim fair placement and rate-limit durable Actions      | Accepted for M9.4        |
+| [0033](./0033-independent-process-owner-failure-recovery.md)      | Preserve fencing across Router/Runtime process loss      | Accepted for M9.5        |
 
 Statuses:
 
