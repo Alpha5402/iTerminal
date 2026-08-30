@@ -37,6 +37,14 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
 
   beforeEach(async () => {
     await pool.query("TRUNCATE runtime_workers, sessions, actors, outbox RESTART IDENTITY CASCADE");
+    await pool.query(
+      `UPDATE session_creation_policies
+          SET retention_milliseconds = 86400000,
+              max_requests = 100000,
+              cleanup_batch_size = 1000,
+              updated_at = now()
+        WHERE scope = 'default'`,
+    );
   });
 
   afterEach(async () => {
@@ -821,6 +829,126 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
     );
     expect(durable.rows).toEqual([
       { creation_count: "1", placement_count: "3", session_count: "1" },
+    ]);
+  }, 120_000);
+
+  it("bounds root creation keys while preserving live replay and reclaiming terminal capacity", async () => {
+    await pool.query(
+      `UPDATE session_creation_policies
+          SET retention_milliseconds = 100, max_requests = 2, cleanup_batch_size = 2
+        WHERE scope = 'default'`,
+    );
+    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m911-retention-")));
+    fixtures.push(root);
+    const workspace = join(root, "workspace");
+    await mkdir(workspace, { recursive: true });
+    children.push(
+      await startRuntimeChild(
+        root,
+        "owner-creation-retention",
+        "instance-creation-retention",
+        join(root, "runtime.sock"),
+      ),
+    );
+    const routerSocket = join(root, "router.sock");
+    children.push(await startRouterChild(routerSocket));
+    const client = new UnixRuntimeClient(routerSocket);
+    const firstRequest = {
+      idempotencyKey: "m911-retained-first",
+      shell: "zsh" as const,
+      workspaceRoot: workspace,
+    };
+    const secondRequest = {
+      idempotencyKey: "m911-retained-second",
+      shell: "zsh" as const,
+      workspaceRoot: workspace,
+    };
+    const thirdRequest = {
+      idempotencyKey: "m911-reclaimed-third",
+      shell: "zsh" as const,
+      workspaceRoot: workspace,
+    };
+    const first = await client.createSession(firstRequest);
+    const second = await client.createSession(secondRequest);
+    await delay(150);
+
+    await expect(client.createSession(thirdRequest)).rejects.toMatchObject({
+      code: "BACKPRESSURE",
+      details: {
+        currentRequests: 2,
+        limit: 2,
+        phase: "idempotency_admission",
+      },
+      retryable: true,
+    });
+    expect(await client.createSession(firstRequest)).toMatchObject({ id: first.id });
+    const beforeCleanup = await pool.query<{
+      placement_count: string;
+      request_count: string;
+      session_count: string;
+    }>(
+      `SELECT
+         (SELECT placement_count::text FROM runtime_workers
+           WHERE owner_id = 'owner-creation-retention') AS placement_count,
+         (SELECT count(*)::text FROM session_creation_requests) AS request_count,
+         (SELECT count(*)::text FROM sessions) AS session_count`,
+    );
+    expect(beforeCleanup.rows).toEqual([
+      { placement_count: "2", request_count: "2", session_count: "2" },
+    ]);
+
+    expect((await client.closeSession(first.id, first.generation)).status).toBe("CLOSED");
+    const third = await client.createSession(thirdRequest);
+    const thirdExecution = await client.startExecute({
+      actor: actor("retention-third"),
+      command: "printf m911-retention-third",
+      idempotencyKey: "m911-retention-third-execute",
+      sessionGeneration: third.generation,
+      sessionId: third.id,
+    });
+    const thirdCompleted = await client.waitExecution(thirdExecution.execution.id);
+    expect(thirdCompleted.status).toBe("COMPLETED");
+    expect(thirdCompleted.output).toContain("m911-retention-third");
+
+    expect((await client.closeSession(second.id, second.generation)).status).toBe("CLOSED");
+    const reusedAfterExpiry = await client.createSession(firstRequest);
+    expect(reusedAfterExpiry.id).not.toBe(first.id);
+    const reusedExecution = await client.startExecute({
+      actor: actor("retention-reused"),
+      command: "printf m911-retention-reused",
+      idempotencyKey: "m911-retention-reused-execute",
+      sessionGeneration: reusedAfterExpiry.generation,
+      sessionId: reusedAfterExpiry.id,
+    });
+    const reusedCompleted = await client.waitExecution(reusedExecution.execution.id);
+    expect(reusedCompleted.status).toBe("COMPLETED");
+    expect(reusedCompleted.output).toContain("m911-retention-reused");
+
+    const retained = await pool.query<{
+      completed: boolean;
+      idempotency_key: string;
+    }>(
+      `SELECT idempotency_key, completed_at IS NOT NULL AS completed
+         FROM session_creation_requests
+        ORDER BY idempotency_key`,
+    );
+    expect(retained.rows).toEqual([
+      { completed: true, idempotency_key: "m911-reclaimed-third" },
+      { completed: true, idempotency_key: "m911-retained-first" },
+    ]);
+    const finalCounts = await pool.query<{
+      placement_count: string;
+      request_count: string;
+      session_count: string;
+    }>(
+      `SELECT
+         (SELECT placement_count::text FROM runtime_workers
+           WHERE owner_id = 'owner-creation-retention') AS placement_count,
+         (SELECT count(*)::text FROM session_creation_requests) AS request_count,
+         (SELECT count(*)::text FROM sessions) AS session_count`,
+    );
+    expect(finalCounts.rows).toEqual([
+      { placement_count: "4", request_count: "2", session_count: "4" },
     ]);
   }, 120_000);
 

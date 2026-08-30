@@ -12,6 +12,11 @@ import { Pool, type PoolClient } from "pg";
 
 import { migrateDatabase } from "./migrate.js";
 import { guardPostgresPool } from "./postgres-pool.js";
+import {
+  assertSessionCreationCapacity,
+  lockSessionPlacement,
+  prepareSessionCreationAdmission,
+} from "./session-creation-retention.js";
 
 interface OwnerRow {
   readonly active_session_count: string;
@@ -55,8 +60,6 @@ function ownerColumns(alias: string, includeActiveSessionCount = true): string {
 }
 
 const OWNER_RETURNING = ownerColumns("runtime_workers");
-const PLACEMENT_CLAIM_LOCK = 1_769_238_389;
-
 export interface PostgresRuntimeOwnerRegistryOptions {
   readonly statementTimeoutMilliseconds?: number;
 }
@@ -204,7 +207,7 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
 
   public async claimAssignableOwner(): Promise<RuntimeOwnerRecord | undefined> {
     return this.#transaction(async (client) => {
-      await client.query("SELECT pg_advisory_xact_lock($1)", [PLACEMENT_CLAIM_LOCK]);
+      await lockSessionPlacement(client);
       return this.#claimAssignableOwner(client);
     });
   }
@@ -216,7 +219,7 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
     validateIdentifier(input.idempotencyKey, "idempotencyKey");
     validateRequestHash(input.requestHash);
     return this.#transaction(async (client) => {
-      await client.query("SELECT pg_advisory_xact_lock($1)", [PLACEMENT_CLAIM_LOCK]);
+      const policy = await prepareSessionCreationAdmission(client);
       const existing = await client.query<SessionCreationRow>(
         `SELECT idempotency_key, request_hash, owner_id, owner_instance_id,
                 owner_registry_epoch::text, session_id
@@ -275,6 +278,7 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
         };
       }
 
+      await assertSessionCreationCapacity(client, policy);
       const owner = await this.#claimAssignableOwner(client);
       if (owner === undefined) return undefined;
       await client.query(

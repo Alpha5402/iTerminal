@@ -32,6 +32,10 @@ import { Pool, type PoolClient } from "pg";
 
 import { PostgresObservationRepository } from "./postgres-observation-repository.js";
 import { guardPostgresPool } from "./postgres-pool.js";
+import {
+  assertSessionCreationCapacity,
+  prepareSessionCreationAdmission,
+} from "./session-creation-retention.js";
 import { PostgresRuntimeRepository } from "./postgres-runtime-repository.js";
 import {
   actionRateLimitPolicy,
@@ -56,6 +60,14 @@ export interface PostgresRuntimeDurabilityOptions extends ActionRateLimitOptions
 }
 
 const MAX_REBUILDABLE_SESSIONS = 100;
+
+interface SessionCreationIntentRow {
+  readonly owner_id: string;
+  readonly owner_instance_id: string;
+  readonly owner_registry_epoch: string;
+  readonly request_hash: string;
+  readonly session_id: string | null;
+}
 
 export class PostgresRuntimeDurability implements RuntimeDurability {
   readonly #pool: Pool;
@@ -112,35 +124,36 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
     return this.#transaction(async (client) => {
       assertSessionOwner(session, owner);
       await assertRuntimeOwner(client, owner);
-      const intent = await client.query<{
-        owner_id: string;
-        owner_instance_id: string;
-        owner_registry_epoch: string;
-        request_hash: string;
-        session_id: string | null;
-      }>(
-        `SELECT request_hash, owner_id, owner_instance_id,
-                owner_registry_epoch::text, session_id
-           FROM session_creation_requests
-          WHERE idempotency_key = $1
-          FOR UPDATE`,
-        [creation.idempotencyKey],
-      );
-      const existing = intent.rows[0];
-      if (existing === undefined) {
-        await client.query(
-          `INSERT INTO session_creation_requests
-            (idempotency_key, request_hash, owner_id, owner_instance_id, owner_registry_epoch)
-           VALUES ($1, $2, $3, $4, $5)`,
-          [
-            creation.idempotencyKey,
-            creation.requestHash,
-            owner.ownerId,
-            owner.instanceId,
-            owner.epoch,
-          ],
+      const readIntent = (): Promise<{ readonly rows: SessionCreationIntentRow[] }> =>
+        client.query<SessionCreationIntentRow>(
+          `SELECT request_hash, owner_id, owner_instance_id,
+                  owner_registry_epoch::text, session_id
+             FROM session_creation_requests
+            WHERE idempotency_key = $1
+            FOR UPDATE`,
+          [creation.idempotencyKey],
         );
-      } else {
+      let existing = (await readIntent()).rows[0];
+      if (existing === undefined) {
+        const creationPolicy = await prepareSessionCreationAdmission(client);
+        existing = (await readIntent()).rows[0];
+        if (existing === undefined) {
+          await assertSessionCreationCapacity(client, creationPolicy);
+          await client.query(
+            `INSERT INTO session_creation_requests
+              (idempotency_key, request_hash, owner_id, owner_instance_id, owner_registry_epoch)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [
+              creation.idempotencyKey,
+              creation.requestHash,
+              owner.ownerId,
+              owner.instanceId,
+              owner.epoch,
+            ],
+          );
+        }
+      }
+      if (existing !== undefined) {
         if (
           existing.request_hash !== creation.requestHash ||
           existing.owner_id !== owner.ownerId ||
@@ -196,7 +209,7 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
       await expectOne(
         client,
         `UPDATE session_creation_requests
-            SET session_id = $2, updated_at = now()
+            SET session_id = $2, completed_at = now(), updated_at = now()
           WHERE idempotency_key = $1 AND session_id IS NULL`,
         [creation.idempotencyKey, session.id],
         "Session was committed without binding its creation idempotency key",

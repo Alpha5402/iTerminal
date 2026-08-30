@@ -386,12 +386,18 @@ export class RuntimeService {
     }
     const promise = this.#createSession(normalized, requestHash);
     this.#sessionCreations.set(normalized.idempotencyKey, { promise, requestHash });
-    void promise.catch(() => {
-      if (this.#sessionCreations.get(normalized.idempotencyKey)?.promise === promise) {
-        this.#sessionCreations.delete(normalized.idempotencyKey);
-      }
-    });
+    void promise.then(
+      () => this.#forgetDurableSessionCreation(normalized.idempotencyKey, promise),
+      () => this.#forgetDurableSessionCreation(normalized.idempotencyKey, promise),
+    );
     return promise;
+  }
+
+  #forgetDurableSessionCreation(idempotencyKey: string, promise: Promise<Session>): void {
+    if (this.#durability === undefined) return;
+    if (this.#sessionCreations.get(idempotencyKey)?.promise === promise) {
+      this.#sessionCreations.delete(idempotencyKey);
+    }
   }
 
   async #createSession(

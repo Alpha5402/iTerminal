@@ -1,6 +1,12 @@
-import { PostgresRuntimeOwnerRegistry } from "./postgres-runtime-owner-registry.js";
+import { randomUUID } from "node:crypto";
+
+import type { DurableSessionEvent } from "@iterminal/application";
+import type { Session } from "@iterminal/domain";
 import { Pool } from "pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+
+import { PostgresRuntimeDurability } from "./postgres-runtime-durability.js";
+import { PostgresRuntimeOwnerRegistry } from "./postgres-runtime-owner-registry.js";
 
 const databaseUrl = process.env.ITERM_DATABASE_URL;
 const describeDatabase = databaseUrl === undefined ? describe.skip : describe;
@@ -20,6 +26,14 @@ describeDatabase("M9.1 PostgreSQL Runtime owner registry", () => {
 
   beforeEach(async () => {
     await pool.query("TRUNCATE sessions, actors, outbox, runtime_workers RESTART IDENTITY CASCADE");
+    await pool.query(
+      `UPDATE session_creation_policies
+          SET retention_milliseconds = 86400000,
+              max_requests = 100000,
+              cleanup_batch_size = 1000,
+              updated_at = now()
+        WHERE scope = 'default'`,
+    );
   });
 
   afterEach(async () => {
@@ -247,6 +261,145 @@ describeDatabase("M9.1 PostgreSQL Runtime owner registry", () => {
     });
   });
 
+  it("serializes distinct creation keys against one database capacity", async () => {
+    await pool.query(
+      `UPDATE session_creation_policies
+          SET max_requests = 2, cleanup_batch_size = 2
+        WHERE scope = 'default'`,
+    );
+    const registriesForClaims = [
+      createRegistry(),
+      createRegistry(),
+      createRegistry(),
+      createRegistry(),
+    ];
+    await registriesForClaims[0]?.registerOwner({
+      endpoint: "/tmp/iterminal-capacity.sock",
+      instanceId: "capacity-instance",
+      leaseMilliseconds: 5_000,
+      ownerId: "owner-capacity",
+    });
+    const claims = await Promise.allSettled(
+      registriesForClaims.map((registry, index) =>
+        registry.claimSessionCreation({
+          idempotencyKey: `capacity-key-${index.toString()}`,
+          requestHash: index.toString().padStart(64, "0"),
+        }),
+      ),
+    );
+    const accepted = claims.filter((result) => result.status === "fulfilled");
+    const rejected = claims.filter(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    expect(accepted).toHaveLength(2);
+    expect(rejected).toHaveLength(2);
+    for (const result of rejected) {
+      expect(result.reason).toMatchObject({
+        code: "BACKPRESSURE",
+        details: {
+          currentRequests: 2,
+          limit: 2,
+          phase: "idempotency_admission",
+        },
+        retryable: true,
+      });
+    }
+    expect(await pool.query("SELECT 1 FROM session_creation_requests")).toMatchObject({
+      rowCount: 2,
+    });
+    expect(await registriesForClaims[0]?.listAssignableOwners()).toEqual([
+      expect.objectContaining({ ownerId: "owner-capacity", placementCount: 2 }),
+    ]);
+  });
+
+  it("reclaims an expired unfinished key only after its exact owner is not live", async () => {
+    await pool.query(
+      `UPDATE session_creation_policies
+          SET retention_milliseconds = 25, max_requests = 1, cleanup_batch_size = 1
+        WHERE scope = 'default'`,
+    );
+    const registry = createRegistry();
+    const firstOwner = await registry.registerOwner({
+      endpoint: "/tmp/iterminal-retention-a.sock",
+      instanceId: "retention-instance-a",
+      leaseMilliseconds: 5_000,
+      ownerId: "owner-retention-a",
+    });
+    await registry.claimSessionCreation({
+      idempotencyKey: "retention-stale-key",
+      requestHash: "a".repeat(64),
+    });
+    await delay(50);
+    await expect(
+      registry.claimSessionCreation({
+        idempotencyKey: "retention-blocked-key",
+        requestHash: "b".repeat(64),
+      }),
+    ).rejects.toMatchObject({ code: "BACKPRESSURE" });
+
+    await registry.stopOwner(firstOwner);
+    await registry.registerOwner({
+      endpoint: "/tmp/iterminal-retention-b.sock",
+      instanceId: "retention-instance-b",
+      leaseMilliseconds: 5_000,
+      ownerId: "owner-retention-b",
+    });
+    const reclaimed = await registry.claimSessionCreation({
+      idempotencyKey: "retention-reclaimed-key",
+      requestHash: "c".repeat(64),
+    });
+    expect(reclaimed?.owner.ownerId).toBe("owner-retention-b");
+    const retained = await pool.query<{ idempotency_key: string }>(
+      "SELECT idempotency_key FROM session_creation_requests ORDER BY idempotency_key",
+    );
+    expect(retained.rows).toEqual([{ idempotency_key: "retention-reclaimed-key" }]);
+  });
+
+  it("applies the same capacity to direct durable Runtime fallback creation", async () => {
+    await pool.query(
+      `UPDATE session_creation_policies
+          SET max_requests = 1, cleanup_batch_size = 1
+        WHERE scope = 'default'`,
+    );
+    const registry = createRegistry();
+    const owner = await registry.registerOwner({
+      endpoint: "/tmp/iterminal-direct-capacity.sock",
+      instanceId: "direct-capacity-instance",
+      leaseMilliseconds: 5_000,
+      ownerId: "owner-direct-capacity",
+    });
+    const durability = new PostgresRuntimeDurability(databaseUrl ?? "");
+    try {
+      const first = sessionFixture(owner.ownerId);
+      await durability.createSession(
+        first,
+        [eventFixture(first)],
+        owner,
+        5_000,
+        creationFixture(first),
+      );
+      const blocked = sessionFixture(owner.ownerId);
+      await expect(
+        durability.createSession(
+          blocked,
+          [eventFixture(blocked)],
+          owner,
+          5_000,
+          creationFixture(blocked),
+        ),
+      ).rejects.toMatchObject({
+        code: "BACKPRESSURE",
+        details: { currentRequests: 1, limit: 1 },
+      });
+      expect(await pool.query("SELECT 1 FROM session_creation_requests")).toMatchObject({
+        rowCount: 1,
+      });
+      expect(await pool.query("SELECT 1 FROM sessions")).toMatchObject({ rowCount: 1 });
+    } finally {
+      await durability.close();
+    }
+  });
+
   function createRegistry(): PostgresRuntimeOwnerRegistry {
     const registry = new PostgresRuntimeOwnerRegistry(databaseUrl ?? "");
     registries.push(registry);
@@ -256,6 +409,39 @@ describeDatabase("M9.1 PostgreSQL Runtime owner registry", () => {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
+function sessionFixture(ownerId: string): Session {
+  return {
+    actionSequence: 0,
+    createdAt: new Date().toISOString(),
+    eventSequence: 0,
+    generation: 1,
+    id: `ses_${randomUUID()}`,
+    ownerId,
+    screenVersion: 0,
+    shell: "zsh",
+    status: "STARTING",
+    workspaceRoot: "/tmp",
+  };
+}
+
+function eventFixture(session: Session): DurableSessionEvent {
+  return {
+    id: `evt_${randomUUID()}`,
+    observedAt: session.createdAt,
+    payload: {},
+    sessionGeneration: session.generation,
+    sessionId: session.id,
+    type: "session.created",
+  };
+}
+
+function creationFixture(session: Session) {
+  return {
+    idempotencyKey: `create_${session.id}`,
+    requestHash: "a".repeat(64),
+  };
 }
 
 function ownerCounts(
