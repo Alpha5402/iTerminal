@@ -1,6 +1,8 @@
 import { chmod, lstat, unlink } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { createHash, randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { isAbsolute, join } from "node:path";
 
 import type {
   AcquireInteractionGuardRequest,
@@ -59,6 +61,14 @@ const runtimeErrorCodes = new Set<RuntimeError["code"]>([
   "INVALID_REQUEST",
   "EXECUTION_NOT_FOUND",
 ]);
+
+export function defaultRuntimeSocketPath(): string {
+  const runtimeDirectory = process.env.XDG_RUNTIME_DIR;
+  const base =
+    runtimeDirectory !== undefined && isAbsolute(runtimeDirectory) ? runtimeDirectory : tmpdir();
+  const user = typeof process.getuid === "function" ? process.getuid().toString() : "local";
+  return join(base, `iterminal-${user}.sock`);
+}
 
 const actorSchema = z.strictObject({
   client: z.string().min(1).max(256),
@@ -431,8 +441,11 @@ export class UnixRuntimeClient implements RuntimeGateway {
     return this.#request("screen.search", request);
   }
 
-  public waitForScreen(request: ScreenWaitRequest): Promise<TerminalScreenWaitResult> {
-    return this.#request("screen.wait", request, WAIT_REQUEST_TIMEOUT_MS);
+  public waitForScreen(
+    request: ScreenWaitRequest,
+    signal?: AbortSignal,
+  ): Promise<TerminalScreenWaitResult> {
+    return this.#request("screen.wait", request, WAIT_REQUEST_TIMEOUT_MS, signal);
   }
 
   public startExecute(request: ExecuteRequest): Promise<StartedExecutionView> {
@@ -554,6 +567,7 @@ export class UnixRuntimeClient implements RuntimeGateway {
     operation: RuntimeOperation,
     input: unknown,
     timeoutMilliseconds = DEFAULT_REQUEST_TIMEOUT_MS,
+    signal?: AbortSignal,
   ): Promise<T> {
     const id = `rpc_${randomUUID()}`;
     return new Promise<T>((resolve, reject) => {
@@ -564,7 +578,14 @@ export class UnixRuntimeClient implements RuntimeGateway {
         socket.destroy();
         fail(new Error("Runtime RPC request timed out"));
       }, timeoutMilliseconds);
-      const cleanup = (): void => clearTimeout(timeout);
+      const onAbort = (): void => {
+        socket.destroy();
+        fail(signal?.reason ?? new Error("Runtime RPC request aborted"));
+      };
+      const cleanup = (): void => {
+        clearTimeout(timeout);
+        signal?.removeEventListener("abort", onAbort);
+      };
       const fail = (error: unknown): void => {
         if (settled) return;
         settled = true;
@@ -572,6 +593,11 @@ export class UnixRuntimeClient implements RuntimeGateway {
         reject(connectionError(operation, id, error));
       };
       socket.setEncoding("utf8");
+      if (signal?.aborted === true) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
       socket.once("connect", () => {
         socket.write(`${JSON.stringify({ id, input, operation })}\n`);
       });

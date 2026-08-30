@@ -113,6 +113,57 @@ describe("UnixRuntimeClient delivery classification", () => {
       await rm(fixture, { force: true, recursive: true });
     }
   });
+
+  it("lets an adapter abort its Unix client screen wait and closes the server request", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-client-abort-"));
+    let announceStarted!: () => void;
+    let announceAborted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      announceStarted = resolve;
+    });
+    const aborted = new Promise<void>((resolve) => {
+      announceAborted = resolve;
+    });
+    const server = await startRuntimeRpcServer({
+      gateway: {
+        ...stubGateway(),
+        waitForScreen: (_request, signal) =>
+          new Promise((_resolve, reject) => {
+            announceStarted();
+            signal?.addEventListener(
+              "abort",
+              () => {
+                announceAborted();
+                reject(new Error("aborted by Console adapter"));
+              },
+              { once: true },
+            );
+          }),
+      },
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    const client = new UnixRuntimeClient(server.socketPath);
+    const controller = new AbortController();
+    try {
+      const waiting = client.waitForScreen(
+        {
+          condition: { afterVersion: 0, type: "version" },
+          generation: 1,
+          sessionId: "session-test",
+          timeoutMilliseconds: 5_000,
+        },
+        controller.signal,
+      );
+      await started;
+      const rejected = expect(waiting).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+      controller.abort();
+      await rejected;
+      await aborted;
+    } finally {
+      await server.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
 });
 
 function missingSocket(suffix: string): string {

@@ -1,0 +1,294 @@
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+
+import { startRuntimeDaemon, type RuntimeDaemonHandle } from "@iterminal/runtime-daemon";
+import { PostgresRuntimeDurability } from "@iterminal/persistence-postgres";
+import { UnixRuntimeClient } from "@iterminal/runtime-rpc";
+import { Client } from "@modelcontextprotocol/client";
+import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { chromium, type Browser, type Page } from "playwright-core";
+import { Pool } from "pg";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+
+import { startHumanConsole, type HumanConsoleServerHandle } from "./server.js";
+
+const repositoryRoot = resolve(import.meta.dirname, "../../..");
+const staticRoot = join(repositoryRoot, "dist/console-web");
+const databaseUrl = process.env.ITERM_DATABASE_URL;
+const browserExecutable =
+  process.env.ITERM_BROWSER_EXECUTABLE ??
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const browserReady = existsSync(browserExecutable) && existsSync(join(staticRoot, "index.html"));
+const describeBrowser = databaseUrl !== undefined && browserReady ? describe : describe.skip;
+
+describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
+  const pool = new Pool({ connectionString: databaseUrl });
+  const fixtures: string[] = [];
+  let browser: Browser | undefined;
+  let consoleServer: HumanConsoleServerHandle | undefined;
+  let daemon: RuntimeDaemonHandle | undefined;
+  let mcp: Client | undefined;
+  let page: Page | undefined;
+
+  beforeAll(async () => {
+    const database = await pool.query<{ current_database: string }>("SELECT current_database()");
+    if (database.rows[0]?.current_database !== "iterminal_test") {
+      throw new Error("M5 browser test refuses to mutate any database except iterminal_test");
+    }
+    const migrator = new PostgresRuntimeDurability(databaseUrl ?? "");
+    await migrator.migrate();
+    await migrator.close();
+  });
+
+  beforeEach(async () => {
+    await pool.query("TRUNCATE sessions, actors, outbox RESTART IDENTITY CASCADE");
+  });
+
+  afterEach(async () => {
+    await page?.close().catch(() => undefined);
+    page = undefined;
+    await browser?.close().catch(() => undefined);
+    browser = undefined;
+    await mcp?.close().catch(() => undefined);
+    mcp = undefined;
+    await consoleServer?.close().catch(() => undefined);
+    consoleServer = undefined;
+    await daemon?.close().catch(() => undefined);
+    daemon = undefined;
+    for (const fixture of fixtures.splice(0)) {
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
+  afterAll(async () => pool.end());
+
+  it("shares cwd, env, Python REPL, Guard, screen, and attributed timeline across transports", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "iterminal-m5-browser-")));
+    fixtures.push(root);
+    const workspace = join(root, "workspace");
+    await mkdir(join(workspace, "subdir"), { recursive: true });
+    daemon = await startRuntimeDaemon({
+      databaseUrl: databaseUrl ?? "",
+      ownerId: "owner-m5-browser",
+      socketPath: join(root, "runtime.sock"),
+    });
+    const runtime = new UnixRuntimeClient(daemon.socketPath);
+    consoleServer = await startHumanConsole({
+      gateway: runtime,
+      port: 0,
+      staticRoot,
+    });
+    mcp = await connectAgent(daemon.socketPath);
+    browser = await chromium.launch({
+      args: ["--disable-background-networking", "--no-first-run"],
+      executablePath: browserExecutable,
+      headless: true,
+    });
+    page = await browser.newPage({ viewport: { height: 1_100, width: 1_600 } });
+    await page.goto(consoleServer.url, { waitUntil: "networkidle" });
+
+    await page.getByLabel("Workspace root").fill(workspace);
+    await page.getByRole("button", { name: "Create persistent shell" }).click();
+    await waitForPageText(page, ".status-strip", "READY");
+    await page.getByLabel("READY command composer").fill("cd subdir && export ITERM_M5=shared");
+    await page.getByRole("button", { name: "Execute Action" }).click();
+    await waitForPageText(page, ".timeline", "execution.completed");
+    await waitForPageText(page, ".status-strip", "READY");
+
+    const sessions = await callTool<readonly SessionResult[]>(mcp, "session_list", {});
+    expect(sessions).toHaveLength(1);
+    const session = required(sessions[0]);
+    const python = await callTool<StartedResult>(mcp, "execute", {
+      command: "python3 -q",
+      generation: session.generation,
+      idempotencyKey: "m5-browser-python",
+      sessionId: session.id,
+    });
+    await waitUntilRunning(mcp, python.execution.id);
+    await waitForPageText(page, ".status-strip", "RUNNING");
+
+    await page.getByRole("button", { name: "Enter interactive focus" }).click();
+    await page.keyboard.type("human_value = 40", { delay: 5 });
+    await page.keyboard.press("Enter");
+    const humanGuard = await waitForHumanGuard(runtime, session.id, session.generation);
+    expect(humanGuard.guardActorType).toBe("human");
+
+    const blocked = await mcp.callTool({
+      arguments: {
+        data: "agent_raced = True\n",
+        generation: session.generation,
+        idempotencyKey: "m5-browser-agent-guarded",
+        sessionId: session.id,
+        targetExecutionId: python.execution.id,
+      },
+      name: "input",
+    });
+    expect(blocked.isError).toBe(true);
+    expect(textContent(blocked)).toContain('"code":"INPUT_GUARDED"');
+    await waitUntilGuardReleased(runtime, session.id, session.generation);
+
+    await callTool(mcp, "input", {
+      data: "print(human_value + 2)\n",
+      generation: session.generation,
+      idempotencyKey: "m5-browser-agent-print",
+      sessionId: session.id,
+      targetExecutionId: python.execution.id,
+    });
+    await waitForPageText(page, '[data-testid="screen-reader-output"]', "42");
+    await callTool(mcp, "input", {
+      data: "exit()\n",
+      generation: session.generation,
+      idempotencyKey: "m5-browser-agent-exit",
+      sessionId: session.id,
+      targetExecutionId: python.execution.id,
+    });
+    await callTool(mcp, "execution_wait", { executionId: python.execution.id });
+    await waitForPageText(page, ".status-strip", "READY");
+
+    await page
+      .getByLabel("READY command composer")
+      .fill('printf "PWD=%s ENV=%s\\n" "$PWD" "$ITERM_M5"');
+    await page.getByRole("button", { name: "Execute Action" }).click();
+    await waitForPageText(
+      page,
+      '[data-testid="screen-reader-output"]',
+      `PWD=${join(workspace, "subdir")}`,
+    );
+    await waitForPageText(page, '[data-testid="screen-reader-output"]', "ENV=shared");
+    await waitForPageText(page, ".timeline", "human:");
+    await waitForPageText(page, ".timeline", "agent:agent-m5-browser");
+
+    const cursorBeforeReload = await page.locator(".status-strip").textContent();
+    await page.reload({ waitUntil: "networkidle" });
+    await waitForPageText(page, ".connection", "live");
+    await waitForPageText(page, '[data-testid="screen-reader-output"]', "ENV=shared");
+    await waitForPageText(page, ".timeline", "execution.completed");
+    const cursorAfterReload = await page.locator(".status-strip").textContent();
+    expect(cursorAfterReload).not.toBeNull();
+    expect(cursorBeforeReload).not.toBeNull();
+
+    const durable = await pool.query<{
+      agent_actions: string;
+      guarded_rejected_actions: string;
+      human_actions: string;
+    }>(
+      `SELECT
+         count(*) FILTER (WHERE actor_id LIKE 'human_console_%') AS human_actions,
+         count(*) FILTER (WHERE actor_id = 'agent-m5-browser') AS agent_actions,
+         count(*) FILTER (WHERE idempotency_key = 'm5-browser-agent-guarded') AS guarded_rejected_actions
+       FROM actions WHERE session_id = $1`,
+      [session.id],
+    );
+    expect(Number(durable.rows[0]?.human_actions)).toBeGreaterThanOrEqual(2);
+    expect(Number(durable.rows[0]?.agent_actions)).toBeGreaterThanOrEqual(3);
+    expect(durable.rows[0]?.guarded_rejected_actions).toBe("0");
+  }, 60_000);
+});
+
+async function connectAgent(socketPath: string): Promise<Client> {
+  const transport = new StdioClientTransport({
+    args: [join(repositoryRoot, "apps/mcp/src/main.ts")],
+    command: join(repositoryRoot, "node_modules/.bin/tsx"),
+    cwd: repositoryRoot,
+    env: {
+      ...getDefaultEnvironment(),
+      ITERM_ACTOR_CLIENT: "m5-browser-agent",
+      ITERM_ACTOR_ID: "agent-m5-browser",
+      ITERM_ACTOR_PRINCIPAL: "m5-browser-agent",
+      ITERM_RUNTIME_SOCKET: socketPath,
+    },
+    stderr: "pipe",
+  });
+  const client = new Client({ name: "m5-browser-agent", version: "1.0.0" });
+  await client.connect(transport);
+  return client;
+}
+
+async function callTool<T>(
+  client: Client,
+  name: string,
+  args: Readonly<Record<string, unknown>>,
+): Promise<T> {
+  const result = await client.callTool({ arguments: { ...args }, name });
+  if (result.isError === true) throw new Error(`MCP tool ${name} failed: ${textContent(result)}`);
+  const structured = result.structuredContent;
+  if (typeof structured !== "object" || structured === null || !("result" in structured)) {
+    throw new Error(`MCP tool ${name} returned no structured result`);
+  }
+  return structured.result as T;
+}
+
+function textContent(result: Awaited<ReturnType<Client["callTool"]>>): string {
+  return result.content
+    .filter((block): block is Extract<(typeof result.content)[number], { type: "text" }> =>
+      Boolean(block.type === "text"),
+    )
+    .map((block) => block.text)
+    .join("\n");
+}
+
+async function waitUntilRunning(client: Client, executionId: string): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const execution = await callTool<{ readonly status: string }>(client, "execution_get", {
+      executionId,
+    });
+    if (execution.status === "RUNNING") return;
+    await delay(10);
+  }
+  throw new Error(`Execution did not enter RUNNING: ${executionId}`);
+}
+
+async function waitForHumanGuard(
+  runtime: UnixRuntimeClient,
+  sessionId: string,
+  generation: number,
+): Promise<{ readonly guardActorType: string }> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const state = await runtime.getInteractionState(sessionId, generation);
+    if (state.guard !== undefined) return { guardActorType: state.guard.actor.type };
+    await delay(5);
+  }
+  throw new Error("Browser did not acquire an Interaction Guard");
+}
+
+async function waitUntilGuardReleased(
+  runtime: UnixRuntimeClient,
+  sessionId: string,
+  generation: number,
+): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    const state = await runtime.getInteractionState(sessionId, generation);
+    if (state.guard === undefined) return;
+    await delay(5);
+  }
+  throw new Error("Browser Interaction Guard did not converge after idle");
+}
+
+async function waitForPageText(page: Page, selector: string, expected: string): Promise<void> {
+  await page.waitForFunction(
+    ({ expectedText, target }) =>
+      document.querySelector(target)?.textContent?.includes(expectedText) === true,
+    { expectedText: expected, target: selector },
+    { timeout: 10_000 },
+  );
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
+function required<T>(value: T | undefined): T {
+  if (value === undefined) throw new Error("Expected fixture value");
+  return value;
+}
+
+interface SessionResult {
+  readonly generation: number;
+  readonly id: string;
+}
+
+interface StartedResult {
+  readonly execution: { readonly id: string };
+}

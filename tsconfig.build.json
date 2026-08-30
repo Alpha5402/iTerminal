@@ -8,5 +8,5 @@
     "rootDir": ".",
     "sourceMap": true
   },
-  "exclude": ["**/*.test.ts", "dist", "node_modules"]
+  "exclude": ["**/*.test.ts", "apps/console/src/web.tsx", "dist", "node_modules"]
 }

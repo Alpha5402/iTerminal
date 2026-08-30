@@ -1,5 +1,4 @@
-import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute } from "node:path";
 
 import { RuntimeService, type RuntimeServiceOptions } from "@iterminal/application";
 import { RuntimeError } from "@iterminal/domain";
@@ -9,10 +8,13 @@ import { MemoryRuntimeStore } from "@iterminal/runtime-memory";
 import { XtermScreenProjectionFactory } from "@iterminal/terminal-screen";
 import {
   LocalRuntimeGateway,
+  defaultRuntimeSocketPath,
   runtimeOwnerIdForSocket,
   startRuntimeRpcServer,
   type RuntimeRpcServerHandle,
 } from "@iterminal/runtime-rpc";
+
+export { defaultRuntimeSocketPath };
 
 import {
   startPostgresRecoverySupervisor,
@@ -238,12 +240,4 @@ function deferred<T>(): Deferred<T> {
 
 export function runtimeOwnerId(socketPath: string): string {
   return runtimeOwnerIdForSocket(socketPath);
-}
-
-export function defaultRuntimeSocketPath(): string {
-  const runtimeDirectory = process.env.XDG_RUNTIME_DIR;
-  const base =
-    runtimeDirectory !== undefined && isAbsolute(runtimeDirectory) ? runtimeDirectory : tmpdir();
-  const user = typeof process.getuid === "function" ? process.getuid().toString() : "local";
-  return join(base, `iterminal-${user}.sock`);
 }

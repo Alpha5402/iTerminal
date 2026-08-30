@@ -5,7 +5,8 @@
     "esModuleInterop": true,
     "exactOptionalPropertyTypes": true,
     "forceConsistentCasingInFileNames": true,
-    "lib": ["ES2023"],
+    "jsx": "react-jsx",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "noFallthroughCasesInSwitch": true,
@@ -17,5 +18,11 @@
     "target": "ES2023",
     "types": ["node"]
   },
-  "include": ["apps/**/*.ts", "eslint.config.js", "packages/**/*.ts", "spikes/**/*.ts"]
+  "include": [
+    "apps/**/*.ts",
+    "apps/**/*.tsx",
+    "eslint.config.js",
+    "packages/**/*.ts",
+    "spikes/**/*.ts"
+  ]
 }

@@ -9,8 +9,10 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && pnpm --filter @iterminal/console build",
+    "build:console": "pnpm --filter @iterminal/console build",
     "cli": "tsx apps/cli/src/main.ts",
+    "console": "tsx apps/console/src/main.ts",
     "daemon": "tsx apps/runtime-daemon/src/main.ts",
     "execution-worker": "tsx apps/execution-worker/src/main.ts",
     "format": "prettier --write .",
@@ -25,6 +27,8 @@
     "test:m3": "vitest run packages/persistence-postgres/src/postgres-observation-repository.test.ts",
     "test:m4": "vitest run apps/mcp/src/mcp-stdio.test.ts",
     "test:m4:durable": "vitest run apps/runtime-daemon/src/durable-runtime.test.ts",
+    "test:m5": "vitest run apps/console/src/server.test.ts",
+    "test:m5:browser": "pnpm build:console && vitest run apps/console/src/browser-shared-path.test.ts",
     "test:m6:interaction": "vitest run packages/application/src/interaction-policy.test.ts packages/persistence-postgres/src/postgres-interaction-guard.test.ts apps/runtime-daemon/src/interaction-policy.test.ts",
     "test:m8:messaging": "vitest run packages/queue-rabbitmq/src/rabbitmq-messaging.test.ts",
     "test:m8:dispatch": "vitest run apps/execution-worker/src/execution-worker.test.ts",

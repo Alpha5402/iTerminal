@@ -1,0 +1,35 @@
+{
+  "name": "@iterminal/console",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build --config vite.config.ts",
+    "dev": "vite --config vite.config.ts"
+  },
+  "dependencies": {
+    "@fastify/static": "^10.1.3",
+    "@fastify/websocket": "^11.3.0",
+    "@iterminal/application": "workspace:*",
+    "@iterminal/domain": "workspace:*",
+    "@iterminal/runtime-rpc": "workspace:*",
+    "@xterm/xterm": "^6.0.0",
+    "fastify": "^5.12.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "ws": "^8.21.3",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@iterminal/runtime-daemon": "workspace:*",
+    "@iterminal/persistence-postgres": "workspace:*",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "@types/pg": "^8.15.5",
+    "@types/ws": "^8.18.1",
+    "pg": "^8.16.3",
+    "playwright-core": "^1.62.1",
+    "vite": "^8.2.2"
+  }
+}
