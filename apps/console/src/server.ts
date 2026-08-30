@@ -23,7 +23,10 @@ import * as z from "zod/v4";
 
 const CONSOLE_COOKIE = "iterminal_console";
 const CONSOLE_ACTOR_TTL_MS = 24 * 60 * 60 * 1_000;
-const MAX_CONSOLE_ACTORS = 256;
+const DEFAULT_MAX_CONSOLE_ACTORS = 256;
+const DEFAULT_MAX_CONSOLE_STREAMS = 64;
+const DEFAULT_MAX_CONSOLE_STREAMS_PER_ACTOR = 4;
+const STREAM_RESERVATION_TTL_MS = 5_000;
 const MAX_WS_BUFFERED_BYTES = 1024 * 1024;
 const STREAM_WAIT_MS = 1_000;
 const STREAM_EVENT_LIMIT = 100;
@@ -155,7 +158,14 @@ export interface HumanConsoleServerOptions {
   readonly logger?: boolean;
   readonly now?: () => number;
   readonly port?: number;
+  readonly resourceLimits?: Partial<HumanConsoleResourceLimits>;
   readonly staticRoot?: string;
+}
+
+export interface HumanConsoleResourceLimits {
+  readonly maxActors: number;
+  readonly maxStreams: number;
+  readonly maxStreamsPerActor: number;
 }
 
 export interface HumanConsoleServerHandle {
@@ -170,12 +180,15 @@ export async function createHumanConsoleApp(
   options: HumanConsoleServerOptions,
 ): Promise<FastifyInstance> {
   const now = options.now ?? Date.now;
+  const expectedHost = normalizeHostname(options.host ?? "127.0.0.1");
+  const limits = consoleResourceLimits(options.resourceLimits);
   const actors = new Map<string, ConsoleActorRecord>();
   const openSessionStreams = new Map<string, number>();
+  const pendingStreamAdmissions = new WeakMap<object, ConsoleStreamReservation>();
+  const streamAdmissions = new ConsoleStreamAdmissions(limits);
   const app = Fastify({
     bodyLimit: 1024 * 1024,
     logger: options.logger ?? false,
-    requestIdHeader: "x-request-id",
   });
 
   await app.register(fastifyWebsocket, {
@@ -184,11 +197,16 @@ export async function createHumanConsoleApp(
 
   app.addHook("onRequest", async (request, reply) => {
     applySecurityHeaders(reply);
-    validateHost(request);
+    const authority = validateHost(request, expectedHost, options.port);
     const isWebSocket = request.headers.upgrade?.toLowerCase() === "websocket";
     const mutating = !["GET", "HEAD", "OPTIONS"].includes(request.method);
-    if (isWebSocket || mutating) validateSameOrigin(request);
-    if (mutating && request.headers["x-iterminal-request"] !== "console") {
+    validateBrowserFetchSite(request);
+    if (isWebSocket || mutating) validateSameOrigin(request, authority);
+    if (
+      request.raw.url?.startsWith("/api") === true &&
+      !isWebSocket &&
+      request.headers["x-iterminal-request"] !== "console"
+    ) {
       throw new ConsoleHttpError(403, "INVALID_REQUEST", "Missing Console request header");
     }
   });
@@ -199,7 +217,7 @@ export async function createHumanConsoleApp(
   });
 
   app.get("/api/bootstrap", async (request, reply) => {
-    const actor = actorForRequest(request, reply, actors, now, true);
+    const actor = actorForRequest(request, reply, actors, now, true, limits.maxActors);
     const sessions = await options.gateway.listSessions();
     return success(request, {
       actor,
@@ -557,27 +575,40 @@ export async function createHumanConsoleApp(
   app.get(
     "/api/sessions/:sessionId/stream",
     {
-      preValidation: async (request, reply) => {
-        actorForRequest(request, reply, actors, now);
+      preValidation: (request, reply, done) => {
+        const actor = actorForRequest(request, reply, actors, now);
         sessionParamsSchema.parse(request.params);
         streamQuerySchema.parse(request.query);
+        pendingStreamAdmissions.set(request.raw, streamAdmissions.reserve(actor));
+        done();
       },
       websocket: true,
     },
     (socket, request) => {
-      const actor = actorForRequest(request, undefined, actors, now);
+      const reservation = pendingStreamAdmissions.get(request.raw);
+      pendingStreamAdmissions.delete(request.raw);
+      const releaseStream = reservation?.consume();
+      if (reservation === undefined || releaseStream === undefined) {
+        socket.close(1013, "stream admission expired");
+        return;
+      }
+      const actor = reservation.actor;
       const { sessionId } = sessionParamsSchema.parse(request.params);
       const query = streamQuerySchema.parse(request.query);
       const streamKey = `${actor.id}:${sessionId}:${query.generation.toString()}`;
       openSessionStreams.set(streamKey, (openSessionStreams.get(streamKey) ?? 0) + 1);
-      void streamSession(socket, options.gateway, actor, sessionId, query).finally(async () => {
+      socket.once("close", () => {
+        releaseStream();
         const remaining = (openSessionStreams.get(streamKey) ?? 1) - 1;
         if (remaining <= 0) {
           openSessionStreams.delete(streamKey);
-          await releaseActorGuard(options.gateway, actor, sessionId, query.generation);
+          void releaseActorGuard(options.gateway, actor, sessionId, query.generation);
         } else {
           openSessionStreams.set(streamKey, remaining);
         }
+      });
+      void streamSession(socket, options.gateway, actor, sessionId, query).catch(() => {
+        socket.terminate();
       });
     },
   );
@@ -660,6 +691,7 @@ async function streamSession(
         error: { code: "INVALID_REQUEST", message: "Malformed stream acknowledgement" },
         type: "error",
       });
+      socket.close(1008, "malformed acknowledgement");
     }
   });
 
@@ -719,7 +751,10 @@ async function streamSession(
         type: "update",
       });
       if (drainEvents) continue;
-      if (session.status === "BROKEN" || session.status === "CLOSED") return;
+      if (session.status === "BROKEN" || session.status === "CLOSED") {
+        socket.close(1000, "session ended");
+        return;
+      }
     }
   } catch (error) {
     if (closed || abort.signal.aborted) return;
@@ -857,6 +892,7 @@ function actorForRequest(
   actors: Map<string, ConsoleActorRecord>,
   now: () => number,
   create = false,
+  maxActors = DEFAULT_MAX_CONSOLE_ACTORS,
 ): Actor {
   pruneActors(actors, now());
   const cookieId = parseCookies(request.headers.cookie)[CONSOLE_COOKIE];
@@ -868,7 +904,7 @@ function actorForRequest(
   if (!create || reply === undefined) {
     throw new ConsoleHttpError(401, "POLICY_DENIED", "Console session cookie is required");
   }
-  if (actors.size >= MAX_CONSOLE_ACTORS) {
+  if (actors.size >= maxActors) {
     throw new ConsoleHttpError(503, "BACKPRESSURE", "Console Actor capacity is exhausted", true);
   }
   const id = randomUUID();
@@ -915,24 +951,41 @@ function decodeCookieValue(value: string): string {
   }
 }
 
-function validateHost(request: FastifyRequest): void {
+interface ConsoleRequestAuthority {
+  readonly hostname: string;
+  readonly port: number;
+  readonly protocol: "http" | "https";
+}
+
+function validateHost(
+  request: FastifyRequest,
+  expectedHost: string,
+  configuredPort: number | undefined,
+): ConsoleRequestAuthority {
   const host = request.headers.host;
   if (host === undefined) throw new ConsoleHttpError(400, "INVALID_REQUEST", "Host is required");
-  const hostname = authorityHostname(host);
+  const protocol = request.protocol;
+  if (protocol !== "http" && protocol !== "https") {
+    throw new ConsoleHttpError(403, "POLICY_DENIED", "Console request protocol is invalid");
+  }
+  const parsed = parseAuthority(host, protocol);
+  const hostname = parsed.hostname;
   if (!isLoopbackHostname(hostname)) {
     throw new ConsoleHttpError(403, "POLICY_DENIED", "Console Host must resolve to loopback");
   }
-  const localPort = request.socket.localPort;
-  const hostPort = authorityPort(host);
-  if (localPort !== undefined && hostPort !== undefined && hostPort !== localPort) {
+  if (hostname !== expectedHost) {
+    throw new ConsoleHttpError(403, "POLICY_DENIED", "Console Host does not match listener");
+  }
+  const localPort = request.socket.localPort ?? configuredPort;
+  if (localPort === undefined || localPort === 0 || parsed.port !== localPort) {
     throw new ConsoleHttpError(403, "POLICY_DENIED", "Console Host port does not match listener");
   }
+  return { hostname, port: parsed.port, protocol };
 }
 
-function validateSameOrigin(request: FastifyRequest): void {
+function validateSameOrigin(request: FastifyRequest, authority: ConsoleRequestAuthority): void {
   const origin = request.headers.origin;
-  const host = request.headers.host;
-  if (origin === undefined || host === undefined) {
+  if (origin === undefined) {
     throw new ConsoleHttpError(403, "POLICY_DENIED", "Same-origin Console request required");
   }
   let parsed: URL;
@@ -941,36 +994,157 @@ function validateSameOrigin(request: FastifyRequest): void {
   } catch {
     throw new ConsoleHttpError(403, "POLICY_DENIED", "Console Origin is invalid");
   }
+  const hostname = normalizeHostname(parsed.hostname);
+  const protocol = parsed.protocol.slice(0, -1);
+  const cleanOrigin =
+    origin === parsed.origin &&
+    parsed.username.length === 0 &&
+    parsed.password.length === 0 &&
+    parsed.pathname === "/" &&
+    parsed.search.length === 0 &&
+    parsed.hash.length === 0;
+  const port = effectivePort(parsed.port, protocol);
   if (
-    (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
-    parsed.host !== host ||
-    !isLoopbackHostname(parsed.hostname)
+    !cleanOrigin ||
+    protocol !== authority.protocol ||
+    hostname !== authority.hostname ||
+    port !== authority.port ||
+    !isLoopbackHostname(hostname)
   ) {
     throw new ConsoleHttpError(403, "POLICY_DENIED", "Console Origin does not match Host");
   }
 }
 
-function authorityHostname(authority: string): string {
+function validateBrowserFetchSite(request: FastifyRequest): void {
+  const fetchSite = request.headers["sec-fetch-site"];
+  if (fetchSite !== undefined && fetchSite !== "none" && fetchSite !== "same-origin") {
+    throw new ConsoleHttpError(403, "POLICY_DENIED", "Cross-site Console request denied");
+  }
+}
+
+function parseAuthority(
+  authority: string,
+  protocol: "http" | "https",
+): Readonly<{ hostname: string; port: number }> {
+  if (
+    authority.trim() !== authority ||
+    authority.length === 0 ||
+    authority.includes("@") ||
+    /[\\/?#]/u.test(authority)
+  ) {
+    throw new ConsoleHttpError(400, "INVALID_REQUEST", "Host is malformed");
+  }
   try {
-    return new URL(`http://${authority}`).hostname;
+    const parsed = new URL(`${protocol}://${authority}`);
+    if (
+      parsed.username.length > 0 ||
+      parsed.password.length > 0 ||
+      parsed.pathname !== "/" ||
+      parsed.search.length > 0 ||
+      parsed.hash.length > 0
+    ) {
+      throw new Error("authority has URL components");
+    }
+    const port = effectivePort(parsed.port, protocol);
+    if (port === undefined) throw new Error("authority protocol is unsupported");
+    return {
+      hostname: normalizeHostname(parsed.hostname),
+      port,
+    };
   } catch {
     throw new ConsoleHttpError(400, "INVALID_REQUEST", "Host is malformed");
   }
 }
 
-function authorityPort(authority: string): number | undefined {
-  try {
-    const port = new URL(`http://${authority}`).port;
-    return port.length === 0 ? undefined : Number.parseInt(port, 10);
-  } catch {
-    throw new ConsoleHttpError(400, "INVALID_REQUEST", "Host is malformed");
-  }
+function effectivePort(port: string, protocol: string): number | undefined {
+  if (port.length > 0) return Number.parseInt(port, 10);
+  if (protocol === "http") return 80;
+  if (protocol === "https") return 443;
+  return undefined;
+}
+
+function normalizeHostname(hostname: string): string {
+  return hostname.replace(/^\[|\]$/gu, "").toLowerCase();
 }
 
 function isLoopbackHostname(hostname: string): boolean {
-  const normalized = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  const normalized = normalizeHostname(hostname);
   if (normalized === "localhost" || normalized === "::1") return true;
   return isIP(normalized) === 4 && normalized.startsWith("127.");
+}
+
+function consoleResourceLimits(
+  configured: Partial<HumanConsoleResourceLimits> | undefined,
+): HumanConsoleResourceLimits {
+  const limits = {
+    maxActors: configured?.maxActors ?? DEFAULT_MAX_CONSOLE_ACTORS,
+    maxStreams: configured?.maxStreams ?? DEFAULT_MAX_CONSOLE_STREAMS,
+    maxStreamsPerActor: configured?.maxStreamsPerActor ?? DEFAULT_MAX_CONSOLE_STREAMS_PER_ACTOR,
+  };
+  for (const [name, value] of Object.entries(limits)) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new RuntimeError("INVALID_REQUEST", `${name} must be a positive safe integer`);
+    }
+  }
+  if (limits.maxStreamsPerActor > limits.maxStreams) {
+    throw new RuntimeError("INVALID_REQUEST", "maxStreamsPerActor cannot exceed maxStreams");
+  }
+  return limits;
+}
+
+interface ConsoleStreamReservation {
+  readonly actor: Actor;
+  consume(): (() => void) | undefined;
+}
+
+class ConsoleStreamAdmissions {
+  readonly #byActor = new Map<string, number>();
+  #total = 0;
+
+  public constructor(private readonly limits: HumanConsoleResourceLimits) {}
+
+  public reserve(actor: Actor): ConsoleStreamReservation {
+    if (this.#total >= this.limits.maxStreams) {
+      throw new ConsoleHttpError(
+        503,
+        "BACKPRESSURE",
+        "Console stream capacity is exhausted",
+        true,
+        { scope: "console" },
+      );
+    }
+    const actorStreams = this.#byActor.get(actor.id) ?? 0;
+    if (actorStreams >= this.limits.maxStreamsPerActor) {
+      throw new ConsoleHttpError(
+        503,
+        "BACKPRESSURE",
+        "Console Actor stream capacity is exhausted",
+        true,
+        { scope: "actor" },
+      );
+    }
+    this.#total += 1;
+    this.#byActor.set(actor.id, actorStreams + 1);
+    let held = true;
+    const release = (): void => {
+      if (!held) return;
+      held = false;
+      this.#total -= 1;
+      const remaining = (this.#byActor.get(actor.id) ?? 1) - 1;
+      if (remaining <= 0) this.#byActor.delete(actor.id);
+      else this.#byActor.set(actor.id, remaining);
+    };
+    const timeout = setTimeout(release, STREAM_RESERVATION_TTL_MS);
+    timeout.unref();
+    return {
+      actor,
+      consume: () => {
+        if (!held) return undefined;
+        clearTimeout(timeout);
+        return release;
+      },
+    };
+  }
 }
 
 function applySecurityHeaders(reply: FastifyReply): void {
@@ -995,6 +1169,32 @@ function errorEnvelope(
   error: Readonly<Record<string, unknown>>;
   status: number;
 }> {
+  if (isFastifyBodyTooLarge(error)) {
+    return {
+      error: {
+        allowedNextActions: [],
+        code: "INVALID_REQUEST",
+        details: {},
+        message: "Console request body exceeds the configured limit",
+        requestId,
+        retryable: false,
+      },
+      status: 413,
+    };
+  }
+  if (isFastifyInvalidJson(error)) {
+    return {
+      error: {
+        allowedNextActions: [],
+        code: "INVALID_REQUEST",
+        details: {},
+        message: "Console request body is not valid JSON",
+        requestId,
+        retryable: false,
+      },
+      status: 400,
+    };
+  }
   if (error instanceof ConsoleHttpError) {
     return {
       error: {
@@ -1026,7 +1226,7 @@ function errorEnvelope(
       error: {
         allowedNextActions: [],
         code: "INVALID_REQUEST",
-        details: { issues: error.issues },
+        details: {},
         message: "Console request validation failed",
         requestId,
         retryable: false,
@@ -1039,12 +1239,28 @@ function errorEnvelope(
       allowedNextActions: ["reconnect_console", "inspect_runtime_health"],
       code: "RUNTIME_UNAVAILABLE",
       details: {},
-      message: error instanceof Error ? error.message : "Console request failed",
+      message: "Console request failed",
       requestId,
       retryable: true,
     },
     status: 500,
   };
+}
+
+function isFastifyBodyTooLarge(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as Error & { readonly code?: unknown }).code === "FST_ERR_CTP_BODY_TOO_LARGE"
+  );
+}
+
+function isFastifyInvalidJson(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as Error & { readonly code?: unknown }).code === "FST_ERR_CTP_INVALID_JSON_BODY"
+  );
 }
 
 function runtimeStatus(code: RuntimeError["code"]): number {

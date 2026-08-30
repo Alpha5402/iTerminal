@@ -1,5 +1,6 @@
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -9,7 +10,11 @@ import { UnixRuntimeClient } from "@iterminal/runtime-rpc";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket, type RawData } from "ws";
 
-import { startHumanConsole, type HumanConsoleServerHandle } from "./server.js";
+import {
+  createHumanConsoleApp,
+  startHumanConsole,
+  type HumanConsoleServerHandle,
+} from "./server.js";
 
 const agent: Actor = {
   client: "m5-console-test-agent",
@@ -44,14 +49,258 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
         port: 0,
       }),
     ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    await expect(
+      startHumanConsole({
+        gateway: new UnixRuntimeClient(daemon.socketPath),
+        port: 0,
+        resourceLimits: { maxStreams: 1, maxStreamsPerActor: 2 },
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
   });
+
+  it("binds Host, Origin, and WebSocket upgrades to one exact loopback authority", async () => {
+    const fixture = await createFixture(fixtures);
+    daemon = await startRuntimeDaemon({ socketPath: join(fixture.root, "runtime.sock") });
+    consoleServer = await startHumanConsole({
+      gateway: new UnixRuntimeClient(daemon.socketPath),
+      port: 0,
+    });
+    const listener = new URL(consoleServer.url);
+    const aliasHost = await rawHttpGet(consoleServer, "/api/bootstrap", {
+      host: `localhost:${consoleServer.port.toString()}`,
+      "x-iterminal-request": "console",
+    });
+    expect(aliasHost.status).toBe(403);
+    expect(aliasHost.body).not.toContain("localhost:");
+
+    const missingPort = await rawHttpGet(consoleServer, "/api/bootstrap", {
+      host: listener.hostname,
+      "x-iterminal-request": "console",
+    });
+    expect(missingPort.status).toBe(403);
+
+    const malformedHost = await rawHttpGet(consoleServer, "/api/bootstrap", {
+      host: `user@${listener.host}`,
+      "x-iterminal-request": "console",
+    });
+    expect(malformedHost.status).toBe(400);
+
+    const ambientBootstrap = await fetch(`${consoleServer.url}/api/bootstrap`);
+    expect(ambientBootstrap.status).toBe(403);
+    expect(ambientBootstrap.headers.get("set-cookie")).toBeNull();
+    const crossSiteBootstrap = await rawHttpGet(consoleServer, "/api/bootstrap", {
+      host: listener.host,
+      "sec-fetch-site": "cross-site",
+      "x-iterminal-request": "console",
+    });
+    expect(crossSiteBootstrap.status).toBe(403);
+
+    const bootstrapResponse = await requestBootstrap(consoleServer);
+    expect(bootstrapResponse.status).toBe(200);
+    expect(bootstrapResponse.headers.get("cache-control")).toBe("no-store");
+    expect(bootstrapResponse.headers.get("x-frame-options")).toBe("DENY");
+    expect(bootstrapResponse.headers.get("content-security-policy")).toContain(
+      "frame-ancestors 'none'",
+    );
+    const setCookie = required(bootstrapResponse.headers.get("set-cookie"));
+    expect(setCookie).toContain("HttpOnly");
+    expect(setCookie).toContain("SameSite=Strict");
+    const cookie = setCookie.split(";", 1)[0] ?? "";
+    const mismatchedScheme = `https://${listener.host}`;
+    const reflectedRequestId = "HOSTILE_REQUEST_ID_MUST_NOT_REFLECT";
+    const rejectedScheme = await fetch(`${consoleServer.url}/api/sessions`, {
+      body: JSON.stringify({
+        idempotencyKey: "rejected-scheme",
+        shell: "zsh",
+        workspaceRoot: fixture.workspace,
+      }),
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        origin: mismatchedScheme,
+        "x-iterminal-request": "console",
+        "x-request-id": reflectedRequestId,
+      },
+      method: "POST",
+    });
+    expect(rejectedScheme.status).toBe(403);
+    const rejectedSchemeBody = await rejectedScheme.text();
+    expect(rejectedSchemeBody).not.toContain(mismatchedScheme);
+    expect(rejectedSchemeBody).not.toContain(reflectedRequestId);
+
+    const rejectedOriginPath = await fetch(`${consoleServer.url}/api/sessions`, {
+      body: JSON.stringify({
+        idempotencyKey: "rejected-origin-path",
+        shell: "zsh",
+        workspaceRoot: fixture.workspace,
+      }),
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        origin: `${consoleServer.url}/forged-path`,
+        "x-iterminal-request": "console",
+      },
+      method: "POST",
+    });
+    expect(rejectedOriginPath.status).toBe(403);
+
+    const rejectedNormalizedOrigin = await fetch(`${consoleServer.url}/api/sessions`, {
+      body: JSON.stringify({
+        idempotencyKey: "rejected-normalized-origin",
+        shell: "zsh",
+        workspaceRoot: fixture.workspace,
+      }),
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        origin: `${consoleServer.url}/%2e`,
+        "x-iterminal-request": "console",
+      },
+      method: "POST",
+    });
+    expect(rejectedNormalizedOrigin.status).toBe(403);
+
+    const unknownKey = "UNKNOWN_SECRET_KEY_MUST_NOT_ECHO";
+    const unknownValue = "UNKNOWN_SECRET_VALUE_MUST_NOT_ECHO";
+    const rejectedSchema = await fetch(`${consoleServer.url}/api/sessions`, {
+      body: JSON.stringify({
+        [unknownKey]: unknownValue,
+        idempotencyKey: "rejected-schema-reflection",
+        shell: "zsh",
+        workspaceRoot: fixture.workspace,
+      }),
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        origin: consoleServer.url,
+        "x-iterminal-request": "console",
+      },
+      method: "POST",
+    });
+    expect(rejectedSchema.status).toBe(400);
+    const rejectedSchemaBody = await rejectedSchema.text();
+    expect(rejectedSchemaBody).not.toContain(unknownKey);
+    expect(rejectedSchemaBody).not.toContain(unknownValue);
+
+    const oversizedSentinel = "OVERSIZED_CONSOLE_BODY_MUST_NOT_ECHO";
+    const oversizedBody = JSON.stringify({
+      data: `${oversizedSentinel}${"x".repeat(1024 * 1024)}`,
+    });
+    const injectedApp = await createHumanConsoleApp({ gateway: runtimeGateway(daemon), port: 80 });
+    try {
+      const oversized = await injectedApp.inject({
+        headers: {
+          "content-type": "application/json",
+          host: "127.0.0.1",
+          origin: "http://127.0.0.1",
+          "x-iterminal-request": "console",
+        },
+        method: "POST",
+        payload: oversizedBody,
+        url: "/api/sessions",
+      });
+      expect(oversized.statusCode).toBe(413);
+      expect(JSON.parse(oversized.body)).toMatchObject({ error: { code: "INVALID_REQUEST" } });
+      expect(oversized.body).not.toContain(oversizedSentinel);
+
+      const malformedSentinel = "MALFORMED_JSON_MUST_NOT_ECHO";
+      const malformed = await injectedApp.inject({
+        headers: {
+          "content-type": "application/json",
+          host: "127.0.0.1",
+          origin: "http://127.0.0.1",
+          "x-iterminal-request": "console",
+        },
+        method: "POST",
+        payload: `{"value":"${malformedSentinel}`,
+        url: "/api/sessions",
+      });
+      expect(malformed.statusCode).toBe(400);
+      expect(JSON.parse(malformed.body)).toMatchObject({
+        error: { code: "INVALID_REQUEST", message: "Console request body is not valid JSON" },
+      });
+      expect(malformed.body).not.toContain(malformedSentinel);
+    } finally {
+      await injectedApp.close();
+    }
+
+    await expectRejectedStreamResponse(
+      consoleServer,
+      cookie,
+      { generation: 1, id: "forged-session" },
+      { expectedStatus: 403, origin: mismatchedScheme },
+    );
+  });
+
+  it("bounds Console actors and WebSocket streams and closes malformed acknowledgements", async () => {
+    const fixture = await createFixture(fixtures);
+    daemon = await startRuntimeDaemon({ socketPath: join(fixture.root, "runtime.sock") });
+    const runtime = new UnixRuntimeClient(daemon.socketPath);
+    consoleServer = await startHumanConsole({
+      gateway: runtime,
+      port: 0,
+      resourceLimits: { maxActors: 3, maxStreams: 2, maxStreamsPerActor: 1 },
+    });
+
+    const firstBootstrap = await requestBootstrap(consoleServer);
+    const firstCookie = required(firstBootstrap.headers.get("set-cookie")).split(";", 1)[0] ?? "";
+    const session = await requestResult<SessionResult>(
+      consoleServer,
+      firstCookie,
+      "/api/sessions",
+      {
+        body: {
+          idempotencyKey: "bounded-stream-session",
+          shell: "zsh",
+          workspaceRoot: fixture.workspace,
+        },
+        method: "POST",
+      },
+    );
+    const firstStream = (await connectStream(consoleServer, firstCookie, session)).socket;
+    const perActorBody = await expectRejectedStreamResponse(consoleServer, firstCookie, session, {
+      expectedStatus: 503,
+      origin: consoleServer.url,
+    });
+    expect(perActorBody).toContain("BACKPRESSURE");
+    expect(perActorBody).not.toContain(firstCookie);
+
+    const secondBootstrap = await requestBootstrap(consoleServer);
+    const secondCookie = required(secondBootstrap.headers.get("set-cookie")).split(";", 1)[0] ?? "";
+    const secondStream = (await connectStream(consoleServer, secondCookie, session)).socket;
+
+    const thirdBootstrap = await requestBootstrap(consoleServer);
+    const thirdCookie = required(thirdBootstrap.headers.get("set-cookie")).split(";", 1)[0] ?? "";
+    const globalBody = await expectRejectedStreamResponse(consoleServer, thirdCookie, session, {
+      expectedStatus: 503,
+      origin: consoleServer.url,
+    });
+    expect(globalBody).toContain("BACKPRESSURE");
+
+    const actorCapacity = await requestBootstrap(consoleServer);
+    expect(actorCapacity.status).toBe(503);
+    expect(await bodyErrorCode(actorCapacity)).toBe("BACKPRESSURE");
+
+    firstStream.close(1000, "free bounded slot");
+    await delay(50);
+    const thirdStream = (await connectStream(consoleServer, thirdCookie, session)).socket;
+    const malformedClose = waitForSocketClose(thirdStream);
+    thirdStream.send(JSON.stringify({ cursor: "invalid", screenVersion: 0, type: "ack" }));
+    expect(await malformedClose).toBe(1008);
+
+    const boundedPayloadStream = (await connectStream(consoleServer, thirdCookie, session)).socket;
+    const oversizedClose = waitForSocketClose(boundedPayloadStream);
+    boundedPayloadStream.send(Buffer.alloc(16 * 1024 + 1));
+    expect(await oversizedClose).toBe(1009);
+    secondStream.close(1000, "test complete");
+  }, 30_000);
 
   it("keeps READY/interactive writes on Runtime Actions and releases a Guard on disconnect", async () => {
     const fixture = await createFixture(fixtures);
     daemon = await startRuntimeDaemon({ socketPath: join(fixture.root, "runtime.sock") });
     const runtime = new UnixRuntimeClient(daemon.socketPath);
     consoleServer = await startHumanConsole({ gateway: runtime, port: 0 });
-    const bootstrapResponse = await fetch(`${consoleServer.url}/api/bootstrap`);
+    const bootstrapResponse = await requestBootstrap(consoleServer);
     expect(bootstrapResponse.status).toBe(200);
     const cookie = required(bootstrapResponse.headers.get("set-cookie")).split(";", 1)[0] ?? "";
     const bootstrap = await bodyResult<{
@@ -235,7 +484,7 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
     daemon = await startRuntimeDaemon({ socketPath: join(fixture.root, "runtime.sock") });
     const runtime = new UnixRuntimeClient(daemon.socketPath);
     consoleServer = await startHumanConsole({ gateway: runtime, port: 0 });
-    const bootstrapResponse = await fetch(`${consoleServer.url}/api/bootstrap`);
+    const bootstrapResponse = await requestBootstrap(consoleServer);
     const cookie = required(bootstrapResponse.headers.get("set-cookie")).split(";", 1)[0] ?? "";
     const bootstrap = await bodyResult<{ readonly actor: Actor }>(bootstrapResponse);
     const session = await requestResult<SessionResult>(consoleServer, cookie, "/api/sessions", {
@@ -317,7 +566,7 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
     daemon = await startRuntimeDaemon({ socketPath: join(fixture.root, "runtime.sock") });
     const runtime = new UnixRuntimeClient(daemon.socketPath);
     consoleServer = await startHumanConsole({ gateway: runtime, port: 0 });
-    const bootstrapResponse = await fetch(`${consoleServer.url}/api/bootstrap`);
+    const bootstrapResponse = await requestBootstrap(consoleServer);
     const cookie = required(bootstrapResponse.headers.get("set-cookie")).split(";", 1)[0] ?? "";
     const bootstrap = await bodyResult<{ readonly actor: Actor }>(bootstrapResponse);
 
@@ -401,14 +650,18 @@ async function request(
   return fetch(`${server.url}${path}`, {
     headers: {
       cookie,
+      "x-iterminal-request": "console",
       ...(options.body === undefined ? {} : { "content-type": "application/json" }),
       origin: server.url,
-      ...(options.method === undefined || options.method === "GET"
-        ? {}
-        : { "x-iterminal-request": "console" }),
     },
     method: options.method ?? "GET",
     ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+  });
+}
+
+function requestBootstrap(server: HumanConsoleServerHandle): Promise<Response> {
+  return fetch(`${server.url}/api/bootstrap`, {
+    headers: { "x-iterminal-request": "console" },
   });
 }
 
@@ -463,22 +716,37 @@ function expectRejectedStream(
   cookie: string,
   session: SessionResult,
 ): Promise<void> {
+  return expectRejectedStreamResponse(server, cookie, session, {
+    expectedStatus: 403,
+  }).then(() => undefined);
+}
+
+function expectRejectedStreamResponse(
+  server: HumanConsoleServerHandle,
+  cookie: string,
+  session: SessionResult,
+  options: { readonly expectedStatus: number; readonly origin?: string },
+): Promise<string> {
   const url = new URL(server.url);
   url.protocol = "ws:";
   url.pathname = `/api/sessions/${session.id}/stream`;
   url.searchParams.set("after", "0");
   url.searchParams.set("generation", session.generation.toString());
   return new Promise((resolveRejected, rejectRejected) => {
-    const socket = new WebSocket(url, { headers: { cookie } });
+    const socket = new WebSocket(url, {
+      headers: { cookie, ...(options.origin === undefined ? {} : { origin: options.origin }) },
+    });
     const timeout = setTimeout(() => {
       socket.terminate();
       rejectRejected(new Error("Timed out waiting for rejected WebSocket upgrade"));
     }, 5_000);
     socket.once("unexpected-response", (_request, response) => {
       clearTimeout(timeout);
-      expect(response.statusCode).toBe(403);
+      expect(response.statusCode).toBe(options.expectedStatus);
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.once("end", () => resolveRejected(Buffer.concat(chunks).toString("utf8")));
       response.resume();
-      resolveRejected();
     });
     socket.once("open", () => {
       clearTimeout(timeout);
@@ -487,6 +755,63 @@ function expectRejectedStream(
     });
     socket.once("error", () => undefined);
   });
+}
+
+function waitForSocketClose(socket: WebSocket): Promise<number> {
+  return new Promise((resolveClose, rejectClose) => {
+    const timeout = setTimeout(
+      () => rejectClose(new Error("Timed out waiting for WebSocket close")),
+      5_000,
+    );
+    socket.once("close", (code) => {
+      clearTimeout(timeout);
+      resolveClose(code);
+    });
+    socket.once("error", rejectClose);
+  });
+}
+
+function rawHttpGet(
+  server: HumanConsoleServerHandle,
+  path: string,
+  headers: Readonly<Record<string, string>>,
+): Promise<{ readonly body: string; readonly status: number }> {
+  const target = new URL(server.url);
+  return new Promise((resolveResponse, rejectResponse) => {
+    const timeout = setTimeout(
+      () => rejectResponse(new Error("Timed out waiting for raw HTTP response")),
+      5_000,
+    );
+    const request = httpRequest(
+      {
+        headers,
+        host: target.hostname,
+        method: "GET",
+        path,
+        port: server.port,
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.once("end", () => {
+          clearTimeout(timeout);
+          resolveResponse({
+            body: Buffer.concat(chunks).toString("utf8"),
+            status: response.statusCode ?? 0,
+          });
+        });
+      },
+    );
+    request.once("error", (error) => {
+      clearTimeout(timeout);
+      rejectResponse(error);
+    });
+    request.end();
+  });
+}
+
+function runtimeGateway(daemon: RuntimeDaemonHandle): UnixRuntimeClient {
+  return new UnixRuntimeClient(daemon.socketPath);
 }
 
 async function waitUntilRunning(runtime: UnixRuntimeClient, executionId: string): Promise<void> {

@@ -66,6 +66,10 @@ const requiredReports = [
     level: "L2",
     path: "docs/verification/M10/2026-08-31-bounded-event-retention.md",
   },
+  {
+    level: "L3",
+    path: "docs/verification/M10/2026-08-31-console-ingress-hardening.md",
+  },
 ];
 
 for (const report of requiredReports) {

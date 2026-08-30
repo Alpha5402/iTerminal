@@ -3,6 +3,9 @@
 - Status: Accepted for M5
 - Date: 2026-08-30
 
+The browser ingress portion is tightened by ADR-0054; exact authority, all-API request headers,
+Fetch Metadata, and bounded stream admission in that later decision take precedence.
+
 ## Context
 
 M5 needs the first real Human Console without introducing a second terminal owner or a browser-only write path. The Runtime daemon already owns the live PTY, Application state transitions, durable Events, Virtual Screen, and generation-scoped Interaction Guard. The Console therefore needs transport and presentation semantics, not another execution model.

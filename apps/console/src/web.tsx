@@ -1288,10 +1288,8 @@ async function api<T = unknown>(
   const response = await fetch(path, {
     credentials: "same-origin",
     headers: {
+      "x-iterminal-request": "console",
       ...(options.body === undefined ? {} : { "content-type": "application/json" }),
-      ...(options.method === undefined || options.method === "GET"
-        ? {}
-        : { "x-iterminal-request": "console" }),
     },
     method: options.method ?? "GET",
     ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
