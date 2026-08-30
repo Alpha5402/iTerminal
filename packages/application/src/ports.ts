@@ -191,6 +191,7 @@ export interface RuntimeOwnerRoute extends RuntimeOwnerIdentity {
 
 export interface RuntimeOwnerRecord extends RuntimeOwnerRoute {
   readonly activeSessionCount: number;
+  readonly capacityWeight: number;
   readonly placementCount: number;
 }
 
@@ -228,6 +229,7 @@ export type DurableSessionCreationResult =
 
 export interface RuntimeOwnerRegistry {
   registerOwner(input: {
+    readonly capacityWeight?: number;
     readonly endpoint: string;
     readonly instanceId: string;
     readonly leaseMilliseconds: number;

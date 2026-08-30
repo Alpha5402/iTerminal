@@ -52,6 +52,7 @@ describeDatabase("M9.1 PostgreSQL Runtime owner registry", () => {
     });
     expect(first).toMatchObject({
       activeSessionCount: 0,
+      capacityWeight: 1,
       endpoint: "/tmp/iterminal-owner-a.sock",
       epoch: 1,
       instanceId: "instance-a",
@@ -262,6 +263,86 @@ describeDatabase("M9.1 PostgreSQL Runtime owner registry", () => {
       expect.objectContaining({ ownerId: "owner-placement-a", placementCount: 7 }),
       expect.objectContaining({ ownerId: "owner-placement-c", placementCount: 7 }),
     ]);
+  });
+
+  it("atomically distributes placement by declared relative capacity", async () => {
+    const registry = createRegistry();
+    const claimers = [registry, createRegistry(), createRegistry(), createRegistry()];
+    const registrations = await Promise.all(
+      [
+        { capacityWeight: 1, suffix: "a" },
+        { capacityWeight: 2, suffix: "b" },
+        { capacityWeight: 3, suffix: "c" },
+      ].map(({ capacityWeight, suffix }) =>
+        registry.registerOwner({
+          capacityWeight,
+          endpoint: `/tmp/iterminal-weighted-${suffix}.sock`,
+          instanceId: `weighted-${suffix}`,
+          leaseMilliseconds: 5_000,
+          ownerId: `owner-weighted-${suffix}`,
+        }),
+      ),
+    );
+    expect(registrations.map((owner) => owner.capacityWeight)).toEqual([1, 2, 3]);
+
+    const firstWave = await Promise.all(
+      Array.from({ length: 12 }, (_, index) => {
+        const claimer = claimers[index % claimers.length];
+        if (claimer === undefined) throw new Error("Weighted placement claimer is missing");
+        return claimer.claimAssignableOwner();
+      }),
+    );
+    expect(ownerCounts(firstWave)).toEqual({
+      "owner-weighted-a": 2,
+      "owner-weighted-b": 4,
+      "owner-weighted-c": 6,
+    });
+
+    const highCapacity = registrations[2];
+    if (highCapacity === undefined) throw new Error("High-capacity owner is missing");
+    await registry.beginOwnerDrain(highCapacity, 5_000);
+    const secondWave = await Promise.all(
+      Array.from({ length: 6 }, (_, index) => {
+        const claimer = claimers[index % claimers.length];
+        if (claimer === undefined) throw new Error("Weighted placement claimer is missing");
+        return claimer.claimAssignableOwner();
+      }),
+    );
+    expect(ownerCounts(secondWave)).toEqual({
+      "owner-weighted-a": 2,
+      "owner-weighted-b": 4,
+    });
+    expect(await registry.listAssignableOwners()).toEqual([
+      expect.objectContaining({
+        capacityWeight: 1,
+        ownerId: "owner-weighted-a",
+        placementCount: 4,
+      }),
+      expect.objectContaining({
+        capacityWeight: 2,
+        ownerId: "owner-weighted-b",
+        placementCount: 8,
+      }),
+    ]);
+
+    await expect(
+      registry.registerOwner({
+        capacityWeight: 0,
+        endpoint: "/tmp/iterminal-weighted-invalid.sock",
+        instanceId: "weighted-invalid",
+        leaseMilliseconds: 5_000,
+        ownerId: "owner-weighted-invalid",
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    await expect(
+      registry.registerOwner({
+        capacityWeight: 1_001,
+        endpoint: "/tmp/iterminal-weighted-too-large.sock",
+        instanceId: "weighted-too-large",
+        leaseMilliseconds: 5_000,
+        ownerId: "owner-weighted-too-large",
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
   });
 
   it("claims one exact owner once for concurrent idempotent Session creation", async () => {

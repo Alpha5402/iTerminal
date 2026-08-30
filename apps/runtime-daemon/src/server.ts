@@ -49,11 +49,13 @@ const DEFAULT_OWNER_LEASE_MILLISECONDS = 15_000;
 const DEFAULT_SESSION_LEASE_MILLISECONDS = 15_000;
 const DEFAULT_DATABASE_HEALTH_CHECK_MILLISECONDS = 1_000;
 const DEFAULT_DRAIN_TIMEOUT_MILLISECONDS = 5_000;
+const DEFAULT_CAPACITY_WEIGHT = 1;
 
 export async function startRuntimeDaemon(options: {
   readonly actionRateLimitWindowMilliseconds?: number;
   readonly actorActionRateLimit?: number;
   readonly beforeAcceptExecuteCommit?: () => void;
+  readonly capacityWeight?: number;
   readonly checkpointEnvironmentKeys?: readonly string[];
   readonly databaseHealthCheckMilliseconds?: number;
   readonly databaseUrl?: string;
@@ -91,6 +93,7 @@ export async function startRuntimeDaemon(options: {
     (options.actionRateLimitWindowMilliseconds !== undefined ||
       options.actorActionRateLimit !== undefined ||
       options.beforeAcceptExecuteCommit !== undefined ||
+      options.capacityWeight !== undefined ||
       options.drainTimeoutMilliseconds !== undefined ||
       options.onDrainState !== undefined ||
       options.ownerInstanceId !== undefined ||
@@ -109,6 +112,7 @@ export async function startRuntimeDaemon(options: {
       options.actorActionRateLimit !== undefined ||
       options.databaseUrl !== undefined ||
       options.beforeAcceptExecuteCommit !== undefined ||
+      options.capacityWeight !== undefined ||
       options.databaseHealthCheckMilliseconds !== undefined ||
       options.databaseStatementTimeoutMilliseconds !== undefined ||
       options.checkpointEnvironmentKeys !== undefined ||
@@ -131,6 +135,7 @@ export async function startRuntimeDaemon(options: {
       "A custom RuntimeService cannot be combined with daemon database configuration",
     );
   }
+  const capacityWeight = boundedCapacityWeight(options.capacityWeight ?? DEFAULT_CAPACITY_WEIGHT);
   const durability =
     options.databaseUrl === undefined
       ? undefined
@@ -251,6 +256,7 @@ export async function startRuntimeDaemon(options: {
           ? {}
           : {
               ownership: {
+                capacityWeight,
                 endpoint: options.socketPath,
                 instanceId: ownerInstanceId,
                 leaseMilliseconds: ownerLeaseMilliseconds,
@@ -439,6 +445,16 @@ function positiveInteger(value: number, name: string): number {
     });
   }
   return value;
+}
+
+function boundedCapacityWeight(value: number): number {
+  const weight = positiveInteger(value, "capacityWeight");
+  if (weight > 1_000) {
+    throw new RuntimeError("INVALID_REQUEST", "capacityWeight must be at most 1000", {
+      capacityWeight: value,
+    });
+  }
+  return weight;
 }
 
 interface Deferred<T> {

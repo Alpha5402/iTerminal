@@ -9,6 +9,7 @@ const socketPath = process.env.ITERM_RUNTIME_SOCKET ?? defaultRuntimeSocketPath(
 const databaseUrl = process.env.ITERM_DATABASE_URL;
 const ownerId = process.env.ITERM_RUNTIME_OWNER_ID;
 const ownerInstanceId = process.env.ITERM_RUNTIME_OWNER_INSTANCE_ID;
+const capacityWeight = optionalPositiveInteger("ITERM_RUNTIME_CAPACITY_WEIGHT");
 const ownerLeaseMilliseconds = optionalPositiveInteger("ITERM_RUNTIME_OWNER_LEASE_MS");
 const sessionLeaseMilliseconds = optionalPositiveInteger("ITERM_SESSION_LEASE_MS");
 const actorActionRateLimit = optionalPositiveInteger("ITERM_ACTOR_ACTION_RATE_LIMIT");
@@ -33,6 +34,7 @@ const daemon = await startRuntimeDaemon({
   ...(actionRateLimitWindowMilliseconds === undefined ? {} : { actionRateLimitWindowMilliseconds }),
   ...(actorActionRateLimit === undefined ? {} : { actorActionRateLimit }),
   ...(checkpointEnvironmentKeys === undefined ? {} : { checkpointEnvironmentKeys }),
+  ...(capacityWeight === undefined ? {} : { capacityWeight }),
   ...(databaseUrl === undefined ? {} : { databaseUrl }),
   ...(executionDispatch === undefined ? {} : { executionDispatch }),
   ...(databaseStatementTimeoutMilliseconds === undefined

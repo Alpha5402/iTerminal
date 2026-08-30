@@ -26,6 +26,7 @@ export function startPostgresRecoverySupervisor(options: {
   readonly jitterRatio?: number;
   readonly maxDelayMilliseconds?: number;
   readonly ownership?: {
+    readonly capacityWeight: number;
     readonly endpoint: string;
     readonly instanceId: string;
     readonly leaseMilliseconds: number;
@@ -97,6 +98,7 @@ export function startPostgresRecoverySupervisor(options: {
         await options.durability.migrate();
         if (options.ownership !== undefined) {
           ownerRegistration = await options.ownership.registry.registerOwner({
+            capacityWeight: options.ownership.capacityWeight,
             endpoint: options.ownership.endpoint,
             instanceId: options.ownership.instanceId,
             leaseMilliseconds: options.ownership.leaseMilliseconds,

@@ -20,6 +20,7 @@ import {
 
 interface OwnerRow {
   readonly active_session_count: string;
+  readonly capacity_weight: number;
   readonly endpoint: string;
   readonly heartbeat_at: Date;
   readonly instance_id: string;
@@ -50,6 +51,7 @@ function ownerColumns(alias: string, includeActiveSessionCount = true): string {
   return `${alias}.owner_id, ${alias}.instance_id, ${alias}.registry_epoch::text,
   ${alias}.endpoint, ${alias}.status, ${alias}.heartbeat_at, ${alias}.lease_expires_at,
   ${alias}.started_at, ${alias}.stopped_at, ${alias}.version::text,
+  ${alias}.capacity_weight,
   ${
     includeActiveSessionCount
       ? `(SELECT count(*)::text FROM sessions s
@@ -96,6 +98,7 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
   }
 
   public async registerOwner(input: {
+    readonly capacityWeight?: number;
     readonly endpoint: string;
     readonly instanceId: string;
     readonly leaseMilliseconds: number;
@@ -105,12 +108,13 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
     validateIdentifier(input.instanceId, "instanceId");
     validateEndpoint(input.endpoint);
     const leaseMilliseconds = positiveInteger(input.leaseMilliseconds, "leaseMilliseconds");
+    const capacityWeight = boundedCapacityWeight(input.capacityWeight ?? 1);
     const registered = await this.#pool.query<OwnerRow>(
       `INSERT INTO runtime_workers
          (owner_id, instance_id, registry_epoch, endpoint, status, heartbeat_at,
-          lease_expires_at, started_at, stopped_at, version)
+          lease_expires_at, started_at, stopped_at, version, capacity_weight)
        VALUES ($1, $2, 1, $3, 'ACTIVE', now(),
-               now() + ($4::bigint * interval '1 millisecond'), now(), NULL, 1)
+               now() + ($4::bigint * interval '1 millisecond'), now(), NULL, 1, $5)
        ON CONFLICT (owner_id) DO UPDATE
          SET instance_id = EXCLUDED.instance_id,
              registry_epoch = CASE
@@ -119,6 +123,7 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
                ELSE runtime_workers.registry_epoch + 1
              END,
              endpoint = EXCLUDED.endpoint,
+             capacity_weight = EXCLUDED.capacity_weight,
              status = CASE
                WHEN runtime_workers.instance_id = EXCLUDED.instance_id
                  THEN runtime_workers.status
@@ -141,7 +146,7 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
          (runtime_workers.instance_id <> EXCLUDED.instance_id
            AND (runtime_workers.status = 'STOPPED' OR runtime_workers.lease_expires_at <= now()))
        RETURNING ${OWNER_RETURNING}`,
-      [input.ownerId, input.instanceId, input.endpoint, leaseMilliseconds],
+      [input.ownerId, input.instanceId, input.endpoint, leaseMilliseconds, capacityWeight],
     );
     const row = registered.rows[0];
     if (row !== undefined) return ownerRecord(row);
@@ -201,7 +206,7 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
       `SELECT ${OWNER_RETURNING}
         FROM runtime_workers
        WHERE status = 'ACTIVE' AND lease_expires_at > now()
-        ORDER BY placement_count, owner_id`,
+        ORDER BY placement_count::numeric / capacity_weight, owner_id`,
     );
     return owners.rows.map(ownerRecord);
   }
@@ -444,7 +449,7 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
       `SELECT owner_id
          FROM runtime_workers
         WHERE status = 'ACTIVE' AND lease_expires_at > now()
-        ORDER BY placement_count, owner_id
+        ORDER BY placement_count::numeric / capacity_weight, owner_id
         LIMIT 1
         FOR UPDATE`,
     );
@@ -474,6 +479,7 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
 function ownerRecord(row: OwnerRow): RuntimeOwnerRecord {
   return {
     activeSessionCount: Number.parseInt(row.active_session_count, 10),
+    capacityWeight: row.capacity_weight,
     endpoint: row.endpoint,
     epoch: Number.parseInt(row.registry_epoch, 10),
     heartbeatAt: row.heartbeat_at.toISOString(),
@@ -517,6 +523,16 @@ function positiveInteger(value: number, name: string): number {
   return value;
 }
 
+function boundedCapacityWeight(value: number): number {
+  const weight = positiveInteger(value, "capacityWeight");
+  if (weight > 1_000) {
+    throw new RuntimeError("INVALID_REQUEST", "capacityWeight must be at most 1000", {
+      capacityWeight: value,
+    });
+  }
+  return weight;
+}
+
 function unreachableOwnerRow(): never {
   throw new Error("Runtime owner update returned no row after lease validation");
 }
@@ -524,6 +540,7 @@ function unreachableOwnerRow(): never {
 function requiredOwnerRow(row: RouteRow): OwnerRow {
   if (
     row.active_session_count === null ||
+    row.capacity_weight === null ||
     row.endpoint === null ||
     row.heartbeat_at === null ||
     row.instance_id === null ||
@@ -542,6 +559,7 @@ function requiredOwnerRow(row: RouteRow): OwnerRow {
   }
   return {
     active_session_count: row.active_session_count,
+    capacity_weight: row.capacity_weight,
     endpoint: row.endpoint,
     heartbeat_at: row.heartbeat_at,
     instance_id: row.instance_id,

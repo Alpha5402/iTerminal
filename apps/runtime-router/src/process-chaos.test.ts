@@ -1342,12 +1342,148 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
     ).toContain("m914-starved-recovered");
   }, 120_000);
 
+  it("preserves capacity-weighted placement across drain and replacement", async () => {
+    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m915-weighted-")));
+    fixtures.push(root);
+    const workspace = join(root, "workspace");
+    await mkdir(workspace, { recursive: true });
+    const ownerSockets = {
+      "owner-weighted-a": join(root, "a.sock"),
+      "owner-weighted-b": join(root, "b.sock"),
+      "owner-weighted-c": join(root, "c.sock"),
+    } as const;
+    const weightedOwners = await Promise.all(
+      [
+        { capacityWeight: 1, ownerId: "owner-weighted-a" as const },
+        { capacityWeight: 2, ownerId: "owner-weighted-b" as const },
+        { capacityWeight: 3, ownerId: "owner-weighted-c" as const },
+      ].map(({ capacityWeight, ownerId }) =>
+        startRuntimeChild(
+          root,
+          ownerId,
+          `instance-${ownerId}-1`,
+          ownerSockets[ownerId],
+          databaseUrl ?? "",
+          capacityWeight,
+        ),
+      ),
+    );
+    children.push(...weightedOwners);
+    const routerSocket = join(root, "router.sock");
+    const router = await startRouterChild(routerSocket);
+    children.push(router);
+    const client = new UnixRuntimeClient(routerSocket);
+
+    const firstWave = await Promise.all(
+      Array.from({ length: 12 }, (_, index) =>
+        client.createSession({
+          idempotencyKey: `m915-first-${index.toString()}`,
+          shell: "zsh",
+          workspaceRoot: workspace,
+        }),
+      ),
+    );
+    expect(ownerCounts(firstWave)).toEqual({
+      "owner-weighted-a": 2,
+      "owner-weighted-b": 4,
+      "owner-weighted-c": 6,
+    });
+    await proveWeightedShells(client, firstWave, "m915-first");
+    await Promise.all(
+      firstWave.map((session) => client.closeSession(session.id, session.generation)),
+    );
+
+    const highCapacity = requiredChild(weightedOwners, "runtime-owner-weighted-c");
+    highCapacity.process.kill("SIGTERM");
+    await waitForExit(highCapacity, 15_000);
+    expect(highCapacity.process.exitCode).toBe(0);
+    await waitForOwnerStatus("owner-weighted-c", "STOPPED");
+    const secondWave = await Promise.all(
+      Array.from({ length: 6 }, (_, index) =>
+        client.createSession({
+          idempotencyKey: `m915-second-${index.toString()}`,
+          shell: "zsh",
+          workspaceRoot: workspace,
+        }),
+      ),
+    );
+    expect(ownerCounts(secondWave)).toEqual({
+      "owner-weighted-a": 2,
+      "owner-weighted-b": 4,
+    });
+    await Promise.all(
+      secondWave.map((session) => client.closeSession(session.id, session.generation)),
+    );
+
+    const replacement = await startRuntimeChild(
+      root,
+      "owner-weighted-c",
+      "instance-owner-weighted-c-2",
+      ownerSockets["owner-weighted-c"],
+      databaseUrl ?? "",
+      3,
+    );
+    children.push(replacement);
+    const replaced = await pool.query<{
+      capacity_weight: number;
+      placement_count: string;
+      registry_epoch: string;
+      status: string;
+    }>(
+      `SELECT capacity_weight, placement_count::text, registry_epoch::text, status
+         FROM runtime_workers WHERE owner_id = 'owner-weighted-c'`,
+    );
+    expect(replaced.rows).toEqual([
+      {
+        capacity_weight: 3,
+        placement_count: "6",
+        registry_epoch: "2",
+        status: "ACTIVE",
+      },
+    ]);
+
+    const thirdWave = await Promise.all(
+      Array.from({ length: 18 }, (_, index) =>
+        client.createSession({
+          idempotencyKey: `m915-third-${index.toString()}`,
+          shell: "zsh",
+          workspaceRoot: workspace,
+        }),
+      ),
+    );
+    expect(ownerCounts(thirdWave)).toEqual({
+      "owner-weighted-a": 2,
+      "owner-weighted-b": 4,
+      "owner-weighted-c": 12,
+    });
+    await proveWeightedShells(client, thirdWave, "m915-third");
+    await Promise.all(
+      thirdWave.map((session) => client.closeSession(session.id, session.generation)),
+    );
+    const finalPlacement = await pool.query<{
+      capacity_weight: number;
+      owner_id: string;
+      placement_count: string;
+    }>(
+      `SELECT owner_id, capacity_weight, placement_count::text
+         FROM runtime_workers
+        WHERE owner_id LIKE 'owner-weighted-%'
+        ORDER BY owner_id`,
+    );
+    expect(finalPlacement.rows).toEqual([
+      { capacity_weight: 1, owner_id: "owner-weighted-a", placement_count: "6" },
+      { capacity_weight: 2, owner_id: "owner-weighted-b", placement_count: "12" },
+      { capacity_weight: 3, owner_id: "owner-weighted-c", placement_count: "18" },
+    ]);
+  }, 120_000);
+
   async function startRuntimeChild(
     root: string,
     ownerId: string,
     instanceId: string,
     socketPath: string,
     connectionString = databaseUrl ?? "",
+    capacityWeight = 1,
   ): Promise<ManagedChild> {
     const child = startChild(`runtime-${ownerId}`, "apps/runtime-daemon/src/main.ts", {
       ITERM_DATABASE_HEALTH_CHECK_MS: "100",
@@ -1355,6 +1491,7 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
       ITERM_DATABASE_RECONNECT_MAX_MS: "50",
       ITERM_DATABASE_STATEMENT_TIMEOUT_MS: "500",
       ITERM_DATABASE_URL: connectionString,
+      ITERM_RUNTIME_CAPACITY_WEIGHT: capacityWeight.toString(),
       ITERM_RUNTIME_OWNER_ID: ownerId,
       ITERM_RUNTIME_OWNER_INSTANCE_ID: instanceId,
       ITERM_RUNTIME_OWNER_LEASE_MS: "2000",
@@ -1461,6 +1598,26 @@ function ownerCounts(sessions: readonly Session[]): Record<string, number> {
     counts[session.ownerId] = (counts[session.ownerId] ?? 0) + 1;
   }
   return counts;
+}
+
+async function proveWeightedShells(
+  client: UnixRuntimeClient,
+  sessions: readonly Session[],
+  prefix: string,
+): Promise<void> {
+  for (const ownerId of Object.keys(ownerCounts(sessions)).sort()) {
+    const session = sessions.find((candidate) => candidate.ownerId === ownerId);
+    if (session === undefined) throw new Error(`Weighted Session is missing for ${ownerId}`);
+    const marker = `${prefix}-${ownerId}`;
+    const execution = await client.startExecute({
+      actor: actor(marker),
+      command: `printf ${marker}`,
+      idempotencyKey: `${marker}-execute`,
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+    });
+    expect((await client.waitExecution(execution.execution.id)).output).toContain(marker);
+  }
 }
 
 function requiredSession(sessions: readonly Session[], index: number): Session {

@@ -17,6 +17,7 @@ const migrations = [
   { file: "010_fair_placement_rate_limits.sql", version: 10 },
   { file: "011_session_creation_idempotency.sql", version: 11 },
   { file: "012_session_creation_retention.sql", version: 12 },
+  { file: "013_runtime_capacity_weight.sql", version: 13 },
 ] as const;
 
 export async function migrateDatabase(pool: Pool): Promise<void> {

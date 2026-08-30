@@ -115,6 +115,7 @@ function routeRegistry(liveOwner: RuntimeOwnerRecord): RuntimeOwnerRegistry {
 
 const owner: RuntimeOwnerRecord = {
   activeSessionCount: 1,
+  capacityWeight: 1,
   endpoint: "/tmp/owner-route.sock",
   epoch: 4,
   heartbeatAt: new Date(0).toISOString(),

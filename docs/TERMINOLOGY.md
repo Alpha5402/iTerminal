@@ -2,38 +2,38 @@
 
 These terms are protocol contracts. Avoid synonyms in code and public APIs unless an adapter must translate them.
 
-| Term               | Meaning                                                                                          |
-| ------------------ | ------------------------------------------------------------------------------------------------ |
-| Actor              | Authenticated Human, Agent, Scheduler, or System identity that submits an Action.                |
-| Session            | Durable collaboration identity bound to a workspace and a sequence of generations.               |
-| Session generation | One live incarnation of a Session. It owns exactly one PTY, Shell, and Executor owner.           |
-| PTY                | The operating-system pseudo-terminal carrying one merged input/output terminal stream.           |
-| Shell              | The persistent top-level bash/zsh process inside the PTY. It owns the real cwd/env/job state.    |
-| Action             | Immutable Actor request: Execute, Input, Control, or Resize.                                     |
-| ExecuteAction      | Request for the persistent Shell to evaluate new top-level Shell input.                          |
-| InputAction        | Atomic byte/key batch targeting the current foreground Execution.                                |
-| ControlAction      | Explicit TTY control bytes or process-group signal targeting the current Execution.              |
-| ResizeAction       | Explicit version-guarded request to change one generation's canonical terminal geometry.         |
-| Execution          | Observed attempt to run one ExecuteAction in a specific Session generation.                      |
-| Event              | Append-only durable fact observed or accepted by the Runtime.                                    |
-| Snapshot           | Best-effort materialized observation of current Session state; not the live truth itself.        |
-| Shell Checkpoint   | Filtered, reconstructable cwd/shell/env state used to fork or rebuild a Session.                 |
-| Session fork       | New independent Session rebuilt from one exact Shell Checkpoint; never a PTY/process clone.      |
-| Virtual Screen     | Versioned VT/ANSI projection of what the terminal currently displays.                            |
-| Canonical geometry | Runtime-owned PTY/Virtual Screen rows and columns shared by every viewer of one generation.      |
-| TerminalState      | Exact-generation advisory classification built from Runtime facts and bounded terminal signals.  |
-| Interaction Guard  | Short-lived coordination policy that prevents semantically unsafe competing input.               |
-| Owner              | Worker/process that physically holds a generation's live PTY. It is not a Human/Agent role.      |
-| Owner instance     | One boot-unique Runtime process incarnation registered beneath a stable logical owner ID.        |
-| Registry epoch     | Monotonic owner-incarnation number; fences registry writes but is not a Session fencing token.   |
-| Session lease      | Database-time authority held by one exact owner incarnation for one Session generation.          |
-| Fencing token      | Globally monotonic Session-lease token checked inside every live durable mutation transaction.   |
-| Execution version  | Optimistic version for one Execution transition; independent of owner identity and fencing.      |
-| Runtime Router     | Stateless local RPC adapter that resolves durable owner routes and forwards to the exact daemon. |
-| Placement claim    | Atomic monotonic assignment attempt for one new root Session; not active load or capacity.       |
-| Action rate limit  | Durable database-time admission bound scoped independently to one Actor and one Session.         |
-| `UNKNOWN`          | The Runtime cannot prove whether a write or external side effect occurred/completed.             |
-| `BROKEN`           | The generation's PTY/Shell/owner/control protocol is lost or no longer trustworthy.              |
+| Term               | Meaning                                                                                           |
+| ------------------ | ------------------------------------------------------------------------------------------------- |
+| Actor              | Authenticated Human, Agent, Scheduler, or System identity that submits an Action.                 |
+| Session            | Durable collaboration identity bound to a workspace and a sequence of generations.                |
+| Session generation | One live incarnation of a Session. It owns exactly one PTY, Shell, and Executor owner.            |
+| PTY                | The operating-system pseudo-terminal carrying one merged input/output terminal stream.            |
+| Shell              | The persistent top-level bash/zsh process inside the PTY. It owns the real cwd/env/job state.     |
+| Action             | Immutable Actor request: Execute, Input, Control, or Resize.                                      |
+| ExecuteAction      | Request for the persistent Shell to evaluate new top-level Shell input.                           |
+| InputAction        | Atomic byte/key batch targeting the current foreground Execution.                                 |
+| ControlAction      | Explicit TTY control bytes or process-group signal targeting the current Execution.               |
+| ResizeAction       | Explicit version-guarded request to change one generation's canonical terminal geometry.          |
+| Execution          | Observed attempt to run one ExecuteAction in a specific Session generation.                       |
+| Event              | Append-only durable fact observed or accepted by the Runtime.                                     |
+| Snapshot           | Best-effort materialized observation of current Session state; not the live truth itself.         |
+| Shell Checkpoint   | Filtered, reconstructable cwd/shell/env state used to fork or rebuild a Session.                  |
+| Session fork       | New independent Session rebuilt from one exact Shell Checkpoint; never a PTY/process clone.       |
+| Virtual Screen     | Versioned VT/ANSI projection of what the terminal currently displays.                             |
+| Canonical geometry | Runtime-owned PTY/Virtual Screen rows and columns shared by every viewer of one generation.       |
+| TerminalState      | Exact-generation advisory classification built from Runtime facts and bounded terminal signals.   |
+| Interaction Guard  | Short-lived coordination policy that prevents semantically unsafe competing input.                |
+| Owner              | Worker/process that physically holds a generation's live PTY. It is not a Human/Agent role.       |
+| Owner instance     | One boot-unique Runtime process incarnation registered beneath a stable logical owner ID.         |
+| Registry epoch     | Monotonic owner-incarnation number; fences registry writes but is not a Session fencing token.    |
+| Session lease      | Database-time authority held by one exact owner incarnation for one Session generation.           |
+| Fencing token      | Globally monotonic Session-lease token checked inside every live durable mutation transaction.    |
+| Execution version  | Optimistic version for one Execution transition; independent of owner identity and fencing.       |
+| Runtime Router     | Stateless local RPC adapter that resolves durable owner routes and forwards to the exact daemon.  |
+| Placement claim    | Atomic weighted assignment attempt for one new root Session using stable historical attempt debt. |
+| Action rate limit  | Durable database-time admission bound scoped independently to one Actor and one Session.          |
+| `UNKNOWN`          | The Runtime cannot prove whether a write or external side effect occurred/completed.              |
+| `BROKEN`           | The generation's PTY/Shell/owner/control protocol is lost or no longer trustworthy.               |
 
 ## Forbidden conflations
 
@@ -48,7 +48,7 @@ These terms are protocol contracts. Avoid synonyms in code and public APIs unles
 - Fencing stale database writes != undoing external side effects.
 - Owner route freshness != generation-scoped Session fencing or PTY failover.
 - Registry epoch != Session fencing token != Execution expected version.
-- Placement-attempt fairness != equal active load, capacity weighting, or overload shedding.
+- Capacity-weighted placement != active-load measurement, hard Session capacity, or overload shedding.
 - `RATE_LIMITED` != `BACKPRESSURE`, `PTY_BUSY`, or an interaction-policy denial.
 
 ## TerminalState evidence boundary
