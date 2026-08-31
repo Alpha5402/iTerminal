@@ -174,6 +174,15 @@ interface CursorComposerLayout {
   readonly width: number;
 }
 
+type InspectorView = "advanced" | "approvals" | "mcp" | "session";
+
+const INSPECTOR_TITLES: Record<InspectorView, string> = {
+  advanced: "Advanced",
+  approvals: "Agent approvals",
+  mcp: "Connect MCP",
+  session: "Session recovery",
+};
+
 function App(): React.JSX.Element {
   const [bootstrap, setBootstrap] = useState<Bootstrap>();
   const [sessions, setSessions] = useState<readonly Session[]>([]);
@@ -200,6 +209,8 @@ function App(): React.JSX.Element {
   const [command, setCommand] = useState("");
   const [creatingSession, setCreatingSession] = useState(false);
   const [mcpConfigCopied, setMcpConfigCopied] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [inspectorView, setInspectorView] = useState<InspectorView>("approvals");
   const [interactive, setInteractive] = useState(false);
   const [resizeColumns, setResizeColumns] = useState(SCREEN_COLUMNS.toString());
   const [resizeRows, setResizeRows] = useState(SCREEN_ROWS.toString());
@@ -240,6 +251,7 @@ function App(): React.JSX.Element {
       (secretPromptKey !== undefined && secretPromptKey !== dismissedSecretPromptKey));
   const cursorComposerRequested = session?.status === "READY" || secureInputVisible;
   const commandEditorRows = Math.min(6, Math.max(1, command.split("\n").length));
+  const pendingApprovalCount = approvals.filter((approval) => approval.status === "PENDING").length;
 
   useEffect(() => {
     latestSession.current = session;
@@ -256,6 +268,16 @@ function App(): React.JSX.Element {
   useEffect(() => {
     interactiveState.current = interactive;
   }, [interactive]);
+  useEffect(() => {
+    if (pendingApprovalCount === 0) return;
+    setInspectorView("approvals");
+    setInspectorOpen(true);
+  }, [pendingApprovalCount]);
+  useEffect(() => {
+    if (session?.status !== "BROKEN") return;
+    setInspectorView("session");
+    setInspectorOpen(true);
+  }, [session?.generation, session?.id, session?.status]);
   useEffect(() => {
     if (session === undefined || screen === undefined) return;
     sessionStorage.setItem(
@@ -1027,6 +1049,15 @@ function App(): React.JSX.Element {
     [bootstrap?.actor.id],
   );
 
+  const toggleInspector = (view: InspectorView): void => {
+    if (inspectorOpen && inspectorView === view) {
+      setInspectorOpen(false);
+      return;
+    }
+    setInspectorView(view);
+    setInspectorOpen(true);
+  };
+
   return (
     <main className="app-shell">
       <header className="masthead">
@@ -1034,14 +1065,52 @@ function App(): React.JSX.Element {
           <p className="eyebrow">HUMAN × AGENT / ONE LIVE SHELL</p>
           <h1>iTerminal</h1>
         </div>
-        <div className="connection" aria-live="polite">
-          <span className={`signal signal-${streamState}`} />
-          <span>{streamState}</span>
-          <code>{actorLabel ?? "initializing"}</code>
+        <div className="masthead-actions">
+          <div className="connection" aria-live="polite">
+            <span className={`signal signal-${streamState}`} />
+            <span>{streamState}</span>
+            <code>{actorLabel ?? "initializing"}</code>
+          </div>
+          <nav aria-label="Console tools" className="console-tools">
+            <button
+              aria-expanded={inspectorOpen && inspectorView === "mcp"}
+              className={inspectorOpen && inspectorView === "mcp" ? "active" : undefined}
+              onClick={() => toggleInspector("mcp")}
+              type="button"
+            >
+              Connect MCP
+            </button>
+            <button
+              aria-expanded={inspectorOpen && inspectorView === "approvals"}
+              className={`${inspectorOpen && inspectorView === "approvals" ? "active " : ""}${pendingApprovalCount > 0 ? "attention" : ""}`.trim()}
+              onClick={() => toggleInspector("approvals")}
+              type="button"
+            >
+              Approvals <span>{pendingApprovalCount}</span>
+            </button>
+            <button
+              aria-expanded={inspectorOpen && inspectorView === "session"}
+              className={inspectorOpen && inspectorView === "session" ? "active" : undefined}
+              disabled={session === undefined}
+              onClick={() => toggleInspector("session")}
+              type="button"
+            >
+              Session
+            </button>
+            <button
+              aria-expanded={inspectorOpen && inspectorView === "advanced"}
+              className={inspectorOpen && inspectorView === "advanced" ? "active" : undefined}
+              disabled={session === undefined}
+              onClick={() => toggleInspector("advanced")}
+              type="button"
+            >
+              Advanced
+            </button>
+          </nav>
         </div>
       </header>
 
-      <section className="workspace-grid">
+      <section className={`workspace-grid${inspectorOpen ? " inspector-open" : ""}`}>
         <section className="terminal-stage" aria-label="Shared terminal">
           <nav aria-label="Sessions" className="session-tabs">
             <div className="session-tab-strip">
@@ -1274,212 +1343,270 @@ function App(): React.JSX.Element {
           )}
         </section>
 
-        <aside className="inspector" aria-label="Interaction and timeline">
-          {bootstrap?.mcpConnection !== undefined && (
-            <section className="mcp-connection" aria-label="MCP connection">
-              <div className="section-title">
-                <h2>Connect MCP</h2>
-                <span className="ready-badge">READY</span>
-              </div>
-              <p>
-                Paste this complete JSON into your MCP client. It already contains
-                <code> mcpServers.{bootstrap.mcpConnection.serverName}</code>.
-              </p>
-              <details>
-                <summary>Preview complete JSON</summary>
-                <pre className="mcp-config-json">{bootstrap.mcpConnection.configJson}</pre>
-              </details>
-              <button onClick={() => void copyMcpConfig()} type="button">
-                {mcpConfigCopied ? "Complete JSON copied" : "Copy complete MCP JSON"}
+        {inspectorOpen && (
+          <aside className="inspector" aria-label="Console side panel">
+            <div className="inspector-header">
+              <strong>{INSPECTOR_TITLES[inspectorView]}</strong>
+              <button
+                aria-label="Close side panel"
+                className="icon-button"
+                onClick={() => setInspectorOpen(false)}
+                type="button"
+              >
+                ×
               </button>
-              <small>
-                Contains a local 24-hour grant. Keep this stack running; do not share or commit the
-                copied JSON.
-              </small>
-            </section>
-          )}
-          <section className="approval-panel" aria-label="Agent Execute approvals">
-            <div className="section-title">
-              <h2>Approvals</h2>
-              <span>{approvals.filter((approval) => approval.status === "PENDING").length}</span>
             </div>
-            <label>
-              Decision reason
-              <input
-                maxLength={512}
-                onChange={(event) => setApprovalReason(event.target.value)}
-                required
-                value={approvalReason}
-              />
-            </label>
-            {approvals.length === 0 ? (
-              <p className="mode-note">No Agent Execute proposals for this generation.</p>
-            ) : (
-              <ol className="approval-list">
-                {approvals.map((approval) => (
-                  <li key={approval.id}>
-                    <div className="section-title">
-                      <strong>{approval.status}</strong>
-                      <small>{formatTime(approval.expiresAt)}</small>
-                    </div>
-                    <code>{approval.command}</code>
-                    <small>
-                      {actorName(approval.requester)} · {approval.reason}
-                    </small>
-                    {approval.status === "PENDING" && (
-                      <div>
-                        <button
-                          disabled={approvalReason.trim() === ""}
-                          onClick={() => void decideApproval(approval, "approve")}
-                          type="button"
-                        >
-                          Approve once
-                        </button>
-                        <button
-                          disabled={approvalReason.trim() === ""}
-                          onClick={() => void decideApproval(approval, "deny")}
-                          type="button"
-                        >
-                          Deny
-                        </button>
-                      </div>
-                    )}
-                  </li>
-                ))}
-              </ol>
-            )}
-          </section>
-          <section className="checkpoint-panel" aria-label="Shell checkpoint and rebuild">
-            <div className="section-title">
-              <h2>Shell checkpoint</h2>
-              <span>{checkpoint === undefined ? "—" : `v${checkpoint.version.toString()}`}</span>
-            </div>
-            {checkpoint === undefined ? (
-              <p className="mode-note">No rebuildable checkpoint is currently selected.</p>
-            ) : (
-              <>
-                <dl className="facts">
-                  <dt>Source</dt>
-                  <dd>{checkpoint.sourceStatus}</dd>
-                  <dt>Age</dt>
-                  <dd>{formatAge(checkpoint.ageMilliseconds)}</dd>
-                  <dt>cwd</dt>
-                  <dd className="fact-path">{checkpoint.cwd}</dd>
-                  <dt>Environment</dt>
-                  <dd>{checkpoint.environmentKeys.join(", ") || "none"}</dd>
-                </dl>
-                <p className="checkpoint-warning">
-                  Creates a new PTY. It does not copy processes, REPL/editor memory, vim buffers,
-                  jobs, aliases, functions, traps, sockets, or file descriptors. Workspace files
-                  remain shared with the parent.
+
+            {inspectorView === "mcp" && bootstrap?.mcpConnection !== undefined && (
+              <section className="mcp-connection" aria-label="MCP connection">
+                <div className="section-title">
+                  <h2>Agent connection</h2>
+                  <span className="ready-badge">READY</span>
+                </div>
+                <p>
+                  Paste this complete JSON into your MCP client. It already contains
+                  <code> mcpServers.{bootstrap.mcpConnection.serverName}</code>.
                 </p>
-                {checkpoint.stale && (
-                  <label className="stale-acknowledgement">
+                <details>
+                  <summary>Preview complete JSON</summary>
+                  <pre className="mcp-config-json">{bootstrap.mcpConnection.configJson}</pre>
+                </details>
+                <button onClick={() => void copyMcpConfig()} type="button">
+                  {mcpConfigCopied ? "Complete JSON copied" : "Copy complete MCP JSON"}
+                </button>
+                <small>
+                  Contains a local 24-hour grant. Keep this stack running; do not share or commit
+                  the copied JSON.
+                </small>
+              </section>
+            )}
+
+            {inspectorView === "approvals" && (
+              <section className="approval-panel" aria-label="Agent Execute approvals">
+                <div className="section-title">
+                  <h2>Approvals</h2>
+                  <span>{pendingApprovalCount}</span>
+                </div>
+                {pendingApprovalCount > 0 && (
+                  <label>
+                    Decision reason
                     <input
-                      checked={staleAcknowledged}
-                      onChange={(event) => setStaleAcknowledged(event.target.checked)}
-                      type="checkbox"
+                      maxLength={512}
+                      onChange={(event) => setApprovalReason(event.target.value)}
+                      required
+                      value={approvalReason}
                     />
-                    I understand this uses the last completed READY boundary, not the lost or
-                    running foreground state.
                   </label>
                 )}
+                {approvals.length === 0 ? (
+                  <div className="panel-empty-state">
+                    <strong>No commands need your attention.</strong>
+                    <span>This panel opens automatically when an Agent requests approval.</span>
+                  </div>
+                ) : (
+                  <ol className="approval-list">
+                    {approvals.map((approval) => (
+                      <li key={approval.id}>
+                        <div className="section-title">
+                          <strong>{approval.status}</strong>
+                          <small>{formatTime(approval.expiresAt)}</small>
+                        </div>
+                        <code>{approval.command}</code>
+                        <small>
+                          {actorName(approval.requester)} · {approval.reason}
+                        </small>
+                        {approval.status === "PENDING" && (
+                          <div>
+                            <button
+                              disabled={approvalReason.trim() === ""}
+                              onClick={() => void decideApproval(approval, "approve")}
+                              type="button"
+                            >
+                              Approve once
+                            </button>
+                            <button
+                              disabled={approvalReason.trim() === ""}
+                              onClick={() => void decideApproval(approval, "deny")}
+                              type="button"
+                            >
+                              Deny
+                            </button>
+                          </div>
+                        )}
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </section>
+            )}
+
+            {inspectorView === "session" && (
+              <>
+                <section className="checkpoint-panel" aria-label="Shell checkpoint and rebuild">
+                  <div className="section-title">
+                    <h2>{session?.status === "BROKEN" ? "Recover Session" : "Fork Session"}</h2>
+                    <span>
+                      {checkpoint === undefined ? "—" : `v${checkpoint.version.toString()}`}
+                    </span>
+                  </div>
+                  {checkpoint === undefined ? (
+                    <p className="mode-note">No rebuildable checkpoint is available.</p>
+                  ) : (
+                    <>
+                      <dl className="facts">
+                        <dt>Source</dt>
+                        <dd>{checkpoint.sourceStatus}</dd>
+                        <dt>Age</dt>
+                        <dd>{formatAge(checkpoint.ageMilliseconds)}</dd>
+                        <dt>cwd</dt>
+                        <dd className="fact-path">{checkpoint.cwd}</dd>
+                        <dt>Environment</dt>
+                        <dd>{checkpoint.environmentKeys.join(", ") || "none"}</dd>
+                      </dl>
+                      <p className="checkpoint-warning">
+                        This starts a new shell from the last safe boundary. Running programs,
+                        editors, jobs, aliases, functions, and open connections are not copied.
+                        Workspace files remain shared.
+                      </p>
+                      {checkpoint.stale && (
+                        <label className="stale-acknowledgement">
+                          <input
+                            checked={staleAcknowledged}
+                            onChange={(event) => setStaleAcknowledged(event.target.checked)}
+                            type="checkbox"
+                          />
+                          I understand this uses the last completed READY boundary, not the lost or
+                          running foreground state.
+                        </label>
+                      )}
+                      {session !== undefined && session.status !== "CLOSED" && (
+                        <button
+                          disabled={checkpoint.stale && !staleAcknowledged}
+                          onClick={() => void forkSession()}
+                          type="button"
+                        >
+                          {session.status === "BROKEN"
+                            ? "Rebuild new Session from checkpoint"
+                            : "Fork new Session from checkpoint"}
+                        </button>
+                      )}
+                    </>
+                  )}
+                </section>
                 {session !== undefined && session.status !== "CLOSED" && (
                   <button
-                    disabled={checkpoint.stale && !staleAcknowledged}
-                    onClick={() => void forkSession()}
+                    className="danger"
+                    onClick={() => {
+                      if (
+                        session.status === "RUNNING" &&
+                        !window.confirm("Close this Session and stop its running process?")
+                      ) {
+                        return;
+                      }
+                      void closeSession();
+                    }}
                     type="button"
                   >
-                    {session.status === "BROKEN"
-                      ? "Rebuild new Session from checkpoint"
-                      : "Fork new Session from checkpoint"}
+                    Close Session
                   </button>
                 )}
               </>
             )}
-          </section>
-          <section>
-            <div className="section-title">
-              <h2>Interaction</h2>
-              <span>v{interaction?.version ?? "—"}</span>
-            </div>
-            <label>
-              Input policy
-              <select
-                disabled={interaction === undefined}
-                onChange={(event) => void changePolicy(event.target.value as InputPolicy)}
-                value={interaction?.policy ?? "human_guarded"}
-              >
-                <option value="human_guarded">human_guarded</option>
-                <option value="common">common</option>
-                <option value="human_only">human_only</option>
-                <option value="agent_only">agent_only</option>
-              </select>
-            </label>
-            <dl className="facts">
-              <dt>Guard</dt>
-              <dd>{interaction?.guard?.actor.id ?? "none"}</dd>
-              <dt>Expires</dt>
-              <dd>{formatTime(interaction?.guard?.expiresAt)}</dd>
-              <dt>Renewals</dt>
-              <dd>
-                {interaction?.guard === undefined
-                  ? "—"
-                  : `${interaction.guard.renewals.toString()}/${interaction.guard.maxRenewals.toString()}`}
-              </dd>
-            </dl>
-            <form className="geometry-form" onSubmit={(event) => void resizeTerminal(event)}>
-              <label>
-                Columns
-                <input
-                  disabled={screen === undefined}
-                  max={bootstrap?.geometryBounds.maxColumns ?? 240}
-                  min={bootstrap?.geometryBounds.minColumns ?? 40}
-                  onChange={(event) => setResizeColumns(event.target.value)}
-                  type="number"
-                  value={resizeColumns}
-                />
-              </label>
-              <label>
-                Rows
-                <input
-                  disabled={screen === undefined}
-                  max={bootstrap?.geometryBounds.maxRows ?? 100}
-                  min={bootstrap?.geometryBounds.minRows ?? 12}
-                  onChange={(event) => setResizeRows(event.target.value)}
-                  type="number"
-                  value={resizeRows}
-                />
-              </label>
-              <button disabled={screen === undefined} type="submit">
-                Resize canonical PTY
-              </button>
-              <small>Explicit shared Action; window size never auto-owns the PTY.</small>
-            </form>
-          </section>
-          <section className="timeline">
-            <div className="section-title">
-              <h2>Timeline</h2>
-              <span>{timeline.length}</span>
-            </div>
-            <ol>
-              {[...timeline].reverse().map((event) => (
-                <li key={event.id}>
-                  <span>{event.sequence}</span>
-                  <div>
-                    <strong>{event.type}</strong>
-                    <small>{event.actor === undefined ? "runtime" : actorName(event.actor)}</small>
+
+            {inspectorView === "advanced" && (
+              <>
+                <section aria-label="Advanced interaction settings">
+                  <div className="section-title">
+                    <h2>Input ownership</h2>
+                    <span>v{interaction?.version ?? "—"}</span>
                   </div>
-                </li>
-              ))}
-            </ol>
-          </section>
-          {session !== undefined && session.status !== "CLOSED" && (
-            <button className="danger" onClick={() => void closeSession()} type="button">
-              Close generation
-            </button>
-          )}
-        </aside>
+                  <label>
+                    Input policy
+                    <select
+                      disabled={interaction === undefined}
+                      onChange={(event) => void changePolicy(event.target.value as InputPolicy)}
+                      value={interaction?.policy ?? "human_guarded"}
+                    >
+                      <option value="human_guarded">human_guarded</option>
+                      <option value="common">common</option>
+                      <option value="human_only">human_only</option>
+                      <option value="agent_only">agent_only</option>
+                    </select>
+                  </label>
+                  {interaction?.guard !== undefined && (
+                    <dl className="facts interaction-guard">
+                      <dt>Current owner</dt>
+                      <dd>{interaction.guard.actor.id}</dd>
+                      <dt>Expires</dt>
+                      <dd>{formatTime(interaction.guard.expiresAt)}</dd>
+                      <dt>Renewals</dt>
+                      <dd>
+                        {interaction.guard.renewals.toString()}/
+                        {interaction.guard.maxRenewals.toString()}
+                      </dd>
+                    </dl>
+                  )}
+                </section>
+                <section aria-label="Terminal geometry">
+                  <div className="section-title">
+                    <h2>Terminal size</h2>
+                    <span>
+                      {screen?.columns ?? SCREEN_COLUMNS}×{screen?.rows ?? SCREEN_ROWS}
+                    </span>
+                  </div>
+                  <form className="geometry-form" onSubmit={(event) => void resizeTerminal(event)}>
+                    <label>
+                      Columns
+                      <input
+                        disabled={screen === undefined}
+                        max={bootstrap?.geometryBounds.maxColumns ?? 240}
+                        min={bootstrap?.geometryBounds.minColumns ?? 40}
+                        onChange={(event) => setResizeColumns(event.target.value)}
+                        type="number"
+                        value={resizeColumns}
+                      />
+                    </label>
+                    <label>
+                      Rows
+                      <input
+                        disabled={screen === undefined}
+                        max={bootstrap?.geometryBounds.maxRows ?? 100}
+                        min={bootstrap?.geometryBounds.minRows ?? 12}
+                        onChange={(event) => setResizeRows(event.target.value)}
+                        type="number"
+                        value={resizeRows}
+                      />
+                    </label>
+                    <button disabled={screen === undefined} type="submit">
+                      Resize canonical PTY
+                    </button>
+                    <small>This changes the shared PTY for Human and Agent clients.</small>
+                  </form>
+                </section>
+                <section className="timeline" aria-label="Raw activity timeline">
+                  <div className="section-title">
+                    <h2>Raw activity</h2>
+                    <span>{timeline.length}</span>
+                  </div>
+                  <p className="mode-note">Technical events for diagnostics and audit.</p>
+                  <ol>
+                    {[...timeline].reverse().map((event) => (
+                      <li key={event.id}>
+                        <span>{event.sequence}</span>
+                        <div>
+                          <strong>{event.type}</strong>
+                          <small>
+                            {event.actor === undefined ? "runtime" : actorName(event.actor)}
+                          </small>
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
+                </section>
+              </>
+            )}
+          </aside>
+        )}
       </section>
 
       {error !== undefined && (

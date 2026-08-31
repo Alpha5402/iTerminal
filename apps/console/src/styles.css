@@ -88,6 +88,12 @@ textarea:focus-visible,
   padding: 0 0.4rem;
 }
 
+.masthead-actions {
+  display: flex;
+  align-items: flex-end;
+  gap: 1rem;
+}
+
 .masthead h1 {
   margin: 0;
   font-size: 2.25rem;
@@ -105,6 +111,44 @@ textarea:focus-visible,
 .connection {
   gap: 0.55rem;
   color: #94a3b8;
+}
+
+.console-tools {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.console-tools button {
+  padding: 0.45rem 0.65rem;
+  border-color: transparent;
+  color: #94a3b8;
+  background: transparent;
+  font-size: 0.75rem;
+}
+
+.console-tools button:hover,
+.console-tools button:focus-visible,
+.console-tools button.active {
+  border-color: #253148;
+  color: #dbeafe;
+  background: #0a0f18;
+}
+
+.console-tools button.attention {
+  border-color: #b45309;
+  color: #fcd34d;
+  background: rgb(120 53 15 / 20%);
+}
+
+.console-tools button span {
+  display: inline-grid;
+  min-width: 1.15rem;
+  min-height: 1.15rem;
+  margin-left: 0.25rem;
+  place-items: center;
+  border-radius: 999px;
+  background: #172033;
+  font-size: 0.65rem;
 }
 
 .signal {
@@ -129,9 +173,13 @@ textarea:focus-visible,
 
 .workspace-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 22rem;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.8rem;
   min-height: 0;
+}
+
+.workspace-grid.inspector-open {
+  grid-template-columns: minmax(0, 1fr) 22rem;
 }
 
 .inspector,
@@ -146,9 +194,53 @@ textarea:focus-visible,
   padding: 0.9rem;
 }
 
-.approval-panel {
-  padding-bottom: 1rem;
+.inspector-header {
+  position: sticky;
+  z-index: 2;
+  top: -0.9rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: -0.9rem -0.9rem 0;
+  padding: 0.75rem 0.9rem;
   border-bottom: 1px solid #172033;
+  background: #070a0f;
+}
+
+.inspector-header strong {
+  font-size: 0.8rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.icon-button {
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.approval-panel {
+  min-height: 0;
+}
+
+.panel-empty-state {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.85rem;
+  border: 1px dashed #253148;
+  border-radius: 10px;
+  color: #94a3b8;
+  background: #080d14;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.panel-empty-state strong {
+  color: #dbeafe;
 }
 
 .approval-list {
@@ -593,8 +685,7 @@ textarea {
 }
 
 .checkpoint-panel {
-  padding-bottom: 1rem;
-  border-bottom: 1px solid #172033;
+  min-height: 0;
 }
 
 .checkpoint-panel button {
@@ -631,11 +722,12 @@ textarea {
 }
 
 .timeline {
-  min-height: 12rem;
-  flex: 1;
+  min-height: 0;
+  flex: 0 1 auto;
 }
 
 .timeline ol {
+  max-height: 22rem;
   min-height: 0;
   margin: 0;
   padding: 0;

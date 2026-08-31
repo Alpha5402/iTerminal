@@ -188,10 +188,11 @@ pnpm install
 pnpm local
 ```
 
-打开最终 `iterminal.local.ready` JSON 行里的精确 `consoleUrl`。Console 右侧的
-**Connect MCP** 可以直接复制完整 `mcpServers` JSON，不需要再查找或打开配置文件。复制出的
-MCP 配置属于凭据材料。按一次 Ctrl+C 会 Drain Runtime 并停止托管 Stack，同时保留
-PostgreSQL Volume。
+打开最终 `iterminal.local.ready` JSON 行里的精确 `consoleUrl`。点击 Console 顶部工具栏的
+**Connect MCP** 会打开上下文侧栏并直接复制完整 `mcpServers` JSON，不需要再查找或打开配置
+文件。未打开工具时终端保持全宽；出现 Agent 待审批请求或 BROKEN Session 时，相应面板会自动
+展开。复制出的 MCP 配置属于凭据材料。按一次 Ctrl+C 会 Drain Runtime 并停止托管 Stack，
+同时保留 PostgreSQL Volume。
 
 外部 PostgreSQL、配置、关闭、恢复以及刻意保留的单 Runtime 边界，参见
 [本地持久化快速开始](./docs/operations/local-quickstart.md)。

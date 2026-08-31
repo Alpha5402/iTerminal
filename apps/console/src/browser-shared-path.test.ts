@@ -108,11 +108,15 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     page = await browser.newPage({ viewport: { height: 1_100, width: 1_600 } });
     await page.goto(consoleServer.url, { waitUntil: "networkidle" });
 
+    expect(await page.locator(".inspector").count()).toBe(0);
+    await page.getByRole("button", { name: "Connect MCP", exact: true }).click();
     const mcpPanel = await page.getByLabel("MCP connection").textContent();
-    expect(mcpPanel).toContain("Connect MCP");
+    expect(mcpPanel).toContain("Agent connection");
     expect(mcpPanel).toContain("mcpServers");
     expect(mcpPanel).not.toContain(mcpConfigPath);
     expect(await page.locator(".rail").count()).toBe(0);
+    await page.getByRole("button", { name: "Close side panel" }).click();
+    expect(await page.locator(".inspector").count()).toBe(0);
 
     await page.getByRole("button", { name: "New Session" }).click();
     await waitForPageText(page, ".status-strip", "READY");
@@ -148,7 +152,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     await page.getByLabel("READY command composer").fill(multilineCommand);
     expect(await page.getByLabel("READY command composer").inputValue()).toBe(multilineCommand);
     await page.getByLabel("READY command composer").press("Enter");
-    await waitForPageText(page, ".timeline", "execution.completed");
+    await waitForPageText(page, '[data-testid="screen-reader-output"]', "export ITERM_M5=shared");
     await waitForPageText(page, ".status-strip", "READY");
     const firstScreen = await page.getByTestId("screen-reader-output").textContent();
     expect(firstScreen?.replace(/\n/gu, "")).toContain(`cd "${join(workspace, "subdir")}"`);
@@ -244,6 +248,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
       `PWD=${join(workspace, "subdir")}`,
     );
     await waitForPageText(page, '[data-testid="screen-reader-output"]', "ENV=shared");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
     await waitForPageText(page, ".timeline", "human:");
     await waitForPageText(page, ".timeline", "agent:agent-m5-browser");
 
@@ -251,6 +256,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     await page.reload({ waitUntil: "networkidle" });
     await waitForPageText(page, ".connection", "live");
     await waitForPageText(page, '[data-testid="screen-reader-output"]', "ENV=shared");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
     await waitForPageText(page, ".timeline", "execution.completed");
     const cursorAfterReload = await page.locator(".status-strip").textContent();
     expect(cursorAfterReload).not.toBeNull();
@@ -445,6 +451,15 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
       sessionId: session.id,
     });
 
+    await page.getByRole("button", { name: "Session", exact: true }).click();
+    page.once("dialog", async (dialog) => {
+      expect(dialog.message()).toContain("stop its running process");
+      await dialog.dismiss();
+    });
+    await page.getByRole("button", { name: "Close Session" }).click();
+    await waitForPageText(page, ".status-strip", "RUNNING");
+
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
     await page.getByLabel("Columns").fill("96");
     await page.getByLabel("Rows").fill("30");
     await page.getByRole("button", { name: "Resize canonical PTY" }).click();
@@ -603,7 +618,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     await waitForPageText(page, ".checkpoint-panel", "v2");
     await waitForPageText(page, ".checkpoint-panel", restoredCwd);
     await waitForPageText(page, ".checkpoint-panel", "ITERM_M7_SAFE");
-    await waitForPageText(page, ".checkpoint-warning", "does not copy processes");
+    await waitForPageText(page, ".checkpoint-warning", "Running programs");
 
     const rebuild = page.getByRole("button", {
       name: "Rebuild new Session from checkpoint",

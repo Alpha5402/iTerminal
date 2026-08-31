@@ -193,10 +193,12 @@ pnpm install
 pnpm local
 ```
 
-Open the exact `consoleUrl` from the final `iterminal.local.ready` JSON line. In the Console's right
-inspector, **Connect MCP** copies the complete `mcpServers` JSON directly; no config-file lookup is
-needed. Treat the copied configuration as credential material. Press Ctrl+C once to drain the
-Runtime and stop the managed stack while preserving its PostgreSQL volume.
+Open the exact `consoleUrl` from the final `iterminal.local.ready` JSON line. Use **Connect MCP** in
+the Console toolbar to open the contextual side panel and copy the complete `mcpServers` JSON; no
+config-file lookup is needed. The terminal stays full width until a tool is opened, while pending
+Agent approvals and broken-Session recovery open their relevant panel automatically. Treat the
+copied configuration as credential material. Press Ctrl+C once to drain the Runtime and stop the
+managed stack while preserving its PostgreSQL volume.
 
 See the [local durable quickstart](./docs/operations/local-quickstart.md) for external PostgreSQL,
 configuration, shutdown, recovery, and the deliberate single-Runtime boundary.
