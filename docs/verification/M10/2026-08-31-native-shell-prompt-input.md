@@ -63,10 +63,10 @@ following:
    input control.
 6. A RUNNING command printed `Password:` and blocked on a real PTY read. The Console detected the
    prompt, mounted the Human-only password editor geometrically inside `.xterm-screen` at the
-   canonical cursor, and rendered no secret textbox in `.mode-panel`. Enter used the existing
-   SecretInputAction path; the sentinel remained absent from Console text, screen, MCP observation,
-   Action/Event payloads, search, artifacts, and sensitive-input metadata while output redaction was
-   active.
+   canonical cursor, and removed the entire `.mode-panel` while secure editing was active. Enter
+   used the existing SecretInputAction path; the sentinel remained absent from Console text, screen,
+   MCP observation, Action/Event payloads, search, artifacts, and sensitive-input metadata while
+   output redaction was active.
 
 ## Failed attempts and corrections
 

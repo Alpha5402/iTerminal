@@ -1227,7 +1227,8 @@ function App(): React.JSX.Element {
           >
             {browserTerminalMirror}
           </pre>
-          {(sensitiveInput?.status === "ACTIVE" || session?.status !== "READY") && (
+          {(sensitiveInput?.status === "ACTIVE" ||
+            (session?.status !== "READY" && !secureInputVisible)) && (
             <div className="mode-panel">
               {sensitiveInput?.status === "ACTIVE" ? (
                 <div className="secret-channel active" aria-live="polite">
@@ -1269,21 +1270,13 @@ function App(): React.JSX.Element {
                       Send TTY Ctrl+C
                     </button>
                     <button
-                      aria-pressed={secureInputVisible}
                       onClick={() => {
-                        if (secureInputVisible) {
-                          setDismissedSecretPromptKey(secretPromptKey);
-                          setSecureInputRequested(false);
-                          setSecret("");
-                          terminal.current?.focus();
-                        } else {
-                          setDismissedSecretPromptKey(undefined);
-                          setSecureInputRequested(true);
-                        }
+                        setDismissedSecretPromptKey(undefined);
+                        setSecureInputRequested(true);
                       }}
                       type="button"
                     >
-                      {secureInputVisible ? "Leave secure input" : "Enter secure input at cursor"}
+                      Enter secure input at cursor
                     </button>
                     <span>Raw keys become 20 ms InputAction batches.</span>
                   </div>

@@ -301,6 +301,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
         bottomPanelSecretInputs: document.querySelectorAll(
           '.mode-panel [aria-label="Human-only secret input"]',
         ).length,
+        modePanels: document.querySelectorAll(".mode-panel").length,
         insideTerminal:
           screenRect !== undefined &&
           inputRect.left >= screenRect.left - 1 &&
@@ -309,7 +310,11 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
           inputRect.bottom <= screenRect.bottom + 1,
       };
     });
-    expect(securePlacement).toEqual({ bottomPanelSecretInputs: 0, insideTerminal: true });
+    expect(securePlacement).toEqual({
+      bottomPanelSecretInputs: 0,
+      insideTerminal: true,
+      modePanels: 0,
+    });
     const secret = "BROWSER_SECRET_SENTINEL_752c";
     await page.getByLabel("Human-only secret input").fill(secret);
     await page.getByLabel("Human-only secret input").press("Enter");
