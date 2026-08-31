@@ -6,21 +6,24 @@
                  ┌──────────────────────────────────────┐
  Human ─────────▶│                                      │
  Agent ─────────▶│  ACTION RUNTIME  ·  EVENT TIMELINE  │─────────┐
- Scheduler ─────▶│                                      │         │
-                 └──────────────────────────────────────┘         ▼
-                                                           ┌────────────┐
-                                                           │ REAL PTY   │
-                                                           │ REAL SHELL │
-                                                           └─────┬──────┘
-                                                                 ▼
-                                                    one changing environment
+ Scheduler ─────▶│                                      │         ▼
+                 └──────────────────────────────────────┘   ┌────────────┐
+                                                          │ REAL PTY   │
+                                                          │ REAL SHELL │
+                                                          └─────┬──────┘
+                                                                ▼
+                                                   one changing environment
 ```
 
-iTerminal is a local-first terminal runtime where humans and agents are equal actors in the same persistent shell session. They share the same `cwd`, exported environment, foreground process, REPL, terminal screen, and canonical geometry. Neither side gets a hidden bypass: execute, input, Human-only secret input, control, and resize operations enter one structured Action Runtime and leave an attributable event trail.
+iTerminal is a local-first shared terminal runtime for Humans, Agents, and Schedulers. Every actor
+works through the same persistent Shell and sees the effects of everyone else's work: the same
+`cwd`, exported environment, foreground process, REPL, terminal screen, and canonical geometry.
 
-This is not another stateless `exec()` wrapper, and it is not an “agent drives, human takes over” terminal. The hard problem here is coordination around a live, stateful operating-system resource.
+It is not a stateless command runner, a screen-sharing wrapper, or an “Agent drives, Human takes
+over” terminal. It treats the live terminal as a coordinated operating-system resource with
+explicit actions, durable facts, bounded observation, and conservative failure semantics.
 
-## The contract
+## The core contract
 
 ```text
 Session generation N
@@ -29,216 +32,209 @@ Session generation N
             └── zero or one foreground Execution
 ```
 
-- `cd`, `export`, `source`, `nvm use`, and similar mutations happen in the real top-level shell.
-- One session accepts at most one active ExecuteAction. A competing execute fails fast with `PTY_BUSY`.
-- Input and control target an exact execution generation; stale writes are rejected.
-- A versioned input policy and short Human Interaction Guard prevent semantic input races without creating terminal ownership.
-- Human output is live and high-bandwidth. Agent observation is bounded and addressable.
-- An uncertain external side effect becomes `UNKNOWN`; it is never blindly replayed.
-- A lost PTY cannot migrate or resurrect. Rebuild creates a new Session generation from a limited checkpoint.
+- Shell mutations such as `cd`, `export`, `source`, and `nvm use` happen in the real top-level
+  Shell and remain visible to every actor.
+- Execute, Input, Human-only SecretInput, Control, and Resize are immutable, attributable Actions.
+- A Session accepts at most one active ExecuteAction. Contention fails fast with `PTY_BUSY` instead
+  of creating a hidden second Shell.
+- Input and Control target an exact Execution and generation. Stale writes are rejected.
+- Human output is live and high-bandwidth; Agent observation is bounded, versioned, and
+  addressable.
+- An uncertain external side effect becomes `UNKNOWN`. It is never blindly replayed.
+- A lost PTY becomes `BROKEN`. Rebuild and fork create a new PTY from a limited Shell Checkpoint;
+  they never pretend to migrate or resurrect a process tree.
 
 ## Why it is different
 
-Most terminal tools optimize for command execution or remote administration. iTerminal focuses on the shared-runtime semantics between actors:
+Most terminal integrations optimize for issuing commands. iTerminal optimizes for safely sharing
+one stateful terminal between independent actors.
 
-| Concern      | iTerminal choice                                                    |
-| ------------ | ------------------------------------------------------------------- |
-| Environment  | One real persistent shell per session generation                    |
-| Coordination | Structured Actions plus versioned policy and short Human Guards     |
-| Contention   | Fail fast with `PTY_BUSY`; fork a session for parallel work         |
-| Freshness    | Session generation, target execution, and screen version checks     |
-| Observation  | Append-only events plus a versioned virtual screen                  |
-| Recovery     | Durable BROKEN evidence; explicit rebuild creates a new Session/PTY |
-| Reliability  | PostgreSQL Outbox + RabbitMQ wake-up + Inbox; no exactly-once claim |
+| Concern      | iTerminal's choice                                                                        |
+| ------------ | ----------------------------------------------------------------------------------------- |
+| Shared state | One real persistent Shell per Session generation                                          |
+| Actors       | Human, Agent, Scheduler, and System are first-class identities with explicit capabilities |
+| Coordination | Structured Actions, versioned interaction policy, and short Human Interaction Guards      |
+| Contention   | Fail fast on one busy Session; fork a new Session when parallel work is intentional       |
+| Freshness    | Check generation, target Execution, expected version, screen version, and Session fence   |
+| Observation  | Combine an append-only Event timeline with one bounded, versioned Virtual Screen          |
+| Recovery     | Preserve `BROKEN`/`UNKNOWN` evidence and require explicit rebuild into a new PTY          |
+| Reliability  | PostgreSQL is durable truth; RabbitMQ is an at-least-once wake-up plane, not truth        |
 
-## Current status
+The result is a terminal collaboration model in which no adapter owns a private execution path and
+no viewer silently changes the PTY for everyone else.
 
-**M5 and M6.6 pass real L3 shared-transport paths: a headless Chrome Human Console and official MCP SDK Agent share one PostgreSQL-backed zsh, cwd/env, Python REPL, Interaction Guard, screen, attributed Timeline, and versioned canonical PTY geometry. M7.2 adds explicit Browser Human rebuild from a durable historical checkpoint. M9.18 closes the defined local M9 L4 failure/pressure gate with eight Runtime/Guardian pairs, 1,043 rolling replacements, 33,400 unique Sessions, and an unshortened 30-minute PostgreSQL/node-pty/zsh soak. M10.1 adds L2 explicit capability admission and immutable PostgreSQL Actor identity; M10.2 adds L2 signed, expiring, operation- and Actor-scoped Runtime RPC grants. M10.3b adds an L3 durable one-time Agent Execute Approval path. M10.4 adds an L3 Human-only secret-input path whose metadata-only Action and fail-closed sensitive period suppress raw PTY output before Runtime persistence and observation. M10.5 adds L2 PostgreSQL-authoritative Artifact storage bounds; M10.6 bounds durable PTY output coalescing; M10.7 adds cursor-safe Event retention. M10.8–M10.11 close local Console ingress, credential diagnostics, layered authorization, and hostile local input/resource boundaries. M10.12 adds dependency-aware bounded retention for terminal Approval/Action-family/published-Outbox/completed-Inbox facts plus a real `pg_database_size` warning/critical signal. M10.13 adds a real one-command durable PostgreSQL + Runtime + Console path and private copyable MCP configuration, including Ctrl+C-safe detached Guardian shutdown. Actor/Session lineage lifecycle, export/legal hold, external physical disk quota, clean-machine/platform/client matrices, sustained dogfood, and repository-wide release L4 remain open.**
-
-Real local bash and zsh PTY scenarios prove command boundaries, shared state, fail-fast Busy, structured Input/Control/Resize, stale-target rejection, marker-spoof isolation, large output, and Ctrl+C recovery. With `ITERM_DATABASE_URL`, the live daemon commits Action admission before PTY delivery, sends attributed output through a bounded per-Session ingest loop, serves durable cursors, and marks a `SIGKILL`-lost owner generation `BROKEN/UNKNOWN` on restart. M5 adds a loopback-only Fastify adapter and React+xterm.js page. M6.1–M6.7 provide the shared headless screen, bounded reads/waits/diffs/styles, generation-scoped interaction policy, controlled geometry, and explainable `terminal_state` evidence. M7.1/M7.2 add exact checkpoint CAS, bounded Shell-context reconstruction, and explicit historical rebuild. M10.3 adds optional/required Agent Execute Approval with 30-second–30-minute TTL, exact proposed-Action binding, Human-only versioned decisions, one-time atomic consumption, Agent-isolated reads, and no command duplication in Approval Event payloads. M10.4 adds explicit Human begin/finish, exact-Execution sensitive state, ordinary-Input/new-Execute blocking, retained Human Ctrl+C, metadata-only durability, and one fixed redaction notice before every Runtime output consumer. It does not claim OS swap/core protection or taint-track output after redaction ends. Viewer layout never owns PTY geometry. Stable and heuristic labels remain explicitly different from prompt readiness, authorization, completion, Approval, and secret-channel state. OpenCode and Claude Code handshakes also pass, but no model-driven Agent has been authorized. Cross-owner hydration/fencing, broader TUI/cross-browser/style parity, daemon-restart durable waits, and remote authentication remain incomplete.
-
-M8.2 keeps RabbitMQ as an at-least-once wake-up plane and adds a separately supervised Execution Worker. M8.3 extends the conservative write-attempt boundary to Input/Control and rate-limits NACK/requeue when retry publication is unavailable. M8.4 bounds unpublished Outbox rows and returns retryable `BACKPRESSURE` before reserving a Session. M8.5 adds bounded RabbitMQ publisher/consumer reconnect supervision. M8.6 treats PostgreSQL loss as an owner-wide safety event: a health probe closes every owner PTY, degraded RPC admits nothing, and Pool recovery cannot restore readiness until durable generations converge to `BROKEN/UNKNOWN`. M8.7 gives the standalone relay and Worker the same bounded database connectivity lifecycle. M8.8 adds explicit AMQP heartbeat and database query deadlines, then proves recovery through a TCP proxy that silently drops PostgreSQL/RabbitMQ bytes without closing sockets. M8.9 adds ordered broker endpoint rotation and proves progress through an actual three-node quorum queue leader election while the failed leader remains down. Worker loss before RPC is retried, while Runtime loss after any PTY write attempt is never blindly replayed. This is not an exactly-once claim; asymmetric or minority partitions, correlated outages, and long-soak M8 gates remain open.
-
-M9.1 adds a PostgreSQL Runtime owner registry with stable logical owner IDs, boot-unique instance IDs, monotonic registry epochs, database-time heartbeat leases, drain/stop lifecycle, and stale-identity rejection. Registration happens before durable recovery, so a conflicting same-owner daemon cannot break the live owner's Sessions; loss of the registered identity conservatively destroys local PTY state. M9.2 adds one stable local Unix Router that resolves durable Session/Execution owners, excludes draining owners from placement, forwards exact calls to active/draining daemons, supports an explicit owner-agnostic Execution Worker mode, and preserves `DELIVERY_UNKNOWN` after uncertain writes. M9.3 adds generation-scoped Session leases with globally monotonic fencing tokens, exact-set renewal capped by owner expiry, transactional close/broken release, and current-owner + Session-fence validation for every live durable mutation. Execution transitions additionally use independent expected versions. M9.4 serializes short PostgreSQL placement claims across Router processes, balances attempt counts across ACTIVE owners, excludes DRAINING owners, and admits durable Actor/Session Actions through configurable database-time fixed windows in the same transaction as state mutation. `RATE_LIMITED` is retryable with a database-derived delay; idempotent replay and rollback consume no quota. M9.5 composes one independent Router and three independent Runtime processes: Router `SIGKILL` is stateless, Runtime `SIGKILL` leaves only `BROKEN/UNKNOWN` durable history, same-owner replacement advances registry epoch without taking over the old PTY, and graceful `SIGTERM` stops later placement. M9.6 isolates one Runtime behind a silent PostgreSQL blackhole: only that owner trips its durability circuit and expires from placement, healthy owners continue serving, stale TCP streams are reset before reconnect, and recovery preserves old `BROKEN/UNKNOWN` history while admitting only a new Session/PTY. M9.7 kills independent Routers after a committed placement claim and after a successful idempotent owner mutation: the claim remains an attempt without a ghost Session, while the mutation settles through its original idempotency key to one Action, one Execution, and one observed Shell effect. M9.8 gives root `session.create` a durable global idempotency intent: placement and exact owner incarnation are claimed once, the owner transaction atomically binds one Session ID, post-forward Router response loss replays that Session, conflicting payload reuse is rejected, and concurrent Routers do not create a second PTY. M9.9 isolates one Router behind a silent PostgreSQL blackhole: it returns bounded, route-phase `RUNTIME_UNAVAILABLE` before owner forwarding while a healthy Router and both owners continue; cutting stale streams restores the same Router process and exact-key creation without an extra placement. M9.10 supervises Router PostgreSQL cold start: the stable socket listens in degraded mode, migration/health retry stays bounded, requests fail before route/owner work, and the same process transitions to READY after connectivity returns. M9.11 adds a PostgreSQL-authoritative root-create retention/capacity policy: existing work settles at capacity, active/live work is pinned, terminal/stale intents are reclaimed in bounded batches, and expired keys start a new Session contract. M9.12 persists `DRAINING` before shutdown, waits within one deadline for exact-owner pre-drain creation intents, gracefully drains accepted RPC responses, then closes Sessions and persists `STOPPED`; timeout never reassigns exact-owner work. M9.13 repeats two full A/B/C drain-and-replacement cycles during 48 concurrent root creates: all keys bind distinct Sessions, every round retains healthy-owner zsh progress, and final replacements are ACTIVE at epoch 3. M9.14 makes database-time expiry an atomic heartbeat/drain/stop fence: a `SIGSTOP`-starved owner cannot transiently revive routing, loses its old PTY, and returns only through full reconcile recovery while a healthy owner continues. M9.15 adds bounded relative capacity weights and atomically schedules by normalized historical placement debt; real weights 1:2:3 converge to 6/12/18 across drain and replacement. M9.16 adds primary-only ordered PostgreSQL endpoints and proves a reachable synchronous minority fails closed; after the external control plane stops the former primary and promotes a quorum-backed standby, the same Runtime/Router processes reconcile `BROKEN/UNKNOWN` and admit only a new PTY. M9.17 adds one independent host-local Guardian per durable Runtime: successful database lease renewal arms it, Runtime loss freezes and terminates the registered PTY process tree before user code can advance, and PostgreSQL expires frozen idle transactions so a replacement can reconcile `BROKEN/UNKNOWN`. M9.18 bounds each Runtime database role to two connections by default, then proves eight owners through 1,043 drains/replacements and 33,400 unique Sessions over 30 minutes while connection/RSS/fairness/lease/request invariants remain bounded. Whole-host/VM fencing and repository-wide release gates remain open.
-
-See:
-
-- [TODO.md](./TODO.md) — full roadmap, acceptance gates, failure matrix, and Definition of Done.
-- [Architecture decisions](./docs/adr/README.md) — why the runtime uses these semantics.
-- [Terminology](./docs/TERMINOLOGY.md) — canonical domain language.
-- [M0 spike](./spikes/shell-integration/README.md) — the highest-risk hypothesis and its evidence.
-- [M0 verification](./docs/verification/M0/2026-08-30-shell-integration.md) — environment, scenarios, limits, and L2 boundary.
-- [M1 verification](./docs/verification/M1/2026-08-30-runtime-cli.md) — Runtime/CLI scenarios and remaining durability boundary.
-- [M2 verification](./docs/verification/M2/2026-08-30-postgres-persistence.md) — real PostgreSQL concurrency, rollback, and recovery evidence.
-- [M3 observation architecture](./docs/architecture/bounded-observation.md) — query, cursor, search, and artifact bounds.
-- [M3 verification](./docs/verification/M3/2026-08-30-bounded-observation.md) — real PostgreSQL 100k-line and slow-consumer evidence.
-- [M4 daemon/MCP decision](./docs/adr/0007-runtime-daemon-mcp-bridge.md) — why Client lifecycle cannot own the PTY.
-- [M4 MCP protocol](./docs/protocol/m4-mcp-tools.md) — tools, Actor binding, results, and errors.
-- [M4 verification](./docs/verification/M4/2026-08-30-mcp-adapter.md) — official SDK, OpenCode, Claude Code, and remaining L3 boundary.
-- [M4.1 durability decision](./docs/adr/0008-live-runtime-durable-journal.md) — live PTY truth, write-ahead facts, and the bounded ingest loop.
-- [M4.1 verification](./docs/verification/M4/2026-08-30-durable-runtime.md) — real PostgreSQL/MCP Actions and daemon crash recovery.
-- [M5 Console decision](./docs/adr/0024-human-console-transport.md) — why HTTP/WS remains a loopback Runtime adapter rather than a PTY owner.
-- [M5 Console protocol](./docs/protocol/m5-human-console.md) — HTTP resources, WebSocket sync, browser identity, mode, and Guard contracts.
-- [M5 verification](./docs/verification/M5/2026-08-30-human-console.md) — real Chrome Human Console + official MCP SDK Agent shared cwd/env/REPL evidence.
-- [M10.1 capability decision](./docs/adr/0047-actor-capability-policy-and-immutable-identity.md) — explicit authority, immutable Actor identity, and the remaining authentication boundary.
-- [M10.1 verification](./docs/verification/M10/2026-08-30-actor-capability-policy.md) — real zsh/RPC/MCP/PostgreSQL denial and identity-conflict evidence.
-- [M10.2 authentication decision](./docs/adr/0048-authenticated-runtime-rpc-grants.md) — signed grants, Actor scopes, Router forwarding, and owner re-verification.
-- [M10.2 authentication protocol](./docs/protocol/m10-runtime-rpc-authentication.md) — secret/grant configuration and least-privilege issuance examples.
-- [M10.2 verification](./docs/verification/M10/2026-08-31-runtime-rpc-authentication.md) — real direct zsh, PostgreSQL Router, and RabbitMQ Worker evidence.
-- [M10.3 Approval decision](./docs/adr/0049-durable-agent-execute-approval.md) — exact proposal identity, lifecycle, and atomic one-time consumption.
-- [M10.3 verification](./docs/verification/M10/2026-08-31-durable-execute-approval.md) — PostgreSQL rollback/consumption plus real Browser Human and official MCP Agent evidence.
-- [M10.4 secret-input decision](./docs/adr/0050-human-only-secret-input-and-sensitive-output-redaction.md) — transient delivery, metadata-only durability, and fail-closed output redaction.
-- [M10.4 verification](./docs/verification/M10/2026-08-31-human-secret-input-redaction.md) — real PTY/PostgreSQL plus Browser Human and official MCP sanitized-observation evidence.
-- [M10.5 Artifact storage decision](./docs/adr/0051-bounded-artifact-storage-and-maintenance.md) — database-authoritative logical-byte admission, expiry cleanup, and failure semantics.
-- [M10.5 Artifact storage operations](./docs/operations/artifact-storage.md) — inspect, tune, maintain, and recover without reading content.
-- [M10.5 verification](./docs/verification/M10/2026-08-31-bounded-artifact-storage.md) — real PostgreSQL concurrency, cleanup, and durability-boundary evidence.
-- [M10.6 PTY output coalescing decision](./docs/adr/0052-bounded-pty-output-event-coalescing.md) — separate callback-real-time screen projection from bounded Event journal chunks.
-- [M10.6 verification](./docs/verification/M10/2026-08-31-pty-output-event-coalescing.md) — real node-pty/zsh/PostgreSQL million-byte Artifact evidence.
-- [M10.7 Event retention decision](./docs/adr/0053-bounded-cursor-safe-event-retention.md) and [verification](./docs/verification/M10/2026-08-31-bounded-event-retention.md) — bounded contiguous-prefix cleanup with durable cursor resync watermarks.
-- [Event retention operations](./docs/operations/event-retention.md) — inspect policy/watermarks, run one bounded pass, and recover stale cursors.
-- [M10.8 Console ingress decision](./docs/adr/0054-loopback-console-ingress-boundary.md) and [verification](./docs/verification/M10/2026-08-31-console-ingress-hardening.md) — exact Host/Origin and bounded HTTP/WebSocket resources on the real Browser path.
-- [Console security operations](./docs/operations/console-security.md) — exact local URL, rejection recovery, limits, and explicit non-sandbox boundary.
-- [M10.9 credential-safe diagnostics decision](./docs/adr/0055-credential-safe-operational-diagnostics.md) and [verification](./docs/verification/M10/2026-08-31-credential-safe-diagnostics.md) — opaque grants, fixed RPC failures, and credential-free connection state/retry text.
-- [M10.10 layered authorization decision](./docs/adr/0056-layered-authorization-matrix.md) and [verification](./docs/verification/M10/2026-08-31-layered-authorization-matrix.md) — conjunctive capability, Actor role, interaction, secret, and Agent Approval boundaries.
-- [M10.11 hostile-input decision](./docs/adr/0057-hostile-input-and-ingress-resource-bounds.md) and [verification](./docs/verification/M10/2026-08-31-hostile-input-resource-bounds.md) — bounded Shell framing/barriers, path errors, Console request rates, and Runtime RPC sockets.
-- [M10.12 normalized-fact retention decision](./docs/adr/0058-bounded-normalized-fact-retention-and-database-capacity-signal.md), [retention operations](./docs/operations/durable-fact-retention.md), [capacity operations](./docs/operations/database-capacity.md), and [verification](./docs/verification/M10/2026-08-31-normalized-fact-retention-capacity.md) — dependency-aware terminal-fact cleanup and metadata-only PostgreSQL capacity status.
-- [M6.1 Virtual Screen decision](./docs/adr/0019-live-virtual-screen-projection.md) — why terminal emulation lives once in the Runtime owner behind a pinned adapter.
-- [M6.1 verification](./docs/verification/M6/2026-08-30-live-virtual-screen.md) — real PTY/MCP normal and alternate viewport, Unicode, cursor, version, and guarded-input evidence.
-- [M6.2 reactive observation decision](./docs/adr/0020-reactive-screen-observation.md) — why search is viewport-scoped and waits use parser-driven notifications.
-- [M6.2 verification](./docs/verification/M6/2026-08-30-reactive-screen-observation.md) — real PTY/MCP search, waits, timeout, and RPC disconnect-cancellation evidence.
-- [M6.3 bounded sync decision](./docs/adr/0021-bounded-screen-region-diff.md) — why region coordinates are terminal cells and missing revisions require explicit resync.
-- [M6.3 verification](./docs/verification/M6/2026-08-30-bounded-screen-sync.md) — real PTY/MCP region, row-diff, revision eviction, and resync evidence.
-- [M6.4 styled-cell decision](./docs/adr/0022-stable-screen-cell-style-dto.md) — why xterm attributes become sparse stable domain DTOs and unsupported rich protocols stay explicit.
-- [M6.4 verification](./docs/verification/M6/2026-08-30-styled-screen-cells.md) — real ANSI/VT palette, RGB, SGR, styled-space, and wide-cell evidence through MCP.
-- [M6.5 interaction decision](./docs/adr/0023-generation-scoped-interaction-policy.md) — why policy and short Human Guards coordinate input without ownership.
-- [M6.5 verification](./docs/verification/M6/2026-08-30-interaction-guard.md) — real PostgreSQL/PTY/Human RPC/official MCP policy and Guard evidence.
-- [M6.6 geometry decision](./docs/adr/0025-controlled-terminal-geometry.md) — why the Runtime owns one versioned geometry and every resize is an Action.
-- [M6.6 verification](./docs/verification/M6/2026-08-30-controlled-terminal-geometry.md) — real Chrome Human + official MCP Agent resize, SIGWINCH, CAS, reflow, resync, and durable attribution evidence.
-- [M6.7 terminal-state decision](./docs/adr/0026-bounded-terminal-state-evidence.md) — why terminal classification is bounded advisory evidence rather than a new source of truth.
-- [M6.7 verification](./docs/verification/M6/2026-08-30-terminal-state-evidence.md) — real bash/zsh, REPL, editor, pager, monitor, confirmation, password-like, and spoof fixtures through official MCP.
-- [M7.1 checkpoint/fork decision](./docs/adr/0027-versioned-shell-checkpoint-fork.md) — why fork is a versioned filtered rebuild rather than a PTY/process clone.
-- [M7.1 verification](./docs/verification/M7/2026-08-30-checkpoint-fork.md) — real bash/zsh, official MCP, PostgreSQL lineage/idempotency, READY/busy/BROKEN, and invalid-cwd evidence.
-- [M7.2 durable rebuild decision](./docs/adr/0028-durable-broken-session-rebuild-projection.md) — why a fresh daemon hydrates only bounded `BROKEN` reconstruction evidence, never a fake live PTY.
-- [M7.2 verification](./docs/verification/M7/2026-08-30-durable-human-rebuild.md) — real Chrome Human inspection, stale acknowledgement, same-owner historical hydration, new zsh/PTY, `git status`, lineage, and attribution evidence.
-- [M8.1 messaging decision](./docs/adr/0009-outbox-rabbitmq-inbox.md) — why confirms, ACKs, Inbox leases, and DB rechecks are separate boundaries.
-- [M8.1 verification](./docs/verification/M8/2026-08-30-reliable-messaging.md) — real PostgreSQL/RabbitMQ duplicate, retry, DLQ, and relay lifecycle evidence.
-- [M9.1 owner registry decision](./docs/adr/0029-runtime-owner-registry-and-central-router.md) — why owner, boot instance, registry epoch, and later Session fencing are separate facts.
-- [M9.1 verification](./docs/verification/M9/2026-08-30-runtime-owner-registry.md) — real PostgreSQL/PTY conflict, heartbeat, drain/stop, expiry, concurrent replacement, and stale-identity evidence.
-- [M9.2 Router decision](./docs/adr/0030-central-runtime-router-forwarding.md) — stable RPC reuse, database-authoritative route selection, and fail-closed forwarding semantics.
-- [M9.2 verification](./docs/verification/M9/2026-08-30-central-runtime-router.md) — official MCP, Router-mode queue Worker, two Runtime owners, drain, missing route, and uncertain delivery evidence.
-- [M9.3 Session fencing decision](./docs/adr/0031-generation-scoped-session-fencing.md) — why owner incarnation, Session fence, and Execution expected version are three separate guarantees.
-- [M9.3 verification](./docs/verification/M9/2026-08-30-session-fencing.md) — real PostgreSQL/PTY renewal, stale-write rejection, lease revocation, owner replacement, recovery, and regression evidence.
-- [M9.4 placement/rate-limit decision](./docs/adr/0032-atomic-placement-and-durable-action-rate-limits.md) — why placement is an atomic attempt claim and rate limits belong inside durable Action admission.
-- [M9.4 verification](./docs/verification/M9/2026-08-30-fair-placement-rate-limits.md) — three real Runtime owners, concurrent 4/4/4 placement, drain, cross-owner Actor limits, Session limits, replay, rollback, and reset evidence.
-- [M9.5 process-chaos decision](./docs/adr/0033-independent-process-owner-failure-recovery.md) — why Router restart, Runtime replacement, and graceful drain preserve old-generation fencing.
-- [M9.5 verification](./docs/verification/M9/2026-08-30-independent-process-chaos.md) — independent Router/Runtime processes, `SIGKILL`, replacement epoch, `BROKEN/UNKNOWN`, new PTY-only recovery, and `SIGTERM` stop evidence.
-- [M9.6 partition decision](./docs/adr/0034-asymmetric-owner-database-partition.md) and [verification](./docs/verification/M9/2026-08-30-asymmetric-owner-partition.md) — isolate one owner's silent PostgreSQL blackhole while healthy owners continue.
-- [M9.7 Router crash decision](./docs/adr/0035-router-in-flight-crash-boundaries.md) and [verification](./docs/verification/M9/2026-08-30-router-in-flight-crash.md) — preserve claim and idempotent mutation truth across in-flight Router `SIGKILL`.
-- [M9.8 root creation decision](./docs/adr/0036-durable-root-session-idempotency.md) and [verification](./docs/verification/M9/2026-08-30-root-session-idempotency.md) — settle post-forward response loss and concurrent Router replay to one durable Session.
-- [M9.9 Router partition decision](./docs/adr/0037-router-database-partition-isolation.md) and [verification](./docs/verification/M9/2026-08-30-router-database-partition.md) — fail one database-isolated Router closed while healthy Routers and owners continue.
-- [M9.10 Router cold-start decision](./docs/adr/0038-router-cold-start-database-supervision.md) and [verification](./docs/verification/M9/2026-08-30-router-cold-start-recovery.md) — listen degraded, retry PostgreSQL, and recover the same Router process without stale routing.
-- [M9.11 creation-retention decision](./docs/adr/0039-bounded-session-creation-idempotency.md) and [verification](./docs/verification/M9/2026-08-30-session-creation-retention.md) — bound hostile root keys without deleting active Session or live-owner settlement truth.
-- [M9.12 drain-settlement decision](./docs/adr/0040-bounded-runtime-drain-settlement.md) and [verification](./docs/verification/M9/2026-08-30-runtime-drain-settlement.md) — settle a placement committed before `DRAINING` and drain its response before Runtime stop.
-- [M9.13 rolling-drain decision](./docs/adr/0041-repeated-rolling-owner-drain.md) and [verification](./docs/verification/M9/2026-08-30-repeated-rolling-drain.md) — preserve unique root-create settlement and healthy-owner progress across six drain/replacement rounds.
-- [M9.14 CPU-starvation decision](./docs/adr/0042-expired-owner-heartbeat-recovery.md) and [verification](./docs/verification/M9/2026-08-30-cpu-starved-owner.md) — reject expired heartbeat revival and require full old-PTY reconciliation before same-process recovery.
-- [M9.15 capacity-weight decision](./docs/adr/0043-capacity-weighted-runtime-placement.md) and [verification](./docs/verification/M9/2026-08-30-capacity-weighted-placement.md) — preserve exact 1:2:3 relative placement through drain, replacement, and real zsh work.
-- [M9.16 PostgreSQL quorum decision](./docs/adr/0044-postgres-quorum-primary-failover.md) and [verification](./docs/verification/M9/2026-08-30-postgres-quorum-failover.md) — fail a reachable synchronous minority closed, then follow an externally fenced and promoted primary without reviving the old PTY.
-- [M9.17 Process Guardian decision](./docs/adr/0045-host-local-process-guardian.md) and [verification](./docs/verification/M9/2026-08-30-host-local-process-reclamation.md) — reclaim a stopped Runtime's foreground/background PTY process tree and frozen database transaction before replacement recovery.
-- [M9.18 rolling-soak decision](./docs/adr/0046-bounded-postgres-pools-and-rolling-soak.md) and [verification](./docs/verification/M9/2026-08-30-high-cardinality-rolling-soak.md) — bound per-Runtime PostgreSQL connections and sustain eight-owner rolling replacement for 30 minutes.
-- [M8.2 dispatch decision](./docs/adr/0010-owner-local-queue-dispatch.md) — owner-local RPC, dispatch idempotency, and PTY write uncertainty.
-- [M8.2 verification](./docs/verification/M8/2026-08-30-owner-dispatch.md) — real queue-driven zsh and Worker/Runtime `SIGKILL` evidence.
-- [M8.3 interaction decision](./docs/adr/0011-interaction-write-uncertainty.md) — durable Input/Control intent and terminal uncertainty.
-- [M8.3 retry-outage decision](./docs/adr/0012-retry-publish-outage-backoff.md) — preserving the original delivery without a hot loop.
-- [M8.3 verification](./docs/verification/M8/2026-08-30-interaction-crash-retry-outage.md) — real PTY write-after-`SIGKILL` and retry-exchange outage evidence.
-- [M8.4 admission decision](./docs/adr/0013-admission-outbox-backpressure.md) — bounded pending delivery, retryable pressure, and database timeout semantics.
-- [M8.4 verification](./docs/verification/M8/2026-08-30-admission-backpressure.md) — real pre-commit crash, concurrent backlog, RabbitMQ drain, and PostgreSQL lock evidence.
-- [M8.5 reconnect decision](./docs/adr/0014-rabbitmq-reconnect-supervision.md) — why reconnect restores transport availability without replaying ambiguous effects.
-- [M8.5 verification](./docs/verification/M8/2026-08-30-rabbitmq-process-reconnect.md) — real broker process restart, cold-start recovery, and exactly-once-claim boundary evidence.
-- [M8.6 PostgreSQL decision](./docs/adr/0015-postgres-owner-circuit-reconciliation.md) — why database loss breaks the whole Runtime owner and recovery must reconcile first.
-- [M8.6 verification](./docs/verification/M8/2026-08-30-postgres-process-recovery.md) — real database process restart, owner-wide PTY loss, Pool reconnect, and cold-start evidence.
-- [M8.7 messaging-loop decision](./docs/adr/0016-messaging-loop-postgres-supervision.md) — why relay/Worker pause on database loss and resume from durable leases.
-- [M8.7 verification](./docs/verification/M8/2026-08-30-postgres-loop-recovery.md) — real relay/Worker child-process survival, cold start, and post-recovery dispatch evidence.
-- [M8.8 network decision](./docs/adr/0017-network-blackhole-liveness.md) — why established sockets need heartbeat/query deadlines under silent packet loss.
-- [M8.8 verification](./docs/verification/M8/2026-08-30-network-blackhole-recovery.md) — real TCP byte-drop, bounded detection, durable recovery, and no duplicate PTY write evidence.
-- [M8.9 quorum decision](./docs/adr/0018-rabbitmq-quorum-endpoint-failover.md) — why broker-side election must be paired with client endpoint rotation.
-- [M8.9 verification](./docs/verification/M8/2026-08-30-rabbitmq-quorum-failover.md) — actual leader discovery/stop, replacement election, pending Outbox completion, and no duplicate PTY write evidence.
-
-## Planned shape
+## Architecture
 
 ```mermaid
 flowchart LR
-    H[Human Console] --> A[Action Service]
-    M[MCP Agent] --> A
-    A --> D[(PostgreSQL)]
-    A --> R[Session Router]
-    R --> E[Session Executor]
-    E --> P[Persistent PTY + Shell]
-    P --> V[Event Ingestor]
+    H[Human Console] --> HA[HTTP / WebSocket adapter]
+    M[MCP client] --> MA[stdio MCP adapter]
+    C[CLI / Scheduler] --> CA[Application adapter]
+
+    HA --> U[Runtime RPC or Router]
+    MA --> U
+    CA --> U
+
+    U --> R[Runtime owner]
+    R --> A[Application Action service]
+    A --> P[Persistent PTY + Shell]
     P --> S[Virtual Screen]
-    V --> D
+    P --> E[Event and Artifact ingest]
+    A <--> D[(PostgreSQL)]
+    E --> D
+
+    D --> O[Transactional Outbox]
+    O -. optional queue topology .-> Q[(RabbitMQ)]
+    Q --> W[Execution Worker]
+    W --> U
 ```
 
-The codebase will remain a modular monolith until the runtime semantics are proven. RabbitMQ and multi-worker ownership appear only after durable state, crash semantics, and owner routing have evidence.
+| Layer                | Responsibility                                                                                           |
+| -------------------- | -------------------------------------------------------------------------------------------------------- |
+| Human Console        | Loopback-only React + xterm.js interface with live output, Timeline, approvals, and guarded interaction  |
+| MCP adapter          | Bounded Agent tools over stdio; its lifecycle never owns the PTY                                         |
+| Runtime RPC / Router | Authenticates scoped grants and either reaches one Runtime directly or resolves the durable owner route  |
+| Runtime owner        | Owns the live PTY, Shell integration channel, Virtual Screen, and application state machine              |
+| PostgreSQL           | Stores accepted and observed facts, identities, leases, fences, checkpoints, cursors, and delivery state |
+| Messaging            | Relays committed Outbox work through RabbitMQ and deduplicates consumers with an Inbox                   |
+| Process Guardian     | Reclaims the registered local PTY process tree if a durable Runtime becomes unreachable                  |
 
-## Development
+The default local path deliberately uses one PostgreSQL-backed Runtime with immediate dispatch. The
+same contracts also support an explicit Router, multiple Runtime owners, RabbitMQ relay, and
+Execution Workers without making the queue or Router the owner of terminal truth.
 
-Prerequisites:
+## Product highlights
 
-- Node.js 22 or newer
-- pnpm 10
-- macOS or Linux for the PTY spike
-- bash and/or zsh
+### One changing environment
 
-After dependencies are installed:
+Humans and Agents collaborate inside the same real Shell rather than exchanging isolated command
+results. Stateful workflows—REPLs, editors, pagers, foreground jobs, environment setup, and job
+control—remain part of the shared context.
 
-```bash
+### Actions, Executions, and observations stay separate
+
+An Action is what an Actor requested. An Execution is the observed attempt to run an ExecuteAction.
+Events, Artifacts, and the Virtual Screen are observations. Keeping these facts separate avoids
+turning “request accepted,” “bytes written,” “output observed,” and “program completed” into one
+misleading success flag.
+
+### Human bandwidth without unbounded Agent context
+
+The browser receives a live terminal stream. Agents use bounded screen reads, regions, diffs,
+searches, waits, styled cells, terminal-state evidence, and durable Event cursors. Missing screen
+history or expired Event history requires explicit resynchronization rather than returning a
+plausible partial answer.
+
+### Collaboration without terminal ownership
+
+Versioned Input Policy and short Human Interaction Guards coordinate semantically sensitive input.
+They do not create a long-lived “interactive mode” owner. Canonical rows and columns belong to the
+Runtime, so one viewer cannot resize only its private interpretation of the terminal.
+
+### Conservative recovery
+
+Runtime identity, owner epochs, Session leases, monotonic fencing tokens, and independent Execution
+versions reject stale mutations. Database loss breaks the affected owner until its live state is
+reconciled. A Runtime or Router crash cannot justify replaying a write whose Shell effect is
+uncertain.
+
+### Explicit scale topology
+
+For larger local deployments, durable root-creation intent, atomic placement claims,
+capacity-weighted routing, database-time rate limits, graceful drain, and owner-local dispatch allow
+multiple Runtime processes without claiming live PTY migration or exactly-once side effects.
+
+### Bounded durable history
+
+PTY output coalescing, Artifact budgets, cursor-safe Event retention, dependency-aware fact cleanup,
+and database-capacity signals prevent “append-only” from quietly becoming “unbounded forever.”
+
+## Security model
+
+iTerminal uses conjunctive authorization: Actor capability, Actor role, interaction policy or Guard,
+operation-scoped Runtime RPC grant, and—where configured—Human Approval must all agree.
+
+- Runtime RPC grants are signed, expiring, operation-scoped, and bound to an exact Actor or Actor
+  prefix.
+- Agent Execute can require a durable, one-time Human Approval bound to the exact proposed Action.
+- SecretInput is Human-only. Secret bytes are transient, ordinary input is blocked during the
+  sensitive period, and Runtime output is fail-closed redacted before persistence and observation.
+- The Human Console binds to one exact loopback authority and bounds HTTP, WebSocket, request-frame,
+  path, and Shell-integration resources.
+- Operational errors and connection diagnostics do not echo grants or database/broker credentials.
+
+This is a local coordination and accountability boundary, not an OS sandbox. It does not protect
+against hostile code running as the same operating-system user, provide remote multi-user
+authentication, prevent swap/core exposure, or turn Shell commands into safe code.
+
+## Reliability model
+
+PostgreSQL records durable intent and observed facts before or alongside live work. A Transactional
+Outbox, publisher confirms, RabbitMQ delivery, Consumer Inbox, leases, and durable rechecks compose
+an at-least-once wake-up path. They do **not** make PTY writes exactly once.
+
+The Runtime therefore preserves ambiguity instead of hiding it:
+
+- accepted Action does not imply started Execution;
+- attempted delivery does not imply the foreground program consumed the input;
+- broker acknowledgement does not prove a Shell side effect;
+- stale ownership is fenced, but already-issued external side effects cannot be undone;
+- process loss produces durable `BROKEN` and, where necessary, `UNKNOWN` evidence.
+
+## Run the durable local path
+
+Prerequisites are Node.js 22+, pnpm 10, zsh on macOS or Linux, and Docker with Compose unless an
+external writable PostgreSQL primary is supplied.
+
+```sh
+pnpm install
 pnpm local
-# Open the exact consoleUrl and use the private mcpConfigPath from the ready JSON line.
-# Ctrl+C drains Runtime and stops PostgreSQL while preserving the named volume.
-pnpm local:stop # recovery only when a crashed wrapper left managed PostgreSQL running
-
-pnpm verify
-pnpm cli
-# First issue separate MCP, Console, and Worker grants as documented for M10.2.
-ITERM_RPC_AUTH_SECRET="$SERVER_SECRET" ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm daemon
-ITERM_RPC_GRANT="$MCP_GRANT" ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm mcp
-pnpm build:console
-ITERM_RPC_GRANT="$CONSOLE_GRANT" ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm console
-ITERM_DATABASE_URL=postgresql://... ITERM_EXECUTION_DISPATCH=external \
-  ITERM_RPC_AUTH_SECRET="$SERVER_SECRET" ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm daemon
-ITERM_DATABASE_URL=postgresql://... ITERM_RABBITMQ_URL=amqp://... pnpm outbox-relay
-ITERM_DATABASE_URL=postgresql://... ITERM_RABBITMQ_URL=amqp://... \
-  ITERM_RPC_GRANT="$WORKER_GRANT" ITERM_RUNTIME_SOCKET=/tmp/iterminal.sock pnpm execution-worker
-ITERM_DATABASE_URL=postgresql://... ITERM_RPC_AUTH_SECRET="$SERVER_SECRET" \
-  ITERM_ROUTER_SOCKET=/tmp/iterminal-router.sock pnpm router
-ITERM_DATABASE_URL=postgresql://... ITERM_RABBITMQ_URL=amqp://... \
-  ITERM_RPC_GRANT="$WORKER_GRANT" \
-  ITERM_RUNTIME_ROUTING_MODE=router ITERM_RUNTIME_SOCKET=/tmp/iterminal-router.sock \
-  pnpm execution-worker
-pnpm spike:shell -- --shell zsh
-pnpm spike:shell -- --shell bash
-ITERM_DATABASE_URL=postgresql://... pnpm test:m6:interaction
-ITERM_DATABASE_URL=postgresql://... \
-  ITERM_BROWSER_EXECUTABLE='/path/to/Chrome' pnpm test:m5:browser
-ITERM_DATABASE_URL=postgresql://... pnpm test:m9:fairness
-ITERM_DATABASE_URL=postgresql://... pnpm test:m9:process-chaos
-bash scripts/run-m9-postgres-quorum-test.sh
-ITERM_DATABASE_URL=postgresql://... pnpm test:m9:reclamation
-ITERM_DATABASE_URL=postgresql://... pnpm test:m9:rolling:high
-ITERM_DATABASE_URL=postgresql://... pnpm test:m9:rolling:soak
-ITERM_DATABASE_URL=postgresql://... pnpm test:m10:secret
-ITERM_DATABASE_URL=postgresql://... pnpm facts:maintain
-ITERM_DATABASE_URL=postgresql://... pnpm capacity:inspect
 ```
 
-The supported onboarding path is `pnpm local`; see [local durable quickstart](./docs/operations/local-quickstart.md) for its private credential files, external PostgreSQL mode, options, shutdown, and deliberate single-Runtime boundary. The component commands below remain useful for protocol work and queue/router topologies.
+The final `iterminal.local.ready` JSON line contains the exact `consoleUrl` and a private
+`mcpConfigPath`. Treat the generated MCP configuration as credential material. Press Ctrl+C once to
+drain the Runtime and stop the managed stack while preserving its PostgreSQL volume.
 
-The Console defaults to the exact authority `http://127.0.0.1:4173`, refuses non-loopback binding and alternate Host aliases, and is not a remote endpoint; build its static assets before starting it. It bounds local Actor/WebSocket resources and defaults to 600 API requests globally plus 120 per known Actor per 10 seconds, but remains vulnerable to hostile code running as the same OS user. [M10.2 authentication](./docs/protocol/m10-runtime-rpc-authentication.md) shows how to create `SERVER_SECRET` and separate least-privilege `MCP_GRANT`, `CONSOLE_GRANT`, and `WORKER_GRANT` values. Runtime/Router production entrypoints fail without the secret; adapter/Worker entrypoints fail without their grant. Set `ITERM_AGENT_EXECUTE_APPROVAL=required` on every Runtime owner to require one Human Approval for every new Agent `execution.start`; the default is `optional`, and Human/Scheduler/System Execute semantics are unchanged. The plain daemon command above starts explicit in-memory development mode. To run the durable shared path, give the daemon either one `ITERM_DATABASE_URL` or an ordered comma-separated `ITERM_DATABASE_URLS` list, then point Console/MCP at one daemon socket or the Router socket. Configuring both database variables is rejected; list mode admits only an externally authorized writable primary and never promotes a standby or retries a failed SQL transaction. Durable mode defaults to 120 Actor Actions and 240 Session Actions per 1,000 ms; override them with `ITERM_ACTOR_ACTION_RATE_LIMIT`, `ITERM_SESSION_ACTION_RATE_LIMIT`, and `ITERM_ACTION_RATE_LIMIT_WINDOW_MS`. Runtime/Router Unix RPC additionally caps active sockets at 256 and incomplete request framing at five seconds. To run the M8/M9 queue path, also start RabbitMQ, use `ITERM_EXECUTION_DISPATCH=external`, and launch the Outbox relay plus an owner-bound or explicit router-mode Execution Worker. `ITERM_RABBITMQ_URLS` accepts an ordered comma-separated broker list and takes precedence over the single-endpoint fallback. PostgreSQL/RabbitMQ timeout and reconnect variables are documented in the roadmap. Stable owner IDs derive from daemon sockets unless explicitly configured; the Router does not register as an owner. PostgreSQL durability does not sandbox Shell commands or resurrect a lost PTY.
+See the [local durable quickstart](./docs/operations/local-quickstart.md) for external PostgreSQL,
+configuration, shutdown, recovery, and the deliberate single-Runtime boundary.
 
-The repository does not yet have a final license. That decision is intentionally tracked in the roadmap instead of being silently assumed.
+## Deployment shapes
+
+| Shape                  | Best for                                            | Composition                                                                |
+| ---------------------- | --------------------------------------------------- | -------------------------------------------------------------------------- |
+| Local quickstart       | Evaluation and ordinary local development           | PostgreSQL + one Runtime + Human Console + generated MCP configuration     |
+| Direct durable Runtime | Protocol and component work                         | Explicit grants and adapters connected to one Runtime Unix socket          |
+| Routed queue topology  | Ownership, placement, delivery, and failure testing | PostgreSQL + Router + multiple Runtime owners + RabbitMQ + relay + Workers |
+
+These are local deployment shapes. Remote bind, TLS termination, distributed host fencing, and live
+PTY migration are intentionally outside the current trust model.
+
+## Documentation
+
+- [Roadmap and acceptance gates](./TODO.md) — changing scope, remaining work, failure matrix, and
+  Definition of Done.
+- [Architecture Decision Records](./docs/adr/README.md) — the reasoning and consequences behind
+  runtime contracts.
+- [Canonical terminology](./docs/TERMINOLOGY.md) — protocol language and forbidden conflations.
+- [Bounded observation](./docs/architecture/bounded-observation.md) — Event, cursor, search, and
+  Artifact boundaries.
+- [PostgreSQL transaction boundary](./docs/architecture/postgres-transaction-boundary.md) — where
+  durable admission and live effects meet.
+- [Shell integration channel](./docs/architecture/shell-integration-control-channel.md) — how the
+  Runtime observes command boundaries without trusting visible terminal text.
+- [MCP protocol](./docs/protocol/m4-mcp-tools.md), [Human Console protocol](./docs/protocol/m5-human-console.md),
+  and [Runtime RPC authentication](./docs/protocol/m10-runtime-rpc-authentication.md) — adapter and
+  authentication contracts.
+- [Operations guides](./docs/operations/) — quickstart, retention, storage, capacity, and Console
+  security.
+- [Verification reports](./docs/verification/) — environment-specific evidence, scenarios, and
+  explicit limitations.
 
 ## Honesty over theatre
 
-The README is dramatic. The completion claims are not.
+The tagline may be dramatic. Completion claims are not.
 
-Every milestone uses L0–L4 evidence levels. A green build is not a shared-terminal scenario. A mock client is not a real MCP Agent. A database row is not proof that a shell command ran. The project is complete only when the real Human/Agent path and its failure modes have been exercised end to end.
+The project uses L0–L4 evidence levels. A green build is not a shared-terminal scenario. A mock
+client is not a real MCP client. A database row is not proof that a Shell command ran. Claims belong
+in the roadmap and verification reports, next to the exact environment, real path, failure mode, and
+known boundary that support them.
