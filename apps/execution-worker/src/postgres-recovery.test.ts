@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { PostgresMessagingRepository } from "@iterminal/persistence-postgres";
@@ -354,7 +355,7 @@ async function createFixture(suffix: string): Promise<{
   readonly socketPath: string;
   readonly workspace: string;
 }> {
-  let root = await mkdtemp(join("/private/tmp", `itm8-loop-db-${suffix}-`));
+  let root = await mkdtemp(join(tmpdir(), `itm8-loop-db-${suffix}-`));
   root = await realpath(root);
   const workspace = join(root, "workspace");
   await mkdir(workspace, { recursive: true });

@@ -1,5 +1,7 @@
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type { Actor, ResizeAction, RuntimeError, Session } from "@iterminal/domain";
 import type { RuntimeOwnerRecord } from "@iterminal/application";
@@ -30,7 +32,7 @@ describeDatabase("PostgreSQL controlled terminal geometry", () => {
   beforeEach(async () => {
     await pool.query("TRUNCATE sessions, actors, outbox, runtime_workers RESTART IDENTITY CASCADE");
     owner = await registry.registerOwner({
-      endpoint: "/private/tmp/iterminal-geometry-test.sock",
+      endpoint: join(tmpdir(), "iterminal-geometry-test.sock"),
       instanceId: `geometry_${randomUUID()}`,
       leaseMilliseconds: 60_000,
       ownerId: "owner-postgres-geometry",

@@ -1,6 +1,7 @@
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import type { Session } from "@iterminal/domain";
@@ -60,7 +61,7 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
   afterAll(async () => pool.end());
 
   it("survives Router restart, Runtime SIGKILL replacement, and graceful owner drain without PTY takeover", async () => {
-    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m95-chaos-")));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "itr-m95-chaos-")));
     fixtures.push(root);
     const workspace = join(root, "workspace");
     await mkdir(workspace, { recursive: true });
@@ -254,7 +255,7 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
   }, 120_000);
 
   it("isolates one owner's PostgreSQL blackhole while healthy owners keep routing and placement", async () => {
-    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m96-part-")));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "itr-m96-part-")));
     fixtures.push(root);
     const workspace = join(root, "workspace");
     await mkdir(workspace, { recursive: true });
@@ -379,7 +380,7 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
   }, 120_000);
 
   it("preserves durable claim and idempotent mutation truth across in-flight Router SIGKILL", async () => {
-    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m97-crash-")));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "itr-m97-crash-")));
     fixtures.push(root);
     const workspace = join(root, "workspace");
     await mkdir(workspace, { recursive: true });
@@ -487,7 +488,7 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
   }, 120_000);
 
   it("settles root Session creation exactly once after post-forward Router SIGKILL and concurrent replay", async () => {
-    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m98-create-")));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "itr-m98-create-")));
     fixtures.push(root);
     const workspace = join(root, "workspace");
     await mkdir(workspace, { recursive: true });
@@ -594,7 +595,7 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
   }, 120_000);
 
   it("isolates a Router-only PostgreSQL blackhole while another Router and both owners progress", async () => {
-    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m99-router-part-")));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "itr-m99-router-part-")));
     fixtures.push(root);
     const workspace = join(root, "workspace");
     await mkdir(workspace, { recursive: true });
@@ -721,7 +722,7 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
   }, 120_000);
 
   it("keeps a cold-start Router degraded until PostgreSQL becomes reachable", async () => {
-    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m910-router-cold-")));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "itr-m910-router-cold-")));
     fixtures.push(root);
     const workspace = join(root, "workspace");
     await mkdir(workspace, { recursive: true });
@@ -839,7 +840,7 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
           SET retention_milliseconds = 100, max_requests = 2, cleanup_batch_size = 2
         WHERE scope = 'default'`,
     );
-    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m911-retention-")));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "itr-m911-retention-")));
     fixtures.push(root);
     const workspace = join(root, "workspace");
     await mkdir(workspace, { recursive: true });
@@ -954,7 +955,7 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
   }, 120_000);
 
   it("settles a pre-drain placement before the selected Runtime stops", async () => {
-    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m912-drain-")));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "itr-m912-drain-")));
     fixtures.push(root);
     const workspace = join(root, "workspace");
     await mkdir(workspace, { recursive: true });
@@ -1058,7 +1059,7 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
   }, 120_000);
 
   it("keeps root creation progressing across repeated rolling owner drains", async () => {
-    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m913-rolling-")));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "itr-m913-rolling-")));
     fixtures.push(root);
     const workspace = join(root, "workspace");
     await mkdir(workspace, { recursive: true });
@@ -1218,7 +1219,7 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
   }, 180_000);
 
   it("fences a CPU-starved owner before same-process recovery", async () => {
-    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m914-starved-")));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "itr-m914-starved-")));
     fixtures.push(root);
     const workspace = join(root, "workspace");
     await mkdir(workspace, { recursive: true });
@@ -1344,7 +1345,7 @@ describeDatabase("M9 independent-process multi-owner chaos", () => {
   }, 120_000);
 
   it("preserves capacity-weighted placement across drain and replacement", async () => {
-    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m915-weighted-")));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "itr-m915-weighted-")));
     fixtures.push(root);
     const workspace = join(root, "workspace");
     await mkdir(workspace, { recursive: true });

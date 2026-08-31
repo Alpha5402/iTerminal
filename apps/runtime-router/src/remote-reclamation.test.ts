@@ -1,6 +1,7 @@
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { PostgresRuntimeDurability } from "@iterminal/persistence-postgres";
@@ -58,7 +59,7 @@ describeDatabase("M9.17 host-local remote Runtime reclamation", () => {
   });
 
   it("reclaims the old host process tree before replacement owner recovery", async () => {
-    const root = await realpath(await mkdtemp(join("/private/tmp", "itm9-remote-reclaim-")));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "itm9-remote-reclaim-")));
     fixtures.push(root);
     const workspace = join(root, "workspace");
     const delayedEffect = join(root, "delayed-effect.txt");

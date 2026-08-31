@@ -2,6 +2,7 @@ import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { access, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { OutboxRelay } from "@iterminal/messaging";
@@ -269,7 +270,7 @@ describeAdmission("M8.4 admission outage and Outbox backpressure", () => {
   }, 30_000);
 
   async function createFixture(suffix: string): Promise<Fixture> {
-    let root = await mkdtemp(join("/private/tmp", `ita-${suffix.slice(0, 4)}-`));
+    let root = await mkdtemp(join(tmpdir(), `ita-${suffix.slice(0, 4)}-`));
     root = await realpath(root);
     fixtures.push(root);
     const workspace = join(root, "workspace");

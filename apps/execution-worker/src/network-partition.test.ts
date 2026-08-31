@@ -1,6 +1,7 @@
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { PostgresMessagingRepository } from "@iterminal/persistence-postgres";
@@ -336,7 +337,7 @@ async function createFixture(suffix: string): Promise<{
   readonly socketPath: string;
   readonly workspace: string;
 }> {
-  let root = await mkdtemp(join("/private/tmp", `itm8-net-${suffix}-`));
+  let root = await mkdtemp(join(tmpdir(), `itm8-net-${suffix}-`));
   root = await realpath(root);
   const workspace = join(root, "workspace");
   await mkdir(workspace, { recursive: true });

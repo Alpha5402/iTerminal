@@ -1,5 +1,7 @@
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type {
   DurableExecuteAdmission,
@@ -35,7 +37,7 @@ describeDatabase("M9.3 PostgreSQL Session fencing", () => {
   beforeEach(async () => {
     await pool.query("TRUNCATE sessions, actors, outbox, runtime_workers RESTART IDENTITY CASCADE");
     owner = await registry.registerOwner({
-      endpoint: "/private/tmp/iterminal-m93-persistence.sock",
+      endpoint: join(tmpdir(), "iterminal-m93-persistence.sock"),
       instanceId: `instance_${randomUUID()}`,
       leaseMilliseconds: 60_000,
       ownerId: "owner-m93-persistence",

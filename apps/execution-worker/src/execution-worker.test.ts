@@ -2,6 +2,7 @@ import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { access, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { OutboxRelay } from "@iterminal/messaging";
@@ -328,7 +329,7 @@ describeDispatch("M8.2 owner-local Execution dispatch", () => {
   }, 30_000);
 
   async function createFixture(suffix: string): Promise<Fixture> {
-    let root = await mkdtemp(join("/private/tmp", `itm8-${suffix.slice(0, 8)}-`));
+    let root = await mkdtemp(join(tmpdir(), `itm8-${suffix.slice(0, 8)}-`));
     root = await realpath(root);
     fixtures.push(root);
     const workspace = join(root, "workspace");

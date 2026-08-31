@@ -346,7 +346,7 @@ describe("Runtime RPC signed grants", () => {
       { audience: "runtime-rpc-test", secret },
       new Set(["session.list"]),
     );
-    const client = new UnixRuntimeClient("/private/tmp/runtime.sock", { authorization: token });
+    const client = new UnixRuntimeClient(join(tmpdir(), "runtime.sock"), { authorization: token });
 
     expect(JSON.stringify(grant)).not.toContain(token);
     expect(JSON.stringify(client)).not.toContain(token);

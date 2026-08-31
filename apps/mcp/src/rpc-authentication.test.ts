@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
@@ -13,7 +14,7 @@ const repositoryRoot = resolve(import.meta.dirname, "../../..");
 
 describe("M10.2 authenticated MCP bridge", () => {
   it("binds the configured bridge Actor to an exact grant on a real zsh path", async () => {
-    const root = await realpath(await mkdtemp(join("/private/tmp", "itm10-rpc-mcp-")));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "itm10-rpc-mcp-")));
     const workspace = join(root, "workspace");
     await mkdir(workspace, { recursive: true });
     const secret = randomBytes(32);

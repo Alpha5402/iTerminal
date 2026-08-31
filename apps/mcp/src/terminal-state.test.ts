@@ -155,7 +155,7 @@ describeFixtures("M6.7 bounded terminal-state evidence", () => {
       command: requiredProgram("top"),
       key: "state-top",
     });
-    await waitForText(activeClient, session, "Processes:");
+    await waitUntilRunning(activeClient, monitor.execution.id);
     await expectState(activeClient, session, {
       confidence: "high",
       executionId: monitor.execution.id,

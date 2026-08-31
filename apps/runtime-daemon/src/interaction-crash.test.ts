@@ -2,6 +2,7 @@ import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { PostgresRuntimeDurability } from "@iterminal/persistence-postgres";
@@ -145,7 +146,7 @@ describeDatabase("M8.3 Input/Control crash uncertainty", () => {
   );
 
   async function createFixture(interactionType: string): Promise<Fixture> {
-    let root = await mkdtemp(join("/private/tmp", `iti-${interactionType.slice(0, 3)}-`));
+    let root = await mkdtemp(join(tmpdir(), `iti-${interactionType.slice(0, 3)}-`));
     root = await realpath(root);
     fixtures.push(root);
     const workspace = join(root, "workspace");

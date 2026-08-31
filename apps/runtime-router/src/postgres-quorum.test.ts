@@ -1,6 +1,7 @@
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -57,7 +58,7 @@ describeQuorum("M9.16 PostgreSQL quorum primary failover", () => {
     let promoted: Pool | undefined;
     let standbysPaused = false;
     let formerPrimaryStopped = false;
-    const root = await realpath(await mkdtemp(join("/private/tmp", "itm9-pg-quorum-")));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "itm9-pg-quorum-")));
     fixtures.push(root);
     const workspace = join(root, "workspace");
     const sideEffect = join(root, "side-effect.txt");

@@ -1,5 +1,6 @@
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { access, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -556,9 +557,7 @@ describeDatabase("M9.2 central Runtime Router", () => {
   }, 30_000);
 
   async function fixture(suffix: string): Promise<string> {
-    const root = await realpath(
-      await mkdtemp(join("/private/tmp", `itr-m92-${suffix.slice(0, 4)}-`)),
-    );
+    const root = await realpath(await mkdtemp(join(tmpdir(), `itr-m92-${suffix.slice(0, 4)}-`)));
     fixtures.push(root);
     return root;
   }

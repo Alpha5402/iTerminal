@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
@@ -25,7 +26,7 @@ describeDatabase("M10.2 authenticated central Router forwarding", () => {
       await pool.end();
       throw new Error("M10.2 Router auth test requires the disposable iterminal_test database");
     }
-    const root = await realpath(await mkdtemp(join("/private/tmp", "itm10-rpc-router-")));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "itm10-rpc-router-")));
     const workspace = join(root, "workspace");
     await mkdir(workspace, { recursive: true });
     const secret = randomBytes(32);

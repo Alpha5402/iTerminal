@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { PostgresRuntimeDurability } from "@iterminal/persistence-postgres";
@@ -46,7 +47,7 @@ describeDatabase("M9.2 official MCP Client through central Router", () => {
   afterAll(async () => pool.end());
 
   it("places and operates Sessions on two owners without changing MCP tools", async () => {
-    const root = await realpath(await mkdtemp(join("/private/tmp", "itr-m92-mcp-")));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "itr-m92-mcp-")));
     fixtures.push(root);
     const leftWorkspace = join(root, "left");
     const rightWorkspace = join(root, "right");

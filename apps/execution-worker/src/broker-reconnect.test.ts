@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { OutboxRelay } from "@iterminal/messaging";
@@ -52,7 +53,7 @@ describeOutage("M8.5 RabbitMQ process reconnect", () => {
 
   it("recovers relay and Worker after a broker process restart without duplicate PTY writes", async () => {
     await pool.query("TRUNCATE sessions, actors, outbox, consumer_inbox RESTART IDENTITY CASCADE");
-    let root = await mkdtemp(join("/private/tmp", "itm8-broker-reconnect-"));
+    let root = await mkdtemp(join(tmpdir(), "itm8-broker-reconnect-"));
     root = await realpath(root);
     const workspace = join(root, "workspace");
     const socketPath = join(root, "runtime.sock");
@@ -211,7 +212,7 @@ describeOutage("M8.5 RabbitMQ process reconnect", () => {
         rabbitMqReconnectInitialMilliseconds: 100,
         rabbitMqReconnectMaxMilliseconds: 500,
         rabbitMqUrl: rabbitMqUrl ?? "",
-        runtimeSocketPath: "/private/tmp/iterminal-m8-unused-runtime.sock",
+        runtimeSocketPath: join(tmpdir(), "iterminal-m8-unused-runtime.sock"),
         onRabbitMqConnectionState: (state) => states.push(state),
       });
       await waitFor(() => Promise.resolve(states.some((state) => state.state === "DISCONNECTED")));

@@ -2,6 +2,7 @@ import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { access, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { UnixRuntimeClient } from "@iterminal/runtime-rpc";
@@ -264,7 +265,7 @@ async function createFixture(suffix: string): Promise<{
   readonly socketPath: string;
   readonly workspace: string;
 }> {
-  let root = await mkdtemp(join("/private/tmp", `itm8-postgres-${suffix}-`));
+  let root = await mkdtemp(join(tmpdir(), `itm8-postgres-${suffix}-`));
   root = await realpath(root);
   const workspace = join(root, "workspace");
   await mkdir(workspace, { recursive: true });

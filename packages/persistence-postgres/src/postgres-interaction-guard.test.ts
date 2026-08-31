@@ -1,5 +1,7 @@
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type { Actor, InteractionState, RuntimeError, Session } from "@iterminal/domain";
 import type { RuntimeOwnerRecord } from "@iterminal/application";
@@ -37,7 +39,7 @@ describeDatabase("PostgreSQL Interaction Guard state", () => {
   beforeEach(async () => {
     await pool.query("TRUNCATE sessions, actors, outbox, runtime_workers RESTART IDENTITY CASCADE");
     owner = await registry.registerOwner({
-      endpoint: "/private/tmp/iterminal-guard-test.sock",
+      endpoint: join(tmpdir(), "iterminal-guard-test.sock"),
       instanceId: `guard_${randomUUID()}`,
       leaseMilliseconds: 60_000,
       ownerId: "owner-postgres-guard",

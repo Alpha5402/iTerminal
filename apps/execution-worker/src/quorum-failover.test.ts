@@ -2,6 +2,7 @@ import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
@@ -51,7 +52,7 @@ describeQuorum("M8.9 RabbitMQ quorum leader failover", () => {
 
   it("elects a new leader and completes pending Outbox work without duplicate PTY writes", async () => {
     await pool.query("TRUNCATE sessions, actors, outbox, consumer_inbox RESTART IDENTITY CASCADE");
-    let root = await mkdtemp(join("/private/tmp", "itm8-quorum-"));
+    let root = await mkdtemp(join(tmpdir(), "itm8-quorum-"));
     root = await realpath(root);
     const workspace = join(root, "workspace");
     const socketPath = join(root, "runtime.sock");

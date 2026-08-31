@@ -1,6 +1,7 @@
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { RuntimeError, type Session } from "@iterminal/domain";
@@ -83,7 +84,7 @@ describeRolling(`M9 high-cardinality rolling ${configuration.profile}`, () => {
   it(
     "preserves exact creation, fencing, fairness, progress, and bounded resources",
     async () => {
-      const root = await realpath(await mkdtemp(join("/private/tmp", "itm9-rolling-scale-")));
+      const root = await realpath(await mkdtemp(join(tmpdir(), "itm9-rolling-scale-")));
       fixtures.push(root);
       const workspace = join(root, "workspace");
       await mkdir(workspace, { recursive: true });

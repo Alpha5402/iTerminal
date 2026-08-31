@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
@@ -14,7 +15,7 @@ import { startRuntimeDaemon } from "./server.js";
 
 describe("M10.2 direct Runtime RPC authentication", () => {
   it("rejects an unsigned caller and a body-forged Human before executing a real zsh command", async () => {
-    const root = await realpath(await mkdtemp(join("/private/tmp", "itm10-rpc-direct-")));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "itm10-rpc-direct-")));
     const secret = randomBytes(32);
     const authentication = { audience: "iterminal-m10-direct", secret };
     const daemon = await startRuntimeDaemon({
