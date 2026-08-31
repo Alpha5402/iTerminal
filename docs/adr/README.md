@@ -61,6 +61,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0055](./0055-credential-safe-operational-diagnostics.md)                | Keep grants and connection credentials out of diagnostics  | Accepted for M10.9       |
 | [0056](./0056-layered-authorization-matrix.md)                           | Separate Capability, interaction policy, and Approval      | Accepted for M10.10      |
 | [0057](./0057-hostile-input-and-ingress-resource-bounds.md)              | Bound hostile Shell/path and local ingress resources       | Accepted for M10.11      |
+| [0058][adr-0058]                                                         | Bound normalized facts and signal database capacity        | Accepted for M10.12      |
 
 Statuses:
 
@@ -70,3 +71,5 @@ Statuses:
 - Rejected: considered but intentionally not selected.
 
 Changing an Accepted decision requires a new ADR or an explicit amendment with consequences and migration steps.
+
+[adr-0058]: ./0058-bounded-normalized-fact-retention-and-database-capacity-signal.md

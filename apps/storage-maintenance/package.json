@@ -5,6 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/maintenance.ts",
+    "./database-capacity": "./src/database-capacity.ts",
+    "./durable-facts": "./src/durable-facts.ts",
     "./event-retention": "./src/event-retention.ts"
   },
   "dependencies": {

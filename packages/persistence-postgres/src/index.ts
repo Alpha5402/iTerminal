@@ -7,4 +7,5 @@ export * from "./postgres-runtime-durability.js";
 export * from "./postgres-runtime-owner-registry.js";
 export * from "./postgres-runtime-repository.js";
 export * from "./session-creation-retention.js";
+export * from "./storage-maintenance.js";
 export * from "./supervised-postgres-messaging-repository.js";

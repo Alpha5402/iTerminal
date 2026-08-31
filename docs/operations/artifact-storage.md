@@ -127,11 +127,12 @@ Migration 017 is forward-only during normal operation. Before downgrading:
 An old binary reintroduces unbounded expired-row accumulation and has no aggregate admission gate.
 Rolling back schema protection without stopping writers is unsupported.
 
-## Still required outside M10.5
+## Later boundaries
 
-- Event/Action/Approval/Outbox/Inbox retention and cursor-safe deletion.
+- Event retention is implemented by M10.7. Dependency-aware Action/Approval/Outbox/Inbox retention
+  and a database-capacity signal are implemented by M10.12.
 - Artifact/recording export, legal hold, secure erase, encryption policy, and object-store offload.
-- Whole-database and filesystem capacity monitoring, WAL/backup retention, and disk-full drills.
+- Filesystem/tablespace hard quotas, WAL/backup retention, physical compaction, and disk-full drills.
 
 PTY callback aggregation was subsequently implemented by M10.6; see
 [ADR-0052](../adr/0052-bounded-pty-output-event-coalescing.md). Cross-platform performance and soak

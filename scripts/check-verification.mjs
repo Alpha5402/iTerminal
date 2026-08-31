@@ -78,6 +78,10 @@ const requiredReports = [
     level: "L2",
     path: "docs/verification/M10/2026-08-31-hostile-input-resource-bounds.md",
   },
+  {
+    level: "L2",
+    path: "docs/verification/M10/2026-08-31-normalized-fact-retention-capacity.md",
+  },
 ];
 
 for (const report of requiredReports) {

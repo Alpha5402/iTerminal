@@ -23,6 +23,7 @@ const migrations = [
   { file: "016_sensitive_inputs.sql", version: 16 },
   { file: "017_artifact_storage_budget.sql", version: 17 },
   { file: "018_bounded_event_retention.sql", version: 18 },
+  { file: "019_normalized_fact_retention.sql", version: 19 },
 ] as const;
 
 export async function migrateDatabase(pool: Pool): Promise<void> {

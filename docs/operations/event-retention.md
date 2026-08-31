@@ -126,9 +126,10 @@ writers and maintenance, take a verified backup, and understand that the older q
 consult the watermark. Removing migration 018 protection or serving old readers concurrently can
 silently skip retained history and is unsupported.
 
-## Still required outside M10.7
+## Later boundaries
 
-- Action/Execution/Approval/Outbox/Inbox and other normalized-fact retention.
+- Dependency-aware Action/Execution/Approval/Outbox/Inbox retention and a database-capacity signal
+  are implemented by M10.12.
 - Artifact/recording export, legal hold, secure erase, and archive policy.
-- Whole-database/filesystem capacity alarms, vacuum/WAL/backup policy, disk-full drills, and an
-  always-on scheduler.
+- Filesystem/tablespace hard quotas, vacuum/WAL/backup policy, disk-full drills, remote alert
+  delivery, and an always-on scheduler.
