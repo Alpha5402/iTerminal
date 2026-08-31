@@ -1,5 +1,7 @@
 # iTerminal
 
+[English](./README.md) | [简体中文](./README_zh_CN.md)
+
 > **One shell. Many minds. Every action accounted for.**
 
 ```text
@@ -211,6 +213,8 @@ PTY migration are intentionally outside the current trust model.
 
 ## Documentation
 
+- [Documentation index](./docs/README.md) — curated entry point for architecture, protocols,
+  operations, decisions, and verification evidence.
 - [Roadmap and acceptance gates](./TODO.md) — changing scope, remaining work, failure matrix, and
   Definition of Done.
 - [Architecture Decision Records](./docs/adr/README.md) — the reasoning and consequences behind
@@ -227,7 +231,7 @@ PTY migration are intentionally outside the current trust model.
   authentication contracts.
 - [Operations guides](./docs/operations/) — quickstart, retention, storage, capacity, and Console
   security.
-- [Verification reports](./docs/verification/) — environment-specific evidence, scenarios, and
+- [Verification reports](./docs/verification/README.md) — environment-specific evidence, scenarios, and
   explicit limitations.
 
 ## Honesty over theatre
