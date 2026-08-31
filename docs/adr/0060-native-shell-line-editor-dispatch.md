@@ -34,9 +34,11 @@ The Runtime dispatches an accepted ExecuteAction through a private prompt-time l
 4. The next prompt hook reads and clears the private token, writes the existing OSC barrier into the
    PTY for output ordering, emits `RESULT`, and then emits `READY` with the checkpoint. The adapter
    still requires `PREEXEC`, `RESULT`/`READY`, and the matching PTY barrier before completion.
-5. Managed clean-room profiles use native-shaped prompts (`user@host cwd %/$`) and ordinary `> `
-   continuation prompts. This does not load arbitrary user rc files; commands may still customize
-   the prompt within the persistent Shell.
+5. Managed clean-room profiles use native-shaped prompts (`user@host cwd %/$`) whose cwd segment is
+   the current directory's final component (`%1~` in zsh and `\W` in bash), plus ordinary `> `
+   continuation prompts. This keeps long absolute paths from consuming the command line without
+   changing the full cwd stored in checkpoints. It does not load arbitrary user rc files; commands
+   may still customize the prompt within the persistent Shell.
 
 The private command file is presentation-neutral transport, not a second execution path. The
 Application still owns admission and permits only one active ExecuteAction. Interactive RUNNING
@@ -46,6 +48,8 @@ bytes continue to use InputAction and never invoke the prompt-time binding.
 
 - Human and Agent observations contain the actual submitted command rather than `__it_execute`.
 - Multiline commands remain one line-editor submission and continue to mutate the persistent Shell.
+  The Browser READY editor preserves pasted newline bytes; Enter submits the complete buffer while
+  Shift+Enter inserts a manual newline.
 - Syntax errors still enter `RUNNING` because the binding emits `PREEXEC` before the Shell parser
   accepts the line; prompt return supplies the nonzero result and ordered barrier.
 - The Runtime directory and control resources remain discoverable by deliberately hostile code

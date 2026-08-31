@@ -50,7 +50,7 @@ export function createShellLaunchProfile(
 
 function bashRc(): string {
   return String.raw`
-PS1='\u@\h \w \$ '
+PS1='\u@\h \W \$ '
 PS2='> '
 unset HISTFILE
 builtin history -c
@@ -111,7 +111,7 @@ PROMPT_COMMAND='__it_precmd "$?"'
 
 function zshRc(): string {
   return String.raw`
-PROMPT='%n@%m %~ %# '
+PROMPT='%n@%m %1~ %# '
 PROMPT2='> '
 autoload -Uz add-zsh-hook
 

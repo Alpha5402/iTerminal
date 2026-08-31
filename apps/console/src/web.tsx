@@ -206,7 +206,7 @@ function App(): React.JSX.Element {
   const [browserTerminalMirror, setBrowserTerminalMirror] = useState("");
   const [cursorComposerLayout, setCursorComposerLayout] = useState<CursorComposerLayout>();
   const interactiveState = useRef(false);
-  const commandEditor = useRef<HTMLDivElement>(null);
+  const commandEditor = useRef<HTMLTextAreaElement>(null);
   const secretEditor = useRef<HTMLInputElement>(null);
   const terminalHost = useRef<HTMLDivElement>(null);
   const terminalSurface = useRef<HTMLDivElement>(null);
@@ -239,6 +239,7 @@ function App(): React.JSX.Element {
     (secureInputRequested ||
       (secretPromptKey !== undefined && secretPromptKey !== dismissedSecretPromptKey));
   const cursorComposerRequested = session?.status === "READY" || secureInputVisible;
+  const commandEditorRows = Math.min(6, Math.max(1, command.split("\n").length));
 
   useEffect(() => {
     latestSession.current = session;
@@ -881,7 +882,6 @@ function App(): React.JSX.Element {
         method: "POST",
       });
       setCommand("");
-      if (commandEditor.current !== null) commandEditor.current.textContent = "";
     } catch (reason) {
       setError(normalizeClientError(reason));
     }
@@ -1120,42 +1120,46 @@ function App(): React.JSX.Element {
               cursorComposerLayout !== undefined && (
                 <form
                   aria-label="Shell prompt command line"
-                  className="terminal-cursor-composer"
+                  className="terminal-cursor-composer terminal-command-composer"
                   onSubmit={(event) => void execute(event)}
                   style={{
-                    height: cursorComposerLayout.height,
+                    height: cursorComposerLayout.height * commandEditorRows,
                     left: cursorComposerLayout.left,
                     lineHeight: `${cursorComposerLayout.height.toString()}px`,
-                    top: cursorComposerLayout.top,
+                    top: Math.max(
+                      0,
+                      cursorComposerLayout.top -
+                        cursorComposerLayout.height * (commandEditorRows - 1),
+                    ),
                     width: cursorComposerLayout.width,
                   }}
                 >
-                  <div
+                  <textarea
                     aria-label="READY command composer"
-                    aria-multiline="false"
+                    aria-multiline="true"
+                    autoCapitalize="off"
+                    autoComplete="off"
                     autoFocus
                     className="command-editor"
-                    contentEditable
-                    onInput={(event) => {
-                      const raw = event.currentTarget.textContent ?? "";
-                      const next = raw.replace(/[\r\n]+/gu, " ");
-                      if (next !== raw) {
-                        event.currentTarget.textContent = next;
-                        placeCaretAtEnd(event.currentTarget);
-                      }
-                      setCommand(next);
-                    }}
+                    onChange={(event) => setCommand(event.currentTarget.value)}
                     onKeyDown={(event) => {
-                      if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+                      if (
+                        event.key !== "Enter" ||
+                        event.shiftKey ||
+                        event.nativeEvent.isComposing
+                      ) {
+                        return;
+                      }
                       event.preventDefault();
                       if (command.trim() !== "") {
                         event.currentTarget.closest("form")?.requestSubmit();
                       }
                     }}
                     ref={commandEditor}
-                    role="textbox"
+                    rows={commandEditorRows}
                     spellCheck={false}
-                    suppressContentEditableWarning
+                    value={command}
+                    wrap="off"
                   />
                 </form>
               )}
@@ -1556,14 +1560,8 @@ function renderScreen(
   );
 }
 
-function placeCaretAtEnd(element: HTMLElement): void {
-  const selection = window.getSelection();
-  if (selection === null) return;
-  const range = document.createRange();
-  range.selectNodeContents(element);
-  range.collapse(false);
-  selection.removeAllRanges();
-  selection.addRange(range);
+function placeCaretAtEnd(element: HTMLTextAreaElement): void {
+  element.setSelectionRange(element.value.length, element.value.length);
 }
 
 function syncCursorComposerLayout(

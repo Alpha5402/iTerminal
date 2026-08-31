@@ -144,17 +144,18 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     expect(promptPlacement.editorTop).toBeGreaterThanOrEqual(promptPlacement.screenTop);
     expect(promptPlacement.editorBottom).toBeLessThanOrEqual(promptPlacement.screenBottom + 1);
     expect(await page.locator(".mode-panel").count()).toBe(0);
-    await page
-      .getByLabel("READY command composer")
-      .fill(`cd ${join(workspace, "subdir")} && export ITERM_M5=shared`);
+    const multilineCommand = `cd "${join(workspace, "subdir")}"\nexport ITERM_M5=shared`;
+    await page.getByLabel("READY command composer").fill(multilineCommand);
+    expect(await page.getByLabel("READY command composer").inputValue()).toBe(multilineCommand);
     await page.getByLabel("READY command composer").press("Enter");
     await waitForPageText(page, ".timeline", "execution.completed");
     await waitForPageText(page, ".status-strip", "READY");
     const firstScreen = await page.getByTestId("screen-reader-output").textContent();
-    expect(firstScreen?.replace(/\n/gu, "")).toContain(`cd ${join(workspace, "subdir")}`);
+    expect(firstScreen?.replace(/\n/gu, "")).toContain(`cd "${join(workspace, "subdir")}"`);
+    expect(firstScreen).not.toContain("cd: too many arguments");
     expect(firstScreen).not.toContain("__it_execute");
     expect(firstScreen).toMatch(/[^\s@]+@[^\s]+ /u);
-    expect(firstScreen).toMatch(/[%#$] cd \//u);
+    expect(firstScreen).toMatch(/[^\s@]+@[^\s]+ subdir [%#$]/u);
 
     const sessions = await callTool<readonly SessionResult[]>(mcp, "session_list", {});
     expect(sessions).toHaveLength(1);

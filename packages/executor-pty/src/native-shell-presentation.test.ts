@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,8 +17,10 @@ describe.each(["bash", "zsh"] as const)("native %s prompt dispatch", (shell: She
   });
 
   it("renders the submitted command without exposing the Runtime wrapper or token", async () => {
-    const workspace = await mkdtemp(join(tmpdir(), `iterminal-native-${shell}-`));
-    fixtures.push(workspace);
+    const root = await mkdtemp(join(tmpdir(), `iterminal-native-${shell}-`));
+    fixtures.push(root);
+    const workspace = join(root, "a", "deliberately", "long", "publish");
+    await mkdir(workspace, { recursive: true });
     const observed: string[] = [];
     const started: string[] = [];
     const executor = await new PtyShellExecutorFactory().create({
@@ -39,6 +41,8 @@ describe.each(["bash", "zsh"] as const)("native %s prompt dispatch", (shell: She
       expect(terminalBytes).not.toContain("__it_execute");
       expect(terminalBytes).not.toContain("iTerminalBarrier=");
       expect(terminalBytes).not.toMatch(/iterminal:(?:bash|zsh)/u);
+      expect(terminalBytes).toMatch(/@[^ ]+ publish [%#$] /u);
+      expect(terminalBytes).not.toContain(`${root}/a/deliberately/long/publish`);
       expect(result.exitCode).toBe(0);
     } finally {
       executor.close();

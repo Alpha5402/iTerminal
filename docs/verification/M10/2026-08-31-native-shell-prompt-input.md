@@ -51,12 +51,13 @@ Results:
 The real Chrome path created a zsh Session, waited for the READY editor, and established all of the
 following:
 
-1. The contenteditable editor was active and geometrically inside `.xterm-screen` at the Runtime
-   cursor row/column; READY rendered no separate `.mode-panel` command dock.
-2. The prompt contained the native-shaped `user@host cwd %` form. A long temporary cwd wrapped at
-   canonical 120-column geometry exactly as a terminal line would.
-3. Enter submitted `cd subdir && export ITERM_M5=shared`; the Virtual Screen contained that exact
-   command and did not contain `__it_execute`.
+1. The textarea editor was active and geometrically inside `.xterm-screen` at the Runtime cursor
+   row/column; READY rendered no separate `.mode-panel` command dock.
+2. The prompt contained the native-shaped `user@host cwd %` form while showing only the cwd's final
+   component, so a long absolute path did not consume the command line.
+3. A two-line `cd` plus `export` buffer retained its newline in the Browser editor. Enter submitted
+   it as one ExecuteAction; the Virtual Screen contained the commands, did not report `cd: too many
+arguments`, and did not contain `__it_execute`.
 4. The same Session subsequently shared cwd/environment with the official MCP client, entered a
    real Python REPL, enforced the Human Interaction Guard, and returned to the prompt.
 5. The page viewport remained fixed without requiring a document scroll to reach a separate READY
@@ -78,9 +79,8 @@ following:
 - macOS bash 3.2 does not expose `READLINE_LINE`. Its first reserved escape binding therefore could
   not load a dynamic buffer. The final adapter adds the private command to in-memory history and
   recalls it through readline; persistent user history is disabled for the managed profile.
-- A strict prompt regex assumed cwd and prompt characters occupied one row. The real 120-column
-  terminal correctly wrapped the long fixture path, so the assertion now verifies native identity
-  and prompt-command fragments independently.
+- The first managed prompt rendered the full cwd (`%~`/`\w`) and could consume most of a canonical
+  line. The final prompt uses `%1~`/`\W`; checkpoints and shared cwd still retain the absolute path.
 - The first secret-input UI placed its password field in the bottom RUNNING mode panel. The final
   presentation recognizes common password/passphrase prompts and places the transient password
   editor at the Virtual Screen cursor; unknown prompts retain an explicit manual secure-input
@@ -92,9 +92,9 @@ following:
   by startup files, shell frameworks, or a Terminal.app login banner such as `Last login`.
 - Pixel-identical rendering across browsers, fonts, DPRs, Linux distributions, remote clients, or
   Windows/ConPTY.
-- Full readline/ZLE editing parity such as history search, reverse-i-search, completion menus, or
-  multiline cursor editing inside the browser overlay. READY remains a one-line local editor whose
-  Enter boundary creates one ExecuteAction.
+- Full readline/ZLE editing parity such as history search, reverse-i-search, or completion menus.
+  The Browser editor preserves and displays bounded multiline input, but it is not a complete native
+  line-editor implementation; Enter still creates one ExecuteAction for the whole buffer.
 - Hostile same-user containment. The private dispatch files/FIFO remain inside the ADR-0003 local
   trust boundary and are not an OS sandbox.
 - Clean-machine packaging, two independent MCP client products, long-duration dogfood, or repository
