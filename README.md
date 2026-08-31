@@ -233,12 +233,3 @@ PTY migration are intentionally outside the current trust model.
   security.
 - [Verification reports](./docs/verification/README.md) — environment-specific evidence, scenarios, and
   explicit limitations.
-
-## Honesty over theatre
-
-The tagline may be dramatic. Completion claims are not.
-
-The project uses L0–L4 evidence levels. A green build is not a shared-terminal scenario. A mock
-client is not a real MCP client. A database row is not proof that a Shell command ran. Claims belong
-in the roadmap and verification reports, next to the exact environment, real path, failure mode, and
-known boundary that support them.

@@ -221,11 +221,3 @@ PostgreSQL Volume。
   与 [Runtime RPC 认证](./docs/protocol/m10-runtime-rpc-authentication.md) — Adapter 与认证契约。
 - [运维指南](./docs/operations/) — 快速开始、Retention、Storage、Capacity 和 Console Security。
 - [验证报告](./docs/verification/README.md) — 特定环境下的证据、场景和明确限制。
-
-## 诚实比表演重要
-
-口号可以有戏剧性，完成度声明不可以。
-
-项目使用 L0–L4 证据等级。Build 通过不等于共享终端场景通过；Mock Client 不等于真实 MCP
-Client；数据库里有一行记录也不能证明 Shell 命令确实执行过。所有声明都应位于路线图和验证
-报告中，并紧邻支撑它的精确环境、真实路径、故障模式与已知边界。
