@@ -1,10 +1,10 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
-> 状态：Implementation Baseline v6.29 — M10.13 已闭合一条命令 durable local stack、private copyable MCP config 与 Ctrl+C-safe detached Guardian shutdown；M10.12 已闭合 normalized-fact retention/capacity signal；M9.18 已闭合本机 failure/pressure L4 gate；repository release L4 仍待完成
+> 状态：Implementation Baseline v6.30 — M10.13 已闭合一条命令 durable local stack、Console 内可发现的 private MCP handoff、贴底 READY command line 与 Ctrl+C-safe detached Guardian shutdown；M10.12 已闭合 normalized-fact retention/capacity signal；M9.18 已闭合本机 failure/pressure L4 gate；repository release L4 仍待完成
 >
 > 基线日期：2026-08-31
 >
-> 当前仓库状态：M0–M9 与 M10.1–M10.12 的既有实现和证据保持不变。M10.13 新增 `pnpm local` supervisor、loopback PostgreSQL 17 Compose/named volume、既有 durable Runtime + Console composition、24 小时 least-privilege MCP/Console grants、`0600` generic MCP config、external PostgreSQL mode、`local:stop` recovery，以及 detached Guardian process group；真实 official MCP + zsh + Console + PostgreSQL 场景证明 Ctrl+C 后 Session 为 `CLOSED`。Actor/Session/Generation lineage retention、Artifact/recording export/legal hold、filesystem/tablespace hard quota、always-on alert/scheduler、clean-machine/platform/client matrix 与 release/dogfood 仍未完成。真正整机/VM fencing、跨主机/跨平台 soak、autonomous model 授权、daemon restart 后 durable wait 与 repository release L4 仍未证明。
+> 当前仓库状态：M0–M9 与 M10.1–M10.12 的既有实现和证据保持不变。M10.13 新增 `pnpm local` supervisor、loopback PostgreSQL 17 Compose/named volume、既有 durable Runtime + Console composition、24 小时 least-privilege MCP/Console grants、`0600` generic MCP config、Console 内配置路径/接入说明、贴底 contenteditable READY command line、live Console rebuild asset routing、external PostgreSQL mode、`local:stop` recovery，以及 detached Guardian process group；真实 official MCP + zsh + Console + PostgreSQL 场景证明 Ctrl+C 后 Session 为 `CLOSED`。Actor/Session/Generation lineage retention、Artifact/recording export/legal hold、filesystem/tablespace hard quota、always-on alert/scheduler、clean-machine/platform/client matrix 与 release/dogfood 仍未完成。真正整机/VM fencing、跨主机/跨平台 soak、autonomous model 授权、daemon restart 后 durable wait 与 repository release L4 仍未证明。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -660,7 +660,7 @@ WebSocket 只承载 live event/screen/action transport，不是真相源。重�
 
 ### 12.1 READY 模式
 
-- xterm 显示 Shell output/prompt，但键盘焦点默认进入独立 command composer。
+- xterm 显示 Shell output/prompt；READY 时隐藏不可输入的 xterm 光标，并把键盘焦点交给固定在终端底边的单行 command composer。
 - Human 本地编辑完整 command，Enter 后提交 ExecuteAction。
 - 不把每个 keydown 直接写入 READY Shell，避免绕过 Reservation/Action attribution。
 - 支持历史、取消草稿、明确 actor label；autocomplete 属于后续功能。
@@ -677,7 +677,7 @@ WebSocket 只承载 live event/screen/action transport，不是真相源。重�
 - [x] 创建/关闭 Session generation。
 - [x] 重建/fork Session：展示 checkpoint version/status/age/cwd/env key、non-copy 限制与 stale acknowledgement，创建并选择新 Session/PTY（M7.2 L3）。
 - [x] 实时 xterm.js Terminal + current execution + Session status（canonical screen projection）。
-- [x] command composer、Input、Control、stream wait、PTY_BUSY allowed-next-action 建议。
+- [x] 终端贴底 contenteditable command composer、Input、Control、stream wait、PTY_BUSY allowed-next-action 建议。
 - [x] Human/Agent/System Action 标签与 bounded Timeline。
 - [x] event cursor 重连、screen resync、live/event gap 提示。
 - [x] Approval pending/history、exact command/reason、approve-once/deny 状态与交互（M10.3b）；Human-only secret prompt/显式敏感期/脱敏（M10.4）。
@@ -863,7 +863,7 @@ Exit Gate：L2 协议/Runtime/持久化路径已完成；官方 SDK Client 已�
 ### M5 — Human Console（目标：L3 shared path）
 
 - [x] React/xterm.js、Fastify HTTP/WS、Session 页面。
-- [x] READY command composer 与 RUNNING interactive focus 分离；READY raw input 在 transport 层拒绝。
+- [x] 贴底 READY command line 与 RUNNING interactive focus 分离；READY 隐藏/禁用 xterm stdin，raw input 在 transport 层拒绝。
 - [x] current execution、Action actor label、bounded Timeline、PTY_BUSY allowed-next-action UI。
 - [x] Input/Control 与 actor/policy/guard 状态 UI；M10.3b 增加 Human Approval，M10.4 增加 password field、敏感期警示、Human Ctrl+C 与显式 complete/cancel。
 - [x] durable event cursor reconnect、full screen resync、live/event gap 提示与慢消费者上限。
@@ -1056,9 +1056,9 @@ Exit Gate：已通过 8 Worker 持续 chaos/pressure；每个 generation 最多�
 - [x] M10.9 Runtime RPC token/log 全仓抽检：configured/verified/issued grant 不进入 ordinary serialization；auth/schema/unknown/transport failure 不复制 bearer 或 dependency message；PostgreSQL/RabbitMQ state 与 Outbox retry 只保留 fixed context + safe code（L2 local Unix socket + real local failure injection；issuer stdout 是显式 credential channel，不等于 OS memory/core/custom logger 安全）。
 - [x] M10.11 Shell marker/path hostile-input、HTTP request-rate 与 local RPC resource exhaustion 矩阵：ADR-0057；control frame 累计 1 MiB/safe integer、PTY barrier 64-char exact token、path error 不反射、Console 600 global/120 Actor per 10s、RPC 256 socket/5s frame timeout（L2 real zsh/Unix socket/loopback；不等于 sandbox/distributed quota/hostile soak）。
 - [x] M10.12 terminal normalized-fact retention + database capacity signal：ADR-0058；30-day/1,000-row-per-class policy，Approval → published Outbox → completed Inbox → stale/non-live unreferenced Action-family bounded cleanup；当前代幂等、pending delivery 与引用 pin；`pg_database_size` 10 GiB/80% HEALTHY-WARNING-CRITICAL operator exit signal（L2 real PostgreSQL；不等于 external hard quota/automatic deletion）。
-- [x] M10.13 one-command durable local stack：ADR-0059；`pnpm local` 管理 loopback PostgreSQL/named volume、复用既有 durable Runtime/Console、生成 `0600` least-privilege MCP config；official MCP + real zsh + Console HTTP + PostgreSQL，Ctrl+C 后 Session durable `CLOSED`（L2；不等于 Browser/clean-machine/queue/router/release L4）。
+- [x] M10.13 one-command durable local stack：ADR-0059；`pnpm local` 管理 loopback PostgreSQL/named volume、复用既有 durable Runtime/Console、生成 `0600` least-privilege MCP config，并在 Console 展示配置路径/接入说明；official MCP + real zsh + Console HTTP + PostgreSQL，Ctrl+C 后 Session durable `CLOSED`（L2；UI command line/MCP handoff 另有真实 Chrome 回归；不等于 clean-machine/queue/router/release L4）。
 - [ ] Actor/Session/Generation/Snapshot/Checkpoint/fork lineage 生命周期、Artifact/recording export/legal hold、filesystem/tablespace hard quota、remote alert 与 always-on scheduler；Artifact/Event/terminal normalized facts 现有清理分别由 M10.5/M10.7/M10.12 完成。
-- [x] 一条命令启动 PostgreSQL + Runtime + Web；MCP 配置可复制（M10.13 L2；private config 含 24 小时 bearer，client-specific install 不自动化）。
+- [x] 一条命令启动 PostgreSQL + Runtime + Web；Console 内可发现并复制 MCP 配置路径（M10.13 L2；private config 含 24 小时 bearer，client-specific install 不自动化）。
 - [ ] macOS/Linux clean-machine install、node-pty platform matrix。
 - [ ] 至少两个真实 MCP Client 版本矩阵。
 - [ ] 连续两周真实开发 dogfood：shared cwd/env、dev server、REPL、TUI、fork、crash、reconnect。

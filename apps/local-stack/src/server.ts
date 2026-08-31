@@ -74,6 +74,7 @@ export async function startLocalStack(options: StartLocalStackOptions): Promise<
         authorization: credentials.consoleGrant,
       }),
       host: options.consoleHost ?? "127.0.0.1",
+      mcpConfigPath: credentials.mcpConfigPath,
       port: options.consolePort ?? 4173,
       staticRoot: options.staticRoot,
     });

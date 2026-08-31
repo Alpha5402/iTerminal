@@ -159,6 +159,7 @@ export interface HumanConsoleServerOptions {
   readonly gateway: RuntimeGateway;
   readonly host?: string;
   readonly logger?: boolean;
+  readonly mcpConfigPath?: string;
   readonly now?: () => number;
   readonly port?: number;
   readonly resourceLimits?: Partial<HumanConsoleResourceLimits>;
@@ -247,6 +248,14 @@ export async function createHumanConsoleApp(
         minColumns: MIN_TERMINAL_COLUMNS,
         minRows: MIN_TERMINAL_ROWS,
       },
+      ...(options.mcpConfigPath === undefined
+        ? {}
+        : {
+            mcpConnection: {
+              configPath: options.mcpConfigPath,
+              serverName: "iterminal",
+            },
+          }),
       sessions,
     });
   });
@@ -633,7 +642,7 @@ export async function createHumanConsoleApp(
   if (existsSync(staticRoot)) {
     await app.register(fastifyStatic, {
       root: staticRoot,
-      wildcard: false,
+      wildcard: true,
     });
     app.setNotFoundHandler((request, reply) => {
       if (request.raw.url?.startsWith("/api/")) {
@@ -647,6 +656,10 @@ export async function createHumanConsoleApp(
             retryable: false,
           },
         });
+        return;
+      }
+      if (request.raw.url?.startsWith("/assets/") === true) {
+        void reply.status(404).type("text/plain").send("Console asset not found");
         return;
       }
       void reply.type("text/html").sendFile("index.html");

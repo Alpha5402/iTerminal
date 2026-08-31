@@ -76,8 +76,10 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
       socketPath: join(root, "runtime.sock"),
     });
     const runtime = new UnixRuntimeClient(daemon.socketPath);
+    const mcpConfigPath = join(root, "mcp.json");
     consoleServer = await startHumanConsole({
       gateway: runtime,
+      mcpConfigPath,
       port: 0,
       staticRoot,
     });
@@ -89,6 +91,11 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     });
     page = await browser.newPage({ viewport: { height: 1_100, width: 1_600 } });
     await page.goto(consoleServer.url, { waitUntil: "networkidle" });
+
+    const mcpPanel = await page.getByLabel("MCP connection").textContent();
+    expect(mcpPanel).toContain("Connect MCP");
+    expect(mcpPanel).toContain(mcpConfigPath);
+    expect(mcpPanel).not.toContain("ITERM_RPC_GRANT");
 
     await page.getByLabel("Workspace root").fill(workspace);
     await page.getByRole("button", { name: "Create persistent shell" }).click();

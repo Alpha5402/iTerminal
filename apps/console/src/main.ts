@@ -22,6 +22,9 @@ const consoleServer = await startHumanConsole({
     ...(runtimeRpcAuthorization === undefined ? {} : { authorization: runtimeRpcAuthorization }),
   }),
   host,
+  ...(process.env.ITERM_MCP_CONFIG_PATH === undefined
+    ? {}
+    : { mcpConfigPath: resolve(process.env.ITERM_MCP_CONFIG_PATH) }),
   port,
   staticRoot,
 });

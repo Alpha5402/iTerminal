@@ -1,5 +1,5 @@
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -63,6 +63,41 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
         resourceLimits: { maxRequestsPerActorPerWindow: 2, maxRequestsPerWindow: 1 },
       }),
     ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+  });
+
+  it("serves assets created by a live Console rebuild and does not mask missing assets as HTML", async () => {
+    const fixture = await createFixture(fixtures);
+    const staticRoot = join(fixture.root, "console");
+    await mkdir(join(staticRoot, "assets"), { recursive: true });
+    await writeFile(join(staticRoot, "index.html"), "<!doctype html><title>iTerminal</title>\n");
+    daemon = await startRuntimeDaemon({ socketPath: join(fixture.root, "runtime.sock") });
+    const app = await createHumanConsoleApp({
+      gateway: runtimeGateway(daemon),
+      port: 80,
+      staticRoot,
+    });
+    try {
+      await writeFile(join(staticRoot, "assets", "rebuilt.js"), "export const ready = true;\n");
+      const rebuilt = await app.inject({
+        headers: { host: "127.0.0.1" },
+        method: "GET",
+        url: "/assets/rebuilt.js",
+      });
+      expect(rebuilt.statusCode).toBe(200);
+      expect(rebuilt.headers["content-type"]).toContain("javascript");
+      expect(rebuilt.body).toContain("ready = true");
+
+      const missing = await app.inject({
+        headers: { host: "127.0.0.1" },
+        method: "GET",
+        url: "/assets/missing.css",
+      });
+      expect(missing.statusCode).toBe(404);
+      expect(missing.headers["content-type"]).toContain("text/plain");
+      expect(missing.body).not.toContain("<title>iTerminal</title>");
+    } finally {
+      await app.close();
+    }
   });
 
   it("binds Host, Origin, and WebSocket upgrades to one exact loopback authority", async () => {

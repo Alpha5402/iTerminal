@@ -123,6 +123,10 @@ interface Bootstrap {
     readonly minColumns: number;
     readonly minRows: number;
   };
+  readonly mcpConnection?: {
+    readonly configPath: string;
+    readonly serverName: string;
+  };
   readonly sessions: readonly Session[];
 }
 
@@ -184,11 +188,13 @@ function App(): React.JSX.Element {
   const [workspaceRoot, setWorkspaceRoot] = useState("");
   const [shell, setShell] = useState<"bash" | "zsh">("zsh");
   const [command, setCommand] = useState("");
+  const [mcpPathCopied, setMcpPathCopied] = useState(false);
   const [interactive, setInteractive] = useState(false);
   const [resizeColumns, setResizeColumns] = useState(SCREEN_COLUMNS.toString());
   const [resizeRows, setResizeRows] = useState(SCREEN_ROWS.toString());
   const [browserTerminalMirror, setBrowserTerminalMirror] = useState("");
   const interactiveState = useRef(false);
+  const commandEditor = useRef<HTMLDivElement>(null);
   const terminalHost = useRef<HTMLDivElement>(null);
   const terminal = useRef<Terminal | undefined>(undefined);
   const socket = useRef<WebSocket | undefined>(undefined);
@@ -265,6 +271,7 @@ function App(): React.JSX.Element {
       cols: SCREEN_COLUMNS,
       convertEol: false,
       cursorBlink: true,
+      disableStdin: true,
       fontFamily: '"JetBrains Mono", "SFMono-Regular", Consolas, monospace',
       fontSize: 13,
       rows: SCREEN_ROWS,
@@ -277,6 +284,7 @@ function App(): React.JSX.Element {
       },
     });
     instance.open(terminalHost.current);
+    instance.write("\u001b[?25l");
     terminal.current = instance;
     const dataSubscription = instance.onData((data) => {
       if (!interactiveState.current) return;
@@ -299,9 +307,14 @@ function App(): React.JSX.Element {
 
   useEffect(() => {
     if (terminal.current !== undefined && screen !== undefined) {
-      renderScreen(terminal.current, screen, setBrowserTerminalMirror);
+      renderScreen(
+        terminal.current,
+        screen,
+        session?.status === "RUNNING",
+        setBrowserTerminalMirror,
+      );
     }
-  }, [screen]);
+  }, [screen, session?.status]);
 
   useEffect(() => {
     if (screen === undefined) return;
@@ -356,6 +369,7 @@ function App(): React.JSX.Element {
     setTimeline(saved?.events ?? []);
     setCheckpoint(undefined);
     setStaleAcknowledged(false);
+    setCommand("");
     let disposed = false;
     if (selected.status === "BROKEN" || selected.status === "CLOSED") {
       setStreamState("offline");
@@ -488,7 +502,9 @@ function App(): React.JSX.Element {
   }, [sensitiveInputRevision, session?.generation, session?.id, session?.status]);
 
   useEffect(() => {
-    if (session?.status !== "RUNNING") setInteractive(false);
+    const running = session?.status === "RUNNING";
+    if (terminal.current !== undefined) terminal.current.options.disableStdin = !running;
+    if (!running) setInteractive(false);
   }, [session?.status]);
 
   const queueInput = (data: string): void => {
@@ -756,7 +772,7 @@ function App(): React.JSX.Element {
 
   const execute = async (event: React.FormEvent): Promise<void> => {
     event.preventDefault();
-    if (session === undefined) return;
+    if (session === undefined || command.trim() === "") return;
     try {
       await api(`/api/sessions/${encodeURIComponent(session.id)}/execute`, {
         body: {
@@ -767,6 +783,18 @@ function App(): React.JSX.Element {
         method: "POST",
       });
       setCommand("");
+      if (commandEditor.current !== null) commandEditor.current.textContent = "";
+    } catch (reason) {
+      setError(normalizeClientError(reason));
+    }
+  };
+
+  const copyMcpConfigPath = async (): Promise<void> => {
+    const path = bootstrap?.mcpConnection?.configPath;
+    if (path === undefined) return;
+    try {
+      await navigator.clipboard.writeText(path);
+      setMcpPathCopied(true);
     } catch (reason) {
       setError(normalizeClientError(reason));
     }
@@ -962,6 +990,27 @@ function App(): React.JSX.Element {
             </label>
             <button type="submit">Create persistent shell</button>
           </form>
+          {bootstrap?.mcpConnection !== undefined && (
+            <section className="mcp-connection" aria-label="MCP connection">
+              <div className="section-title">
+                <h2>Connect MCP</h2>
+                <span className="ready-badge">READY</span>
+              </div>
+              <p>
+                In your MCP client, add a server from JSON and use the complete
+                <code> mcpServers.{bootstrap.mcpConnection.serverName}</code> entry from this
+                private file:
+              </p>
+              <code className="mcp-config-path">{bootstrap.mcpConnection.configPath}</code>
+              <button onClick={() => void copyMcpConfigPath()} type="button">
+                {mcpPathCopied ? "Config path copied" : "Copy MCP config path"}
+              </button>
+              <small>
+                Keep this local stack running. Restart it to rotate an expired 24-hour grant. Do not
+                share or commit the config file.
+              </small>
+            </section>
+          )}
         </aside>
 
         <section className="terminal-stage" aria-label="Shared terminal">
@@ -980,13 +1029,17 @@ function App(): React.JSX.Element {
           </div>
           <div
             aria-label={`Canonical ${screen?.columns ?? SCREEN_COLUMNS} by ${screen?.rows ?? SCREEN_ROWS} terminal viewport`}
-            className={interactive ? "terminal-host interactive" : "terminal-host"}
+            aria-readonly={session?.status !== "RUNNING"}
+            className={`terminal-host ${session?.status === "RUNNING" ? "terminal-running" : "terminal-readonly"}${interactive ? " interactive" : ""}`}
             onBlur={() => {
               setInteractive(false);
               releaseGuardAfterPendingInput();
             }}
+            onFocus={() => {
+              if (session?.status === "RUNNING") setInteractive(true);
+            }}
             ref={terminalHost}
-            tabIndex={0}
+            tabIndex={session?.status === "RUNNING" ? 0 : -1}
           />
           <pre className="screen-reader-output" data-testid="screen-reader-output">
             {screen?.lines.join("\n") ?? ""}
@@ -1016,18 +1069,41 @@ function App(): React.JSX.Element {
                 </div>
               </div>
             ) : session?.status === "READY" ? (
-              <form className="composer" onSubmit={(event) => void execute(event)}>
-                <label htmlFor="command">READY command composer</label>
-                <div>
-                  <textarea
-                    id="command"
-                    onChange={(event) => setCommand(event.target.value)}
-                    placeholder="Enter one top-level shell command"
-                    required
-                    rows={2}
-                    value={command}
-                  />
-                  <button type="submit">Execute Action</button>
+              <form className="terminal-command-line" onSubmit={(event) => void execute(event)}>
+                <span aria-hidden="true" className="command-prompt">
+                  $
+                </span>
+                <div
+                  aria-label="READY command composer"
+                  aria-multiline="false"
+                  className="command-editor"
+                  contentEditable
+                  data-placeholder="Type a command and press Enter"
+                  onInput={(event) => {
+                    const raw = event.currentTarget.textContent ?? "";
+                    const next = raw.replace(/[\r\n]+/gu, " ");
+                    if (next !== raw) {
+                      event.currentTarget.textContent = next;
+                      placeCaretAtEnd(event.currentTarget);
+                    }
+                    setCommand(next);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+                    event.preventDefault();
+                    if (command.trim() !== "") event.currentTarget.closest("form")?.requestSubmit();
+                  }}
+                  ref={commandEditor}
+                  role="textbox"
+                  spellCheck={false}
+                  suppressContentEditableWarning
+                />
+                <button disabled={command.trim() === ""} type="submit">
+                  Execute Action
+                </button>
+                <div className="command-hint">
+                  READY · ExecuteAction
+                  <span>Enter to run</span>
                 </div>
               </form>
             ) : session?.status === "RUNNING" ? (
@@ -1036,8 +1112,13 @@ function App(): React.JSX.Element {
                   <button
                     aria-pressed={interactive}
                     onClick={() => {
-                      setInteractive((value) => !value);
-                      terminal.current?.focus();
+                      if (interactive) {
+                        terminal.current?.blur();
+                        setInteractive(false);
+                      } else {
+                        terminal.current?.focus();
+                        setInteractive(true);
+                      }
                     }}
                     type="button"
                   >
@@ -1330,14 +1411,25 @@ function isApiError(value: unknown): value is ApiErrorBody {
 function renderScreen(
   terminal: Terminal,
   screen: ScreenSnapshot,
+  showCursor: boolean,
   onRendered: (text: string) => void,
 ): void {
   terminal.resize(screen.columns, screen.rows);
   const lines = screen.lines.slice(0, screen.rows).map(safeScreenText);
   terminal.write(
-    `\u001b[2J\u001b[H${lines.join("\r\n")}\u001b[?25h\u001b[${(screen.cursor.row + 1).toString()};${(screen.cursor.column + 1).toString()}H`,
+    `\u001b[2J\u001b[H${lines.join("\r\n")}\u001b[?25${showCursor ? "h" : "l"}\u001b[${(screen.cursor.row + 1).toString()};${(screen.cursor.column + 1).toString()}H`,
     () => onRendered(captureBrowserTerminal(terminal, screen.rows)),
   );
+}
+
+function placeCaretAtEnd(element: HTMLElement): void {
+  const selection = window.getSelection();
+  if (selection === null) return;
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  range.collapse(false);
+  selection.removeAllRanges();
+  selection.addRange(range);
 }
 
 function captureBrowserTerminal(terminal: Terminal, rows: number): string {
