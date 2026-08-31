@@ -56,6 +56,13 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
         resourceLimits: { maxStreams: 1, maxStreamsPerActor: 2 },
       }),
     ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    await expect(
+      startHumanConsole({
+        gateway: new UnixRuntimeClient(daemon.socketPath),
+        port: 0,
+        resourceLimits: { maxRequestsPerActorPerWindow: 2, maxRequestsPerWindow: 1 },
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
   });
 
   it("binds Host, Origin, and WebSocket upgrades to one exact loopback authority", async () => {
@@ -182,6 +189,26 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
     expect(rejectedSchemaBody).not.toContain(unknownKey);
     expect(rejectedSchemaBody).not.toContain(unknownValue);
 
+    const hostilePath = join(fixture.root, "HOSTILE_WORKSPACE_PATH_MUST_NOT_ECHO");
+    const rejectedPath = await fetch(`${consoleServer.url}/api/sessions`, {
+      body: JSON.stringify({
+        idempotencyKey: "rejected-hostile-path-reflection",
+        shell: "zsh",
+        workspaceRoot: hostilePath,
+      }),
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        origin: consoleServer.url,
+        "x-iterminal-request": "console",
+      },
+      method: "POST",
+    });
+    expect(rejectedPath.status).toBe(400);
+    const rejectedPathBody = await rejectedPath.text();
+    expect(rejectedPathBody).not.toContain(hostilePath);
+    expect(rejectedPathBody).not.toContain("ENOENT");
+
     const oversizedSentinel = "OVERSIZED_CONSOLE_BODY_MUST_NOT_ECHO";
     const oversizedBody = JSON.stringify({
       data: `${oversizedSentinel}${"x".repeat(1024 * 1024)}`,
@@ -294,6 +321,56 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
     expect(await oversizedClose).toBe(1009);
     secondStream.close(1000, "test complete");
   }, 30_000);
+
+  it("rate-limits global and known-Actor API traffic without allocating attacker buckets", async () => {
+    const fixture = await createFixture(fixtures);
+    daemon = await startRuntimeDaemon({ socketPath: join(fixture.root, "runtime.sock") });
+    let now = 0;
+    consoleServer = await startHumanConsole({
+      gateway: new UnixRuntimeClient(daemon.socketPath),
+      now: () => now,
+      port: 0,
+      resourceLimits: {
+        maxRequestsPerActorPerWindow: 2,
+        maxRequestsPerWindow: 4,
+        requestRateWindowMilliseconds: 1_000,
+      },
+    });
+
+    const bootstrap = await requestBootstrap(consoleServer);
+    expect(bootstrap.status).toBe(200);
+    const cookie = required(bootstrap.headers.get("set-cookie")).split(";", 1)[0] ?? "";
+    expect((await request(consoleServer, cookie, "/api/sessions")).status).toBe(200);
+    expect((await request(consoleServer, cookie, "/api/sessions")).status).toBe(200);
+    const actorLimited = await request(consoleServer, cookie, "/api/sessions");
+    expect(actorLimited.status).toBe(429);
+    expect(actorLimited.headers.get("retry-after")).toBe("1");
+    await expect(actorLimited.json()).resolves.toMatchObject({
+      error: {
+        code: "RATE_LIMITED",
+        details: { retryAfterMilliseconds: 1_000, scope: "actor" },
+        retryable: true,
+      },
+    });
+
+    expect((await requestBootstrap(consoleServer)).status).toBe(200);
+    const globallyLimited = await fetch(`${consoleServer.url}/api/bootstrap`, {
+      headers: {
+        cookie: "iterminal_console=ATTACKER_CHOSEN_BUCKET_MUST_NOT_EXIST",
+        "x-iterminal-request": "console",
+      },
+    });
+    expect(globallyLimited.status).toBe(429);
+    await expect(globallyLimited.json()).resolves.toMatchObject({
+      error: {
+        code: "RATE_LIMITED",
+        details: { retryAfterMilliseconds: 1_000, scope: "console" },
+      },
+    });
+
+    now = 1_000;
+    expect((await request(consoleServer, cookie, "/api/sessions")).status).toBe(200);
+  });
 
   it("keeps READY/interactive writes on Runtime Actions and releases a Guard on disconnect", async () => {
     const fixture = await createFixture(fixtures);

@@ -4265,11 +4265,11 @@ async function canonicalWorkspace(workspaceRoot: string): Promise<string> {
     const metadata = await stat(canonical);
     if (!metadata.isDirectory()) throw new Error("not a directory");
     return canonical;
-  } catch (error) {
+  } catch {
     throw new RuntimeError(
       "INVALID_REQUEST",
       "Workspace root must resolve to an existing directory",
-      { reason: errorMessage(error), workspaceRoot },
+      { pathKind: "workspace_root" },
     );
   }
 }
@@ -4287,11 +4287,11 @@ async function canonicalCheckpointCwd(workspaceRoot: string, cwd: string): Promi
       throw new Error("outside workspace root");
     }
     return canonical;
-  } catch (error) {
+  } catch {
     throw new RuntimeError(
       "CHECKPOINT_INVALID",
       "Checkpoint cwd must resolve to a directory inside its workspace",
-      { reason: errorMessage(error), workspaceRoot },
+      { pathKind: "checkpoint_cwd" },
     );
   }
 }

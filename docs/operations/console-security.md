@@ -1,6 +1,6 @@
 # Human Console security operations
 
-M10.8 keeps the first Human Console inside one trusted local OS-user boundary. It is not a remote
+M10.8 and M10.11 keep the first Human Console inside one trusted local OS-user boundary. It is not a remote
 administration endpoint and must not be exposed through `0.0.0.0`, a LAN address, port forwarding,
 or a reverse proxy.
 
@@ -47,11 +47,19 @@ Production defaults are process-local:
 | Console Actor records        | 256 with 24-hour inactivity TTL |
 | Open/handshaking streams     |                              64 |
 | Streams per Human Actor      |                               4 |
+| API requests                 |              600 per 10 seconds |
+| API requests per Actor       |              120 per 10 seconds |
 
 Excess Actor or stream admission returns `BACKPRESSURE`; retry only after closing unused tabs or
 waiting for expired Actor records. A malformed WebSocket acknowledgement closes with code `1008`.
 An oversized client message closes with `1009`. A slow outbound consumer receives
 `resync_required` and closes with retry-later semantics instead of growing an unbounded buffer.
+
+Every API request and WebSocket upgrade enters the fixed request window after exact authority and
+browser-header validation. Requests without a currently known cookie Actor share one anonymous
+bucket; hostile Cookie values cannot create limiter state. `429 RATE_LIMITED` includes a bounded
+scope, millisecond retry delay, and `Retry-After`. Wait for that delay rather than retrying in a tight
+loop. This cheap-request limiter is separate from PostgreSQL-authoritative durable Action rate limits.
 
 Library tests may lower Actor/stream limits through `resourceLimits`. The production CLI does not
 expose environment overrides in this slice, so an accidental deployment variable cannot silently
@@ -73,14 +81,16 @@ least-privilege operations, and process configuration.
 - `401 POLICY_DENIED`: bootstrap through the shipped page so the server can issue a current cookie.
 - `503 BACKPRESSURE`: close stale tabs. Do not raise limits before measuring the number and owner of
   open local connections.
+- `429 RATE_LIMITED`: honor `Retry-After`; repeated bootstrap/observation polling or a reconnect
+  loop is exceeding the local fixed window.
 - WebSocket `1008`/`1009`: fix the client acknowledgement schema or payload size; do not reconnect
   the same invalid frame in a loop.
 
 Ingress errors deliberately do not echo Host, Origin, cookies, bodies, grants, query values,
-caller-supplied request IDs, or unknown exception text. The Console generates its own response
+caller-supplied request IDs, invalid workspace paths, filesystem diagnostics, or unknown exception text. The Console generates its own response
 request ID. The production default disables the Fastify logger; if an embedding enables it, request
 URL/Host metadata must be treated as potentially sensitive. Repository-wide log/token redaction and
-Shell/path hostile-input review remain separate M10 work.
+custom logger review remain separate M10 work.
 
 ## Not a security claim
 

@@ -45,6 +45,7 @@ const SESSION_RING_BYTES = 8 * 1024 * 1024;
 const EXECUTION_RING_BYTES = 2 * 1024 * 1024;
 const PTY_BARRIER_PREFIX = "\x1b]1337;iTerminalBarrier=";
 const PTY_BARRIER_SUFFIX = "\x07";
+const MAX_PTY_BARRIER_TOKEN_CHARACTERS = 64;
 
 interface PendingExecution {
   readonly token: string;
@@ -394,6 +395,11 @@ export class PtyShellExecutor implements ShellExecutor {
       const tokenStart = markerStart + PTY_BARRIER_PREFIX.length;
       const markerEnd = this.#pendingPtyText.indexOf(PTY_BARRIER_SUFFIX, tokenStart);
       if (markerEnd < 0) {
+        if (this.#pendingPtyText.length - tokenStart > MAX_PTY_BARRIER_TOKEN_CHARACTERS) {
+          this.#emitPty(PTY_BARRIER_PREFIX);
+          this.#pendingPtyText = this.#pendingPtyText.slice(tokenStart);
+          continue;
+        }
         this.#pendingPtyText = this.#pendingPtyText.slice(markerStart);
         return;
       }
@@ -401,7 +407,7 @@ export class PtyShellExecutor implements ShellExecutor {
       const rawMarker = this.#pendingPtyText.slice(markerStart, markerEnd + 1);
       this.#pendingPtyText = this.#pendingPtyText.slice(markerEnd + 1);
       const pending = this.#pending;
-      if (pending?.token === token) {
+      if (token.length <= MAX_PTY_BARRIER_TOKEN_CHARACTERS && pending?.token === token) {
         pending.barrierSeen = true;
         this.#tryFinishPending(pending);
       } else {

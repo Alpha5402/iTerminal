@@ -74,6 +74,10 @@ const requiredReports = [
     level: "L2",
     path: "docs/verification/M10/2026-08-31-layered-authorization-matrix.md",
   },
+  {
+    level: "L2",
+    path: "docs/verification/M10/2026-08-31-hostile-input-resource-bounds.md",
+  },
 ];
 
 for (const report of requiredReports) {

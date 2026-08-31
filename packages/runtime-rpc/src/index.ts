@@ -89,6 +89,8 @@ export {
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_RPC_CONNECTIONS = 256;
+const DEFAULT_RPC_REQUEST_READ_TIMEOUT_MS = 5_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const WAIT_REQUEST_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const runtimeErrorCodes = new Set<RuntimeError["code"]>([
@@ -569,20 +571,38 @@ export interface RuntimeRpcServerHandle {
   drain?(timeoutMilliseconds: number): Promise<boolean>;
 }
 
+export interface RuntimeRpcResourceLimits {
+  readonly maxConnections: number;
+  readonly requestReadTimeoutMilliseconds: number;
+}
+
 export async function startRuntimeRpcServer(options: {
   readonly authentication?: RuntimeRpcAuthentication;
   readonly socketPath: string;
   readonly gateway: RuntimeGateway;
   readonly isReady?: () => boolean;
+  readonly resourceLimits?: Partial<RuntimeRpcResourceLimits>;
 }): Promise<RuntimeRpcServerHandle> {
+  const limits = runtimeRpcResourceLimits(options.resourceLimits);
   await prepareSocketPath(options.socketPath);
   const activeSockets = new Set<Socket>();
   const activeResponses = new Set<Promise<void>>();
   const server = createServer((socket) => {
+    if (activeSockets.size >= limits.maxConnections) {
+      socket.destroy();
+      return;
+    }
     activeSockets.add(socket);
     socket.once("close", () => activeSockets.delete(socket));
     socket.on("error", () => socket.destroy());
-    handleSocket(socket, options.gateway, options.isReady, options.authentication, activeResponses);
+    handleSocket(
+      socket,
+      options.gateway,
+      options.isReady,
+      options.authentication,
+      activeResponses,
+      limits.requestReadTimeoutMilliseconds,
+    );
   });
   const previousUmask = process.umask(0o177);
   try {
@@ -1020,9 +1040,13 @@ function handleSocket(
   isReady: (() => boolean) | undefined,
   authentication: RuntimeRpcAuthentication | undefined,
   activeResponses: Set<Promise<void>>,
+  requestReadTimeoutMilliseconds: number,
 ): void {
   socket.setEncoding("utf8");
   let buffer = "";
+  const requestTimer = setTimeout(() => socket.destroy(), requestReadTimeoutMilliseconds);
+  requestTimer.unref();
+  socket.once("close", () => clearTimeout(requestTimer));
   socket.on("data", (chunk: string) => {
     buffer += chunk;
     if (Buffer.byteLength(buffer, "utf8") > MAX_REQUEST_BYTES) {
@@ -1031,6 +1055,7 @@ function handleSocket(
     }
     const newline = buffer.indexOf("\n");
     if (newline < 0) return;
+    clearTimeout(requestTimer);
     const line = buffer.slice(0, newline);
     buffer = "";
     socket.pause();
@@ -1041,6 +1066,22 @@ function handleSocket(
       () => activeResponses.delete(response),
     );
   });
+}
+
+function runtimeRpcResourceLimits(
+  configured: Partial<RuntimeRpcResourceLimits> | undefined,
+): RuntimeRpcResourceLimits {
+  const limits = {
+    maxConnections: configured?.maxConnections ?? DEFAULT_MAX_RPC_CONNECTIONS,
+    requestReadTimeoutMilliseconds:
+      configured?.requestReadTimeoutMilliseconds ?? DEFAULT_RPC_REQUEST_READ_TIMEOUT_MS,
+  };
+  for (const [name, value] of Object.entries(limits)) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new RuntimeError("INVALID_REQUEST", `${name} must be a positive safe integer`);
+    }
+  }
+  return limits;
 }
 
 async function respond(

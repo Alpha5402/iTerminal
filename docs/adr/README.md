@@ -60,6 +60,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0054](./0054-loopback-console-ingress-boundary.md)                      | Bind Console requests and streams to one exact authority   | Accepted for M10.8       |
 | [0055](./0055-credential-safe-operational-diagnostics.md)                | Keep grants and connection credentials out of diagnostics  | Accepted for M10.9       |
 | [0056](./0056-layered-authorization-matrix.md)                           | Separate Capability, interaction policy, and Approval      | Accepted for M10.10      |
+| [0057](./0057-hostile-input-and-ingress-resource-bounds.md)              | Bound hostile Shell/path and local ingress resources       | Accepted for M10.11      |
 
 Statuses:
 

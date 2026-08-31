@@ -1,10 +1,10 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
-> 状态：Implementation Baseline v6.26 — M10.10 已闭合 Capability、Actor type、Input Policy/Guard、Secret 与 Agent Execute Approval 分层授权矩阵；M10.9 已闭合 credential-safe RPC/diagnostics；M9.18 已闭合本机 failure/pressure L4 gate；M4 autonomous-model L3 与 repository release L4 仍待完成
+> 状态：Implementation Baseline v6.27 — M10.11 已闭合 Shell control/barrier、canonical path diagnostics、Console HTTP rate 与 Runtime RPC idle-connection hostile-input/resource 矩阵；M10.10 已闭合分层授权矩阵；M9.18 已闭合本机 failure/pressure L4 gate；repository release L4 仍待完成
 >
 > 基线日期：2026-08-31
 >
-> 当前仓库状态：M0–M9 的既有实现与证据保持不变。M10.1 已完成 closed/canonical Actor capability 与 immutable durable identity；M10.2 已完成 signed/expiring operation + Actor scoped Runtime RPC grant；M10.3b 已完成 durable Agent Execute Approval；M10.4 已完成 metadata-only Human SecretInputAction、显式敏感期、Executor-first 全量输出抑制、PostgreSQL/RPC/Router/Console 接入，以及真实 Chrome Human + official MCP 只读观察的无明文抽检；M10.5 已完成 PostgreSQL-authoritative Artifact logical-byte budget、per-row limit、bounded expiry cleanup、operator maintenance command，以及预算拒绝后的 Session `BROKEN`/Execution `UNKNOWN` durability transaction；M10.6 已完成 Application-owned 8 KiB/50 ms PTY output Event coalescing，保持 live screen callback-real-time、exact attribution/ordering/secret boundaries，并让真实一百万字节 node-pty 输出进入 Artifact；M10.7 已完成 database-authoritative Event age/count/batch policy、contiguous-prefix cleanup、latest anchor、durable watermark、stale-cursor resync 与 metadata-only operator command；M10.8 已完成 exact configured Host/port、exact Origin scheme/host/port、all-API request header、Fetch Metadata、Actor/stream/body/message bounds，并通过真实 Chrome shared path；M10.9 已完成 verified/configured/issued grant ordinary-serialization opacity、fixed RPC validation/unknown/transport failures、PostgreSQL/RabbitMQ code-only diagnostics，以及 state/Outbox retry sentinel 抽检；M10.10 已完成 Capability、Actor type、Input Policy/Guard、Secret 与 Agent Execute Approval 的分层矩阵、缺 capability 零 Action/PTY 副作用、over-capable Actor 不升格、四 Actor required-Approval scope，以及真实 Unix RPC/PTY focused gate。Action/Approval/Outbox 等 normalized facts retention、Artifact/export/recording 生命周期、whole-database disk limit/alert、Shell marker/path、HTTP request-rate 等其他 hostile-input 安全项与 release/dogfood 仍未完成。真正整机/VM fencing、跨主机/跨平台 soak、autonomous model 授权、daemon restart 后 durable wait 与 repository release L4 仍未证明。
+> 当前仓库状态：M0–M9 的既有实现与证据保持不变。M10.1–M10.10 的 capability/authentication/Approval/secret/storage/output/Event/Console/diagnostics/authorization 证据保持不变；M10.11 新增累计 1 MiB Shell control frame 与 safe integer、最长 64 字符 exact PTY barrier token、超长/伪造 marker 普通输出、metadata-only canonical path failure、Console 全局 600/Actor 120 每 10 秒 fixed-window rate，以及 Runtime RPC 256 active socket/5 秒 request-frame timeout，并通过真实 zsh/Unix socket/loopback HTTP+WebSocket focused gate。Action/Approval/Outbox 等 normalized facts retention、Artifact/export/recording 生命周期、whole-database disk limit/alert 与 release/dogfood 仍未完成。真正整机/VM fencing、跨主机/跨平台 soak、autonomous model 授权、daemon restart 后 durable wait 与 repository release L4 仍未证明。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -703,8 +703,8 @@ MVP 假设单机受信用户；Agent 可能犯错或受提示注入影响，但 
 - [x] Human-only secret channel 直接写 PTY，只记录 lifecycle metadata；敏感期间 Executor-first 抑制 screen/event/recording 原始输出（M10.4）。
 - [x] Approval 绑定 immutable Action request hash + session generation + actor + expiry；任何变化使批准失效（M10.3b durable atomic consumption；M10.10 分层矩阵）。
 - [ ] PTY/Shell 独立 process group/session；close/timeout 使用可配置 Control -> SIGTERM -> SIGKILL，并验证子进程回收。
-- [ ] 限制 Session、event bytes、artifact bytes、单次返回、WS backlog、screen geometry、Action rate。
-- [x] Shell marker parser 抵抗注入、oversize frame、partial frame 与 nonce replay。
+- [ ] 限制 Session、event bytes、artifact bytes、单次返回、WS backlog、screen geometry、Action rate（现有边界加 M10.11 HTTP/RPC ingress 已覆盖；whole-database/normalized facts 仍未闭合）。
+- [x] Shell marker/control parser 抵抗注入、累计 oversize frame、unsafe integer、partial/unterminated/forged barrier；只有 exact pending token 可完成 ordering barrier（M10.11 real zsh）。
 - [ ] CI 做 secret scan、dependency audit、SBOM 与 release provenance。
 
 ### 13.3 Remote/硬隔离后续边界
@@ -1054,7 +1054,7 @@ Exit Gate：已通过 8 Worker 持续 chaos/pressure；每个 generation 最多�
 - [x] M10.7 bounded cursor-safe Event retention：database-authoritative age/count/batch policy；每次只处理一个 generation 的一个 numeric contiguous prefix、保留最新 anchor；durable deletion watermark 让 stale nonzero cursor 显式 `RESYNC_REQUIRED`，公开 operator command 只输出聚合 metadata（L2；active generation 不 pin，不等于 normalized facts retention/whole-database disk bound）。
 - [x] M10.8 Console origin/DNS rebinding/WS hijack 与 ingress resource bounds：exact configured Host + effective port、exact Origin tuple、all-API custom header、Fetch Metadata、Actor/stream/body/message/backbuffer caps，以及真实 Chrome compatibility（L3 local same-OS-user；不等于 remote auth/sandbox）。
 - [x] M10.9 Runtime RPC token/log 全仓抽检：configured/verified/issued grant 不进入 ordinary serialization；auth/schema/unknown/transport failure 不复制 bearer 或 dependency message；PostgreSQL/RabbitMQ state 与 Outbox retry 只保留 fixed context + safe code（L2 local Unix socket + real local failure injection；issuer stdout 是显式 credential channel，不等于 OS memory/core/custom logger 安全）。
-- [ ] Shell marker/path hostile-input、HTTP request-rate 与其他 resource exhaustion 安全矩阵。
+- [x] M10.11 Shell marker/path hostile-input、HTTP request-rate 与 local RPC resource exhaustion 矩阵：ADR-0057；control frame 累计 1 MiB/safe integer、PTY barrier 64-char exact token、path error 不反射、Console 600 global/120 Actor per 10s、RPC 256 socket/5s frame timeout（L2 real zsh/Unix socket/loopback；不等于 sandbox/distributed quota/hostile soak）。
 - [ ] Action/Approval/Outbox/Inbox 等 normalized facts retention、Artifact/recording export/legal hold、whole-database 磁盘上限与容量告警；Artifact cleanup/budget 已由 M10.5、Event retention 已由 M10.7 完成。
 - [ ] 一条命令启动 PostgreSQL + Runtime + Web；MCP 配置可复制。
 - [ ] macOS/Linux clean-machine install、node-pty platform matrix。
@@ -1229,5 +1229,6 @@ v1.0 还必须满足 M7–M10、fork 语义、故障矩阵、owner routing、mul
 35. [x] `fix(console): harden loopback ingress boundaries`：exact Host/Origin tuple、all-API request header + Fetch Metadata、Actor/stream/body/message limits、1008/1009 fail-closed WebSocket 与真实 Chrome shared-path evidence（M10.8 L3；remote/multi-user/sandbox 未包含）。
 36. [x] `fix(security): keep credentials out of operational diagnostics`：opaque Runtime grant/client/issuer serialization、fixed RPC failure contract、code-only PostgreSQL/RabbitMQ state 与 credential-free Outbox retry sentinel evidence（M10.9 L2；issuer stdout 仍是显式 credential channel）。
 37. [x] `test(security): close layered authorization matrix`：ADR-0056、完整 capability/role/policy/Guard/Secret/Approval 操作表、缺权限零 Action/PTY、over-capable Actor 不升格与四 Actor Execute Approval scope（M10.10 L2；不扩大 Approval 范围）。
+38. [x] `fix(security): bound hostile local ingress`：ADR-0057、累计 Shell control frame、伪造/unterminated PTY barrier、canonical path error、Console request rate、Runtime RPC active/idle socket 边界（M10.11 L2；不等于 OS sandbox/remote quota）。
 
 M5 shared path 已闭合，但 M6 完整 L3 与其余 MVP Gate 未闭合前，不因为 M8 已有故障证据就宣称 MVP。

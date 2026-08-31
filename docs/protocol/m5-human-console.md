@@ -21,7 +21,10 @@ This boundary prevents ambient web pages and DNS-rebinding hostnames from drivin
 HTTP bodies are capped at 1 MiB and rejected with a fixed non-echoing `413 INVALID_REQUEST` envelope.
 The Console retains at most 256 Actor records, 64 total open/handshaking streams, and four streams
 per Actor. Capacity rejection is retryable `503 BACKPRESSURE` before a Runtime observation loop is
-owned. See [Console security operations](../operations/console-security.md).
+owned. Every API request and WebSocket upgrade also enters a process-local fixed window: 600 total
+and 120 per known Actor per 10 seconds. Unknown/invalid cookies share one anonymous bucket. Rate
+rejection is retryable `429 RATE_LIMITED` with `Retry-After` and does not call RuntimeGateway or
+allocate an Actor/stream. See [Console security operations](../operations/console-security.md).
 
 ## Response envelope
 

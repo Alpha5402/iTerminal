@@ -24,8 +24,11 @@ import * as z from "zod/v4";
 const CONSOLE_COOKIE = "iterminal_console";
 const CONSOLE_ACTOR_TTL_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_MAX_CONSOLE_ACTORS = 256;
+const DEFAULT_MAX_CONSOLE_REQUESTS_PER_ACTOR_PER_WINDOW = 120;
+const DEFAULT_MAX_CONSOLE_REQUESTS_PER_WINDOW = 600;
 const DEFAULT_MAX_CONSOLE_STREAMS = 64;
 const DEFAULT_MAX_CONSOLE_STREAMS_PER_ACTOR = 4;
+const DEFAULT_CONSOLE_REQUEST_RATE_WINDOW_MS = 10_000;
 const STREAM_RESERVATION_TTL_MS = 5_000;
 const MAX_WS_BUFFERED_BYTES = 1024 * 1024;
 const STREAM_WAIT_MS = 1_000;
@@ -164,8 +167,11 @@ export interface HumanConsoleServerOptions {
 
 export interface HumanConsoleResourceLimits {
   readonly maxActors: number;
+  readonly maxRequestsPerActorPerWindow: number;
+  readonly maxRequestsPerWindow: number;
   readonly maxStreams: number;
   readonly maxStreamsPerActor: number;
+  readonly requestRateWindowMilliseconds: number;
 }
 
 export interface HumanConsoleServerHandle {
@@ -186,6 +192,7 @@ export async function createHumanConsoleApp(
   const openSessionStreams = new Map<string, number>();
   const pendingStreamAdmissions = new WeakMap<object, ConsoleStreamReservation>();
   const streamAdmissions = new ConsoleStreamAdmissions(limits);
+  const requestRates = new ConsoleRequestRates(limits, now);
   const app = Fastify({
     bodyLimit: 1024 * 1024,
     logger: options.logger ?? false,
@@ -209,9 +216,18 @@ export async function createHumanConsoleApp(
     ) {
       throw new ConsoleHttpError(403, "INVALID_REQUEST", "Missing Console request header");
     }
+    if (request.raw.url?.startsWith("/api") === true) {
+      requestRates.admit(knownActorId(request, actors));
+    }
   });
 
   app.setErrorHandler((error, request, reply) => {
+    if (error instanceof ConsoleHttpError && error.code === "RATE_LIMITED") {
+      const retryAfterMilliseconds = error.details.retryAfterMilliseconds;
+      if (typeof retryAfterMilliseconds === "number") {
+        reply.header("retry-after", Math.max(1, Math.ceil(retryAfterMilliseconds / 1_000)));
+      }
+    }
     const envelope = errorEnvelope(error, request.id);
     void reply.status(envelope.status).send({ error: envelope.error });
   });
@@ -923,6 +939,14 @@ function actorForRequest(
   return actor;
 }
 
+function knownActorId(
+  request: FastifyRequest,
+  actors: ReadonlyMap<string, ConsoleActorRecord>,
+): string | undefined {
+  const cookieId = parseCookies(request.headers.cookie)[CONSOLE_COOKIE];
+  return cookieId !== undefined && actors.has(cookieId) ? cookieId : undefined;
+}
+
 function pruneActors(actors: Map<string, ConsoleActorRecord>, currentTime: number): void {
   for (const [id, record] of actors) {
     if (record.lastSeenAt + CONSOLE_ACTOR_TTL_MS <= currentTime) actors.delete(id);
@@ -1078,8 +1102,14 @@ function consoleResourceLimits(
 ): HumanConsoleResourceLimits {
   const limits = {
     maxActors: configured?.maxActors ?? DEFAULT_MAX_CONSOLE_ACTORS,
+    maxRequestsPerActorPerWindow:
+      configured?.maxRequestsPerActorPerWindow ?? DEFAULT_MAX_CONSOLE_REQUESTS_PER_ACTOR_PER_WINDOW,
+    maxRequestsPerWindow:
+      configured?.maxRequestsPerWindow ?? DEFAULT_MAX_CONSOLE_REQUESTS_PER_WINDOW,
     maxStreams: configured?.maxStreams ?? DEFAULT_MAX_CONSOLE_STREAMS,
     maxStreamsPerActor: configured?.maxStreamsPerActor ?? DEFAULT_MAX_CONSOLE_STREAMS_PER_ACTOR,
+    requestRateWindowMilliseconds:
+      configured?.requestRateWindowMilliseconds ?? DEFAULT_CONSOLE_REQUEST_RATE_WINDOW_MS,
   };
   for (const [name, value] of Object.entries(limits)) {
     if (!Number.isSafeInteger(value) || value <= 0) {
@@ -1089,7 +1119,80 @@ function consoleResourceLimits(
   if (limits.maxStreamsPerActor > limits.maxStreams) {
     throw new RuntimeError("INVALID_REQUEST", "maxStreamsPerActor cannot exceed maxStreams");
   }
+  if (limits.maxRequestsPerActorPerWindow > limits.maxRequestsPerWindow) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      "maxRequestsPerActorPerWindow cannot exceed maxRequestsPerWindow",
+    );
+  }
   return limits;
+}
+
+interface ConsoleRateWindow {
+  count: number;
+  startedAt: number;
+}
+
+class ConsoleRequestRates {
+  readonly #byActor = new Map<string, ConsoleRateWindow>();
+  #global: ConsoleRateWindow | undefined;
+
+  public constructor(
+    private readonly limits: HumanConsoleResourceLimits,
+    private readonly now: () => number,
+  ) {}
+
+  public admit(actorId: string | undefined): void {
+    const currentTime = this.now();
+    this.#prune(currentTime);
+    const global = this.#window(this.#global, currentTime);
+    this.#global = global;
+    const actorKey = actorId ?? "anonymous";
+    const actor = this.#window(this.#byActor.get(actorKey), currentTime);
+    this.#byActor.set(actorKey, actor);
+    if (global.count >= this.limits.maxRequestsPerWindow) {
+      throw this.#limited("console", global, currentTime);
+    }
+    if (actor.count >= this.limits.maxRequestsPerActorPerWindow) {
+      throw this.#limited("actor", actor, currentTime);
+    }
+    global.count += 1;
+    actor.count += 1;
+  }
+
+  #window(current: ConsoleRateWindow | undefined, currentTime: number): ConsoleRateWindow {
+    if (
+      current === undefined ||
+      current.startedAt + this.limits.requestRateWindowMilliseconds <= currentTime
+    ) {
+      return { count: 0, startedAt: currentTime };
+    }
+    return current;
+  }
+
+  #limited(scope: "actor" | "console", window: ConsoleRateWindow, currentTime: number): Error {
+    const retryAfterMilliseconds = Math.max(
+      1,
+      window.startedAt + this.limits.requestRateWindowMilliseconds - currentTime,
+    );
+    return new ConsoleHttpError(
+      429,
+      "RATE_LIMITED",
+      scope === "actor"
+        ? "Console Actor request rate is exhausted"
+        : "Console request rate is exhausted",
+      true,
+      { retryAfterMilliseconds, scope },
+    );
+  }
+
+  #prune(currentTime: number): void {
+    for (const [actorId, window] of this.#byActor) {
+      if (window.startedAt + this.limits.requestRateWindowMilliseconds <= currentTime) {
+        this.#byActor.delete(actorId);
+      }
+    }
+  }
 }
 
 interface ConsoleStreamReservation {

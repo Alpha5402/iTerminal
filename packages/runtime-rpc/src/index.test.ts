@@ -76,6 +76,38 @@ describe("UnixRuntimeClient delivery classification", () => {
     }
   });
 
+  it("bounds active sockets and expires an incomplete request frame before dispatch", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-resource-bounds-"));
+    const socketPath = join(fixture, "runtime.sock");
+    await expect(
+      startRuntimeRpcServer({
+        gateway: stubGateway(),
+        resourceLimits: { maxConnections: 0 },
+        socketPath,
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    const server = await startRuntimeRpcServer({
+      gateway: stubGateway(),
+      resourceLimits: { maxConnections: 1, requestReadTimeoutMilliseconds: 100 },
+      socketPath,
+    });
+    const idle = createConnection(server.socketPath);
+    let overCapacity: ReturnType<typeof createConnection> | undefined;
+    try {
+      await waitForSocketConnect(idle);
+      overCapacity = createConnection(server.socketPath);
+      await waitForSocketConnect(overCapacity);
+      await expect(waitForSocketClose(overCapacity, 1_000)).resolves.toBeUndefined();
+      await expect(waitForSocketClose(idle, 1_000)).resolves.toBeUndefined();
+      await expect(new UnixRuntimeClient(server.socketPath).listSessions()).resolves.toEqual([]);
+    } finally {
+      idle.destroy();
+      overCapacity?.destroy();
+      await server.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
   it("rejects non-canonical or missing Actor capabilities at the RPC boundary", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-capability-schema-"));
     const server = await startRuntimeRpcServer({
@@ -677,6 +709,32 @@ function readResponse(socket: ReturnType<typeof createConnection>): Promise<unkn
       }
     });
     socket.once("error", reject);
+  });
+}
+
+function waitForSocketConnect(socket: ReturnType<typeof createConnection>): Promise<void> {
+  if (!socket.connecting) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    socket.once("connect", resolve);
+    socket.once("error", reject);
+  });
+}
+
+function waitForSocketClose(
+  socket: ReturnType<typeof createConnection>,
+  timeoutMilliseconds: number,
+): Promise<void> {
+  if (socket.destroyed) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error("Timed out waiting for Runtime RPC socket close")),
+      timeoutMilliseconds,
+    );
+    socket.once("close", () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+    socket.once("error", () => undefined);
   });
 }
 

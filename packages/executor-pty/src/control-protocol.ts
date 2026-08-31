@@ -1,7 +1,7 @@
 import { StringDecoder } from "node:string_decoder";
 
 const FIELD_SEPARATOR = "\0";
-const MAX_PENDING_BYTES = 1024 * 1024;
+export const MAX_CONTROL_FRAME_BYTES = 1024 * 1024;
 
 export type ControlEvent =
   | Readonly<{ type: "hello"; shell: "bash" | "zsh"; pid: number }>
@@ -32,16 +32,17 @@ export class ControlFrameDecoder {
   readonly #decoder = new StringDecoder("utf8");
   #pendingText = "";
   #fields: string[] = [];
+  #frameBytes = 0;
 
   public push(chunk: Buffer): ControlEvent[] {
     this.#pendingText += this.#decoder.write(chunk);
-    if (Buffer.byteLength(this.#pendingText, "utf8") > MAX_PENDING_BYTES) {
-      throw new ControlProtocolError("Control frame exceeded the 1 MiB pending-data limit");
-    }
     const events: ControlEvent[] = [];
     let separatorIndex = this.#pendingText.indexOf(FIELD_SEPARATOR);
     while (separatorIndex >= 0) {
-      this.#fields.push(this.#pendingText.slice(0, separatorIndex));
+      const field = this.#pendingText.slice(0, separatorIndex);
+      this.#frameBytes += Buffer.byteLength(field, "utf8") + 1;
+      if (this.#frameBytes > MAX_CONTROL_FRAME_BYTES) throw oversizedFrame();
+      this.#fields.push(field);
       this.#pendingText = this.#pendingText.slice(separatorIndex + 1);
       const expectedFields = frameFieldCounts[this.#fields[0] ?? ""];
       if (expectedFields === undefined) {
@@ -50,8 +51,12 @@ export class ControlFrameDecoder {
       if (this.#fields.length === expectedFields) {
         events.push(parseFrame(this.#fields));
         this.#fields = [];
+        this.#frameBytes = 0;
       }
       separatorIndex = this.#pendingText.indexOf(FIELD_SEPARATOR);
+    }
+    if (this.#frameBytes + Buffer.byteLength(this.#pendingText, "utf8") > MAX_CONTROL_FRAME_BYTES) {
+      throw oversizedFrame();
     }
     return events;
   }
@@ -64,18 +69,22 @@ function parseFrame(fields: readonly string[]): ControlEvent {
     if (shell !== "bash" && shell !== "zsh") {
       throw new ControlProtocolError(`Unsupported shell: ${shell ?? ""}`);
     }
-    return { pid: parseInteger(fields[2], "shell pid"), shell, type: "hello" };
+    return {
+      pid: parseInteger(fields[2], "shell pid", 1, Number.MAX_SAFE_INTEGER),
+      shell,
+      type: "hello",
+    };
   }
   if (type === "PREEXEC") {
     return { command: fields[1] ?? "", type: "preexec" };
   }
   if (type === "RESULT") {
-    return { exitCode: parseInteger(fields[1], "exit code"), type: "result" };
+    return { exitCode: parseInteger(fields[1], "exit code", 0, 255), type: "result" };
   }
   if (type === "READY") {
     return {
       cwd: fields[2] ?? "",
-      exitCode: parseInteger(fields[1], "exit code"),
+      exitCode: parseInteger(fields[1], "exit code", 0, 255),
       filteredEnvironment: parseFilteredEnvironment(fields[3] ?? ""),
       type: "ready",
     };
@@ -118,9 +127,22 @@ function parseFilteredEnvironment(payload: string): Readonly<Record<string, stri
   return environment;
 }
 
-function parseInteger(value: string | undefined, label: string): number {
+function parseInteger(
+  value: string | undefined,
+  label: string,
+  minimum: number,
+  maximum: number,
+): number {
   if (value === undefined || !/^-?\d+$/.test(value)) {
     throw new ControlProtocolError(`Invalid ${label}: ${value ?? ""}`);
   }
-  return Number.parseInt(value, 10);
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new ControlProtocolError(`Invalid ${label}: outside the supported range`);
+  }
+  return parsed;
+}
+
+function oversizedFrame(): ControlProtocolError {
+  return new ControlProtocolError("Control frame exceeded the 1 MiB cumulative limit");
 }

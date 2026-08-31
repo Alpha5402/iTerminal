@@ -126,3 +126,11 @@ verification reports are not that sink.
 ## Rotation and limits
 
 Grants are bearer credentials and remain usable until expiry. This version has no online revocation list or key identifier. Rotate by stopping admission, replacing the secret on the Router and all owner daemons, issuing replacement client grants, and restarting the affected processes. HMAC verifiers can also mint grants if compromised; asymmetric multi-issuer federation and remote/multi-user transport are outside this local M10.2 boundary.
+
+Each Runtime RPC server accepts at most 256 active mode-`0600` Unix sockets by default. A connection
+must provide its complete newline-terminated request within five seconds; otherwise it is destroyed
+before gateway dispatch. One connection carries one request and one response. Requests remain capped
+at 1 MiB, responses at 16 MiB, ordinary client calls at 30 seconds, and explicit screen/execution
+waits at their separate bounded long timeout. These process-local framing/connection limits prevent
+idle local clients from retaining unbounded file descriptors; they are not distributed quotas or a
+replacement for signed grant verification.
