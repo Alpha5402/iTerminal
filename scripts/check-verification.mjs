@@ -82,6 +82,10 @@ const requiredReports = [
     level: "L2",
     path: "docs/verification/M10/2026-08-31-normalized-fact-retention-capacity.md",
   },
+  {
+    level: "L2",
+    path: "docs/verification/M10/2026-08-31-local-durable-quickstart.md",
+  },
 ];
 
 for (const report of requiredReports) {

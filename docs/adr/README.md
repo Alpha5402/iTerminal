@@ -62,6 +62,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0056](./0056-layered-authorization-matrix.md)                           | Separate Capability, interaction policy, and Approval      | Accepted for M10.10      |
 | [0057](./0057-hostile-input-and-ingress-resource-bounds.md)              | Bound hostile Shell/path and local ingress resources       | Accepted for M10.11      |
 | [0058][adr-0058]                                                         | Bound normalized facts and signal database capacity        | Accepted for M10.12      |
+| [0059](./0059-one-command-local-stack-and-mcp-bootstrap.md)              | Compose one authenticated durable local quickstart         | Accepted for M10.13      |
 
 Statuses:
 

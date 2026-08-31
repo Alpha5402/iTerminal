@@ -15,6 +15,7 @@ The Router cannot safely send an unauthenticated remote `kill`, and a database r
 ### Independent host-local guardian
 
 - Every durable Runtime starts one independent host-local Guardian child process before it can create a PTY. In-memory development mode does not start one.
+- On POSIX hosts the Guardian starts as a detached process-group leader while retaining its explicit IPC channel. A terminal or service-wrapper signal aimed at the Runtime process group must not kill the Guardian before the Runtime can unregister Shells and close it deliberately. Whole-cgroup/container termination remains outside this boundary.
 - The Guardian is not a Runtime owner, Router, PTY proxy, or database client. It receives only local IPC messages from its parent Runtime.
 - A successful owner registration or heartbeat plus Session-lease renewal sends a Guardian renewal. Failed or uncertain database work never renews it.
 - The Guardian deadline is derived from the conservative local start of the successful heartbeat round trip. Runtime startup reserves a health-check interval plus the termination grace inside the PostgreSQL owner lease, and each renewal subtracts elapsed database work before arming the Guardian. Forced termination is therefore scheduled before the conservative lease deadline under the stated host-scheduler assumptions.
@@ -40,6 +41,7 @@ The Router cannot safely send an unauthenticated remote `kill`, and a database r
 
 - An unreachable or stopped Runtime process no longer has to resume before its host-local Shell session is reclaimed.
 - The Guardian survives a direct Runtime `SIGKILL` or `SIGSTOP` because it is a separate process. Service managers must not place it in a policy that kills or freezes every process in the same host/cgroup when the Runtime alone fails.
+- Runtime-local terminal `SIGINT` does not share the Guardian process group; graceful quickstart shutdown can therefore close durable Sessions before deliberately closing the Guardian.
 - One Guardian serves all PTYs owned by a Runtime; the design does not create one watchdog process per Session.
 - If the entire host, kernel scheduler, container, VM, or Guardian process is unavailable, iTerminal cannot prove reclamation from inside that same failure domain. Production must use an external host/VM/container fencing mechanism before treating that machine as harmless.
 - This is reclamation of an old process session, not live PTY migration, Session takeover, exactly-once Shell effects, or authorization for arbitrary remote signals.
@@ -53,6 +55,7 @@ M9.17 must use real independent Runtime/Router/Guardian processes, PostgreSQL, n
 3. the Guardian makes the Shell and every captured descendant absent or non-runnable before the delayed filesystem effect occurs;
 4. after database owner-lease expiry, a distinct same-owner Runtime registers, reconciles the old Session to `BROKEN` and Execution to `UNKNOWN`, and creates only a new PTY;
 5. resuming the old Runtime cannot restore its registry identity or old PTY; and
-6. graceful shutdown leaves neither Guardian nor registered Shell processes behind.
+6. the Guardian has a distinct process-group identity from its Runtime parent; and
+7. graceful shutdown leaves neither Guardian nor registered Shell processes behind.
 
 The result is local L2 evidence for a host-resident reclamation agent while its kernel and scheduler remain available. It is not a real multi-host deployment, external VM/host fencing, privileged cross-user cleanup, container-orchestrator integration, high-cardinality proof, long-duration soak, or the M9 L4 exit gate.

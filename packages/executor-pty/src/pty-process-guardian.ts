@@ -71,6 +71,7 @@ export class PtyProcessGuardian implements ShellProcessGuardian {
       ? ["--import", "tsx", childModule]
       : [childModule];
     this.#child = spawn(process.execPath, childArguments, {
+      detached: true,
       env: {
         ...process.env,
         ITERM_GUARDIAN_LEASE_TIMEOUT_MS: leaseTimeoutMilliseconds.toString(),

@@ -1,10 +1,10 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
-> 状态：Implementation Baseline v6.28 — M10.12 已闭合 terminal normalized-fact dependency-aware retention 与 PostgreSQL whole-database capacity warning/critical signal；M10.11 已闭合 hostile local ingress；M9.18 已闭合本机 failure/pressure L4 gate；repository release L4 仍待完成
+> 状态：Implementation Baseline v6.29 — M10.13 已闭合一条命令 durable local stack、private copyable MCP config 与 Ctrl+C-safe detached Guardian shutdown；M10.12 已闭合 normalized-fact retention/capacity signal；M9.18 已闭合本机 failure/pressure L4 gate；repository release L4 仍待完成
 >
 > 基线日期：2026-08-31
 >
-> 当前仓库状态：M0–M9 与 M10.1–M10.11 的既有实现和证据保持不变。M10.12 新增 migration 019、30 天/每类 1,000 行默认 policy、Approval → published Outbox → completed Inbox → terminal stale/non-live Action-family 的 dependency-aware bounded transaction，以及基于 `pg_database_size` 的 10 GiB/80% HEALTHY-WARNING-CRITICAL metadata-only operator signal；当前代 Action 幂等、pending/ambiguous delivery、active Approval、Event/Artifact/Snapshot 引用均 pin。Actor/Session/Generation lineage retention、Artifact/recording export/legal hold、filesystem/tablespace hard quota、always-on alert/scheduler 与 release/dogfood 仍未完成。真正整机/VM fencing、跨主机/跨平台 soak、autonomous model 授权、daemon restart 后 durable wait 与 repository release L4 仍未证明。
+> 当前仓库状态：M0–M9 与 M10.1–M10.12 的既有实现和证据保持不变。M10.13 新增 `pnpm local` supervisor、loopback PostgreSQL 17 Compose/named volume、既有 durable Runtime + Console composition、24 小时 least-privilege MCP/Console grants、`0600` generic MCP config、external PostgreSQL mode、`local:stop` recovery，以及 detached Guardian process group；真实 official MCP + zsh + Console + PostgreSQL 场景证明 Ctrl+C 后 Session 为 `CLOSED`。Actor/Session/Generation lineage retention、Artifact/recording export/legal hold、filesystem/tablespace hard quota、always-on alert/scheduler、clean-machine/platform/client matrix 与 release/dogfood 仍未完成。真正整机/VM fencing、跨主机/跨平台 soak、autonomous model 授权、daemon restart 后 durable wait 与 repository release L4 仍未证明。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -1056,8 +1056,9 @@ Exit Gate：已通过 8 Worker 持续 chaos/pressure；每个 generation 最多�
 - [x] M10.9 Runtime RPC token/log 全仓抽检：configured/verified/issued grant 不进入 ordinary serialization；auth/schema/unknown/transport failure 不复制 bearer 或 dependency message；PostgreSQL/RabbitMQ state 与 Outbox retry 只保留 fixed context + safe code（L2 local Unix socket + real local failure injection；issuer stdout 是显式 credential channel，不等于 OS memory/core/custom logger 安全）。
 - [x] M10.11 Shell marker/path hostile-input、HTTP request-rate 与 local RPC resource exhaustion 矩阵：ADR-0057；control frame 累计 1 MiB/safe integer、PTY barrier 64-char exact token、path error 不反射、Console 600 global/120 Actor per 10s、RPC 256 socket/5s frame timeout（L2 real zsh/Unix socket/loopback；不等于 sandbox/distributed quota/hostile soak）。
 - [x] M10.12 terminal normalized-fact retention + database capacity signal：ADR-0058；30-day/1,000-row-per-class policy，Approval → published Outbox → completed Inbox → stale/non-live unreferenced Action-family bounded cleanup；当前代幂等、pending delivery 与引用 pin；`pg_database_size` 10 GiB/80% HEALTHY-WARNING-CRITICAL operator exit signal（L2 real PostgreSQL；不等于 external hard quota/automatic deletion）。
+- [x] M10.13 one-command durable local stack：ADR-0059；`pnpm local` 管理 loopback PostgreSQL/named volume、复用既有 durable Runtime/Console、生成 `0600` least-privilege MCP config；official MCP + real zsh + Console HTTP + PostgreSQL，Ctrl+C 后 Session durable `CLOSED`（L2；不等于 Browser/clean-machine/queue/router/release L4）。
 - [ ] Actor/Session/Generation/Snapshot/Checkpoint/fork lineage 生命周期、Artifact/recording export/legal hold、filesystem/tablespace hard quota、remote alert 与 always-on scheduler；Artifact/Event/terminal normalized facts 现有清理分别由 M10.5/M10.7/M10.12 完成。
-- [ ] 一条命令启动 PostgreSQL + Runtime + Web；MCP 配置可复制。
+- [x] 一条命令启动 PostgreSQL + Runtime + Web；MCP 配置可复制（M10.13 L2；private config 含 24 小时 bearer，client-specific install 不自动化）。
 - [ ] macOS/Linux clean-machine install、node-pty platform matrix。
 - [ ] 至少两个真实 MCP Client 版本矩阵。
 - [ ] 连续两周真实开发 dogfood：shared cwd/env、dev server、REPL、TUI、fork、crash、reconnect。
@@ -1232,5 +1233,6 @@ v1.0 还必须满足 M7–M10、fork 语义、故障矩阵、owner routing、mul
 37. [x] `test(security): close layered authorization matrix`：ADR-0056、完整 capability/role/policy/Guard/Secret/Approval 操作表、缺权限零 Action/PTY、over-capable Actor 不升格与四 Actor Execute Approval scope（M10.10 L2；不扩大 Approval 范围）。
 38. [x] `fix(security): bound hostile local ingress`：ADR-0057、累计 Shell control frame、伪造/unterminated PTY barrier、canonical path error、Console request rate、Runtime RPC active/idle socket 边界（M10.11 L2；不等于 OS sandbox/remote quota）。
 39. [x] `feat(storage): retain terminal facts by dependency`：migration 019、Approval/Outbox/Inbox/Action-family bounded maintenance、current-generation/idempotency/reference pin、metadata-only `pg_database_size` capacity signal 与 operator commands（M10.12 L2；不等于 physical hard quota/export/legal hold）。
+40. [x] `feat(local): bootstrap durable stack in one command`：managed loopback PostgreSQL、existing durable Runtime/Console、private generated MCP config、external DB mode、idempotent signal shutdown 与 detached Guardian process group（M10.13 L2；不等于 clean-machine/client matrix/production topology）。
 
 M5 shared path 已闭合，但 M6 完整 L3 与其余 MVP Gate 未闭合前，不因为 M8 已有故障证据就宣称 MVP。

@@ -55,6 +55,18 @@ describe("PTY Process Guardian", () => {
       await guardian.close();
     }
   }, 10_000);
+
+  it("runs outside the Runtime process group so terminal SIGINT cannot kill it", async () => {
+    const guardian = new PtyProcessGuardian({ leaseTimeoutMilliseconds: 1_000 });
+    try {
+      const guardianPid = guardian.pid;
+      if (guardianPid === undefined) throw new Error("Process Guardian PID is unavailable");
+      expect(() => process.kill(-guardianPid, 0)).not.toThrow();
+      await guardian.renew(500);
+    } finally {
+      await guardian.close();
+    }
+  });
 });
 
 async function waitUntilProcessGone(pid: number): Promise<void> {
