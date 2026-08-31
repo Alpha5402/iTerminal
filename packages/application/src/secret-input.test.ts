@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -106,12 +106,13 @@ describe("M10.4 Human-only secret input", () => {
   it("does not release PTY barrier-prefix bytes retained across the redaction boundary", async () => {
     const runtime = createTestRuntime();
     const workspace = createWorkspace();
+    const barrierEmittedPath = join(workspace, "partial-barrier-emitted");
     const session = await runtime.createSession({ shell: "zsh", workspaceRoot: workspace });
     try {
       const started = await runtime.startExecute({
         actor: humanActor,
         command:
-          "IFS= read -r ignored; (sleep 0.05; printf '\\033]1337;iTerminalBar') & printf done",
+          "IFS= read -r ignored; (sleep 0.05; printf '\\033]1337;iTerminalBar'; : > partial-barrier-emitted) &!; printf done",
         idempotencyKey: "partial-barrier-reader",
         sessionGeneration: session.generation,
         sessionId: session.id,
@@ -126,7 +127,7 @@ describe("M10.4 Human-only secret input", () => {
         targetExecutionId: started.execution.id,
       });
       await started.completion;
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await waitForPath(barrierEmittedPath);
       await runtime.finishSensitiveInput({
         actor: humanActor,
         expectedVersion: 1,
@@ -234,4 +235,14 @@ function createWorkspace(): string {
   mkdirSync(join(workspace, "subdirectory"));
   workspaces.push(workspace);
   return workspace;
+}
+
+async function waitForPath(path: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${path}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  // The marker is written after the PTY bytes. Yield once more so node-pty can deliver them.
+  await new Promise((resolve) => setTimeout(resolve, 10));
 }
