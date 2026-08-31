@@ -23,9 +23,12 @@ loopback Console, and writes a private MCP configuration. Read the final
 `iterminal.local.ready` JSON line for:
 
 - `consoleUrl` — open this exact `127.0.0.1` authority; alternate Host aliases are rejected;
-- `mcpConfigPath` — copy or reference this whole generic `mcpServers.iterminal` object in a client;
+- `mcpConfigPath` — private on-disk handoff used internally by the local stack;
 - `runtimeSocketPath` — local Unix RPC path;
 - `database` — `managed-local-postgres` or `external-postgres`.
+
+In the Console, use **Connect MCP** in the right inspector to copy the complete `mcpServers` JSON
+directly. The UI does not expose the private config path.
 
 The default state root is `.iterminal/local`. Its credential directory and files are mode `0700`
 and `0600` on POSIX. `mcp.json` contains a bearer grant and is credential material: do not print,

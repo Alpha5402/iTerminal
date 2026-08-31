@@ -100,6 +100,47 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
     }
   });
 
+  it("returns copyable MCP JSON without exposing its private file path", async () => {
+    const fixture = await createFixture(fixtures);
+    const mcpConfigPath = join(fixture.root, "mcp.json");
+    const mcpConfiguration = {
+      mcpServers: {
+        iterminal: {
+          args: ["apps/mcp/src/main.ts"],
+          command: "tsx",
+          env: { ITERM_RPC_GRANT: "test-grant" },
+        },
+      },
+    };
+    await writeFile(mcpConfigPath, `${JSON.stringify(mcpConfiguration)}\n`);
+    daemon = await startRuntimeDaemon({ socketPath: join(fixture.root, "runtime.sock") });
+    const app = await createHumanConsoleApp({
+      gateway: runtimeGateway(daemon),
+      mcpConfigPath,
+      port: 80,
+    });
+    try {
+      const response = await app.inject({
+        headers: { host: "127.0.0.1", "x-iterminal-request": "console" },
+        method: "GET",
+        url: "/api/bootstrap",
+      });
+      expect(response.statusCode).toBe(200);
+      const result = response.json<{
+        readonly result: {
+          readonly mcpConnection: { readonly configJson: string; readonly serverName: string };
+        };
+      }>().result;
+      expect(result.mcpConnection).toEqual({
+        configJson: JSON.stringify(mcpConfiguration, null, 2),
+        serverName: "iterminal",
+      });
+      expect(response.body).not.toContain(mcpConfigPath);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("binds Host, Origin, and WebSocket upgrades to one exact loopback authority", async () => {
     const fixture = await createFixture(fixtures);
     daemon = await startRuntimeDaemon({ socketPath: join(fixture.root, "runtime.sock") });

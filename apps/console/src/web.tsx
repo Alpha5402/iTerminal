@@ -124,7 +124,7 @@ interface Bootstrap {
     readonly minRows: number;
   };
   readonly mcpConnection?: {
-    readonly configPath: string;
+    readonly configJson: string;
     readonly serverName: string;
   };
   readonly sessions: readonly Session[];
@@ -158,6 +158,8 @@ const SCREEN_ROWS = 40;
 const MAX_TIMELINE_EVENTS = 500;
 const INPUT_BATCH_MS = 20;
 const GUARD_IDLE_RELEASE_MS = 400;
+const DEFAULT_SESSION_SHELL = "zsh" as const;
+const DEFAULT_SESSION_WORKSPACE = "/";
 
 interface ResumeState {
   readonly cursor: number;
@@ -195,10 +197,9 @@ function App(): React.JSX.Element {
     "offline",
   );
   const [error, setError] = useState<ApiErrorBody>();
-  const [workspaceRoot, setWorkspaceRoot] = useState("");
-  const [shell, setShell] = useState<"bash" | "zsh">("zsh");
   const [command, setCommand] = useState("");
-  const [mcpPathCopied, setMcpPathCopied] = useState(false);
+  const [creatingSession, setCreatingSession] = useState(false);
+  const [mcpConfigCopied, setMcpConfigCopied] = useState(false);
   const [interactive, setInteractive] = useState(false);
   const [resizeColumns, setResizeColumns] = useState(SCREEN_COLUMNS.toString());
   const [resizeRows, setResizeRows] = useState(SCREEN_ROWS.toString());
@@ -283,6 +284,13 @@ function App(): React.JSX.Element {
       })
       .catch((reason: unknown) => setError(normalizeClientError(reason)));
   }, []);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      void refreshSessions().catch((reason: unknown) => setError(normalizeClientError(reason)));
+    }, 3_000);
+    return () => window.clearInterval(interval);
+  }, [refreshSessions]);
 
   useEffect(() => {
     if (terminalHost.current === null) return;
@@ -829,25 +837,34 @@ function App(): React.JSX.Element {
     }
   };
 
-  const createSession = async (event: React.FormEvent): Promise<void> => {
-    event.preventDefault();
-    const signature = JSON.stringify({ shell, workspaceRoot });
+  const createSession = async (): Promise<void> => {
+    if (creatingSession) return;
+    const signature = JSON.stringify({
+      shell: DEFAULT_SESSION_SHELL,
+      workspaceRoot: DEFAULT_SESSION_WORKSPACE,
+    });
     let creation = createIdempotency.current;
     if (creation?.signature !== signature) {
       creation = { key: crypto.randomUUID(), signature };
       createIdempotency.current = creation;
     }
+    setCreatingSession(true);
     try {
       const created = await api<Session>("/api/sessions", {
-        body: { idempotencyKey: creation.key, shell, workspaceRoot },
+        body: {
+          idempotencyKey: creation.key,
+          shell: DEFAULT_SESSION_SHELL,
+          workspaceRoot: DEFAULT_SESSION_WORKSPACE,
+        },
         method: "POST",
       });
       createIdempotency.current = undefined;
       await refreshSessions();
       setSelectedId(created.id);
-      setWorkspaceRoot("");
     } catch (reason) {
       setError(normalizeClientError(reason));
+    } finally {
+      setCreatingSession(false);
     }
   };
 
@@ -870,12 +887,12 @@ function App(): React.JSX.Element {
     }
   };
 
-  const copyMcpConfigPath = async (): Promise<void> => {
-    const path = bootstrap?.mcpConnection?.configPath;
-    if (path === undefined) return;
+  const copyMcpConfig = async (): Promise<void> => {
+    const configJson = bootstrap?.mcpConnection?.configJson;
+    if (configJson === undefined) return;
     try {
-      await navigator.clipboard.writeText(path);
-      setMcpPathCopied(true);
+      await navigator.clipboard.writeText(configJson);
+      setMcpConfigCopied(true);
     } catch (reason) {
       setError(normalizeClientError(reason));
     }
@@ -1025,76 +1042,37 @@ function App(): React.JSX.Element {
       </header>
 
       <section className="workspace-grid">
-        <aside className="rail" aria-label="Sessions">
-          <div className="section-title">
-            <h2>Sessions</h2>
-            <button type="button" onClick={() => void refreshSessions()}>
-              Refresh
-            </button>
-          </div>
-          <div className="session-list">
-            {sessions.map((candidate) => (
-              <button
-                className={candidate.id === selectedId ? "session-card selected" : "session-card"}
-                key={candidate.id}
-                onClick={() => setSelectedId(candidate.id)}
-                type="button"
-              >
-                <strong>{candidate.shell}</strong>
-                <span>{candidate.status}</span>
-                <small>{candidate.workspaceRoot}</small>
-                {candidate.lineage !== undefined && (
-                  <small>from {candidate.lineage.parentSessionId}</small>
-                )}
-              </button>
-            ))}
-          </div>
-          <form className="create-session" onSubmit={(event) => void createSession(event)}>
-            <label>
-              Workspace root
-              <input
-                onChange={(event) => setWorkspaceRoot(event.target.value)}
-                placeholder="/absolute/workspace/path"
-                required
-                value={workspaceRoot}
-              />
-            </label>
-            <label>
-              Shell
-              <select
-                onChange={(event) => setShell(event.target.value as "bash" | "zsh")}
-                value={shell}
-              >
-                <option value="zsh">zsh</option>
-                <option value="bash">bash</option>
-              </select>
-            </label>
-            <button type="submit">Create persistent shell</button>
-          </form>
-          {bootstrap?.mcpConnection !== undefined && (
-            <section className="mcp-connection" aria-label="MCP connection">
-              <div className="section-title">
-                <h2>Connect MCP</h2>
-                <span className="ready-badge">READY</span>
-              </div>
-              <p>
-                In your MCP client, add a server from JSON and use the complete
-                <code> mcpServers.{bootstrap.mcpConnection.serverName}</code> entry from this
-                private file:
-              </p>
-              <code className="mcp-config-path">{bootstrap.mcpConnection.configPath}</code>
-              <button onClick={() => void copyMcpConfigPath()} type="button">
-                {mcpPathCopied ? "Config path copied" : "Copy MCP config path"}
-              </button>
-              <small>
-                Keep this local stack running. Restart it to rotate an expired 24-hour grant. Do not
-                share or commit the config file.
-              </small>
-            </section>
-          )}
-        </aside>
-
         <section className="terminal-stage" aria-label="Shared terminal">
+          <nav aria-label="Sessions" className="session-tabs">
+            <div className="session-tab-strip">
+              {sessions.map((candidate, index) => (
+                <button
+                  aria-current={candidate.id === selectedId ? "page" : undefined}
+                  className={candidate.id === selectedId ? "session-tab selected" : "session-tab"}
+                  key={candidate.id}
+                  onClick={() => setSelectedId(candidate.id)}
+                  title={`${candidate.shell} · ${candidate.workspaceRoot} · ${candidate.status}`}
+                  type="button"
+                >
+                  <span className={`session-tab-signal status-${candidate.status.toLowerCase()}`} />
+                  <span className="session-tab-name">
+                    {candidate.shell} {index + 1}
+                  </span>
+                  <small>{candidate.workspaceRoot}</small>
+                </button>
+              ))}
+            </div>
+            <button
+              aria-label="New Session"
+              className="session-tab-add"
+              disabled={creatingSession}
+              onClick={() => void createSession()}
+              title="New zsh Session at /"
+              type="button"
+            >
+              {creatingSession ? "…" : "+"}
+            </button>
+          </nav>
           <div className="status-strip">
             <span>
               Session <strong>{session?.status ?? "NONE"}</strong>
@@ -1293,6 +1271,29 @@ function App(): React.JSX.Element {
         </section>
 
         <aside className="inspector" aria-label="Interaction and timeline">
+          {bootstrap?.mcpConnection !== undefined && (
+            <section className="mcp-connection" aria-label="MCP connection">
+              <div className="section-title">
+                <h2>Connect MCP</h2>
+                <span className="ready-badge">READY</span>
+              </div>
+              <p>
+                Paste this complete JSON into your MCP client. It already contains
+                <code> mcpServers.{bootstrap.mcpConnection.serverName}</code>.
+              </p>
+              <details>
+                <summary>Preview complete JSON</summary>
+                <pre className="mcp-config-json">{bootstrap.mcpConnection.configJson}</pre>
+              </details>
+              <button onClick={() => void copyMcpConfig()} type="button">
+                {mcpConfigCopied ? "Complete JSON copied" : "Copy complete MCP JSON"}
+              </button>
+              <small>
+                Contains a local 24-hour grant. Keep this stack running; do not share or commit the
+                copied JSON.
+              </small>
+            </section>
+          )}
           <section className="approval-panel" aria-label="Agent Execute approvals">
             <div className="section-title">
               <h2>Approvals</h2>

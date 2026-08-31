@@ -163,14 +163,16 @@ describeDatabase("M10.13 durable local stack", () => {
     expect(bootstrapResponse.status).toBe(200);
     const bootstrap = (await bootstrapResponse.json()) as {
       readonly result?: {
-        readonly mcpConnection?: { readonly configPath: string; readonly serverName: string };
+        readonly mcpConnection?: { readonly configJson: string; readonly serverName: string };
         readonly sessions?: readonly SessionResult[];
       };
     };
+    const expectedMcpConfig = JSON.stringify(configuration, null, 2);
     expect(bootstrap.result?.mcpConnection).toEqual({
-      configPath: stack.mcpConfigPath,
+      configJson: expectedMcpConfig,
       serverName: "iterminal",
     });
+    expect(JSON.stringify(bootstrap.result?.mcpConnection)).not.toContain(stack.mcpConfigPath);
     expect(bootstrap.result?.sessions).toContainEqual(
       expect.objectContaining({ id: session.id, generation: session.generation }),
     );

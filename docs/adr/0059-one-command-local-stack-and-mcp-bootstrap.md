@@ -62,7 +62,10 @@ and secret/config files mode `0600` on supported POSIX platforms.
 
 The generated config uses the repository's installed `tsx` executable and existing MCP entrypoint.
 It is a generic `mcpServers.iterminal` object suitable for copying into clients that accept that
-shape. Client-specific installation remains explicit and must not upload the credential file.
+shape. The loopback Human Console reads it at startup and exposes the complete JSON only through its
+protected, no-store bootstrap response; the UI copies the JSON directly and does not disclose the
+private file path. Client-specific installation remains explicit and must not upload the credential
+file.
 
 ### Lifecycle and failure
 

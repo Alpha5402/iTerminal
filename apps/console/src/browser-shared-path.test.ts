@@ -1,6 +1,6 @@
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -77,6 +77,22 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     });
     const runtime = new UnixRuntimeClient(daemon.socketPath);
     const mcpConfigPath = join(root, "mcp.json");
+    await writeFile(
+      mcpConfigPath,
+      `${JSON.stringify(
+        {
+          mcpServers: {
+            iterminal: {
+              args: ["apps/mcp/src/main.ts"],
+              command: "tsx",
+              env: { ITERM_RUNTIME_SOCKET: daemon.socketPath },
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
     consoleServer = await startHumanConsole({
       gateway: runtime,
       mcpConfigPath,
@@ -94,12 +110,13 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
 
     const mcpPanel = await page.getByLabel("MCP connection").textContent();
     expect(mcpPanel).toContain("Connect MCP");
-    expect(mcpPanel).toContain(mcpConfigPath);
-    expect(mcpPanel).not.toContain("ITERM_RPC_GRANT");
+    expect(mcpPanel).toContain("mcpServers");
+    expect(mcpPanel).not.toContain(mcpConfigPath);
+    expect(await page.locator(".rail").count()).toBe(0);
 
-    await page.getByLabel("Workspace root").fill(workspace);
-    await page.getByRole("button", { name: "Create persistent shell" }).click();
+    await page.getByRole("button", { name: "New Session" }).click();
     await waitForPageText(page, ".status-strip", "READY");
+    expect(await page.locator(".session-tab").count()).toBe(1);
     await page.getByLabel("READY command composer").waitFor({ state: "visible" });
     await page.waitForFunction(
       () => document.activeElement?.getAttribute("aria-label") === "READY command composer",
@@ -127,19 +144,22 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     expect(promptPlacement.editorTop).toBeGreaterThanOrEqual(promptPlacement.screenTop);
     expect(promptPlacement.editorBottom).toBeLessThanOrEqual(promptPlacement.screenBottom + 1);
     expect(await page.locator(".mode-panel").count()).toBe(0);
-    await page.getByLabel("READY command composer").fill("cd subdir && export ITERM_M5=shared");
+    await page
+      .getByLabel("READY command composer")
+      .fill(`cd ${join(workspace, "subdir")} && export ITERM_M5=shared`);
     await page.getByLabel("READY command composer").press("Enter");
     await waitForPageText(page, ".timeline", "execution.completed");
     await waitForPageText(page, ".status-strip", "READY");
     const firstScreen = await page.getByTestId("screen-reader-output").textContent();
-    expect(firstScreen).toContain("cd subdir && export ITERM_M5=shared");
+    expect(firstScreen?.replace(/\n/gu, "")).toContain(`cd ${join(workspace, "subdir")}`);
     expect(firstScreen).not.toContain("__it_execute");
     expect(firstScreen).toMatch(/[^\s@]+@[^\s]+ /u);
-    expect(firstScreen).toMatch(/[%#$] cd subdir/u);
+    expect(firstScreen).toMatch(/[%#$] cd \//u);
 
     const sessions = await callTool<readonly SessionResult[]>(mcp, "session_list", {});
     expect(sessions).toHaveLength(1);
     const session = required(sessions[0]);
+    expect(session.workspaceRoot).toBe("/");
     const proposal = await callTool<ApprovalResult>(mcp, "approval_request", {
       actionIdempotencyKey: "m10-browser-approved-action",
       command: "export ITERM_M10_BROWSER=approved",
@@ -250,6 +270,16 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     expect(Number(durable.rows[0]?.human_actions)).toBeGreaterThanOrEqual(2);
     expect(Number(durable.rows[0]?.agent_actions)).toBeGreaterThanOrEqual(3);
     expect(durable.rows[0]?.guarded_rejected_actions).toBe("0");
+
+    await page.getByRole("button", { exact: true, name: "New Session" }).click();
+    await page.waitForFunction(() => document.querySelectorAll(".session-tab").length === 2);
+    const sessionTabs = page.locator(".session-tab");
+    expect(await sessionTabs.nth(1).textContent()).toContain("/");
+    await sessionTabs.nth(0).click();
+    expect(await sessionTabs.nth(0).getAttribute("aria-current")).toBe("page");
+    const tabSessions = await callTool<readonly SessionResult[]>(mcp, "session_list", {});
+    expect(tabSessions).toHaveLength(2);
+    expect(tabSessions.every((candidate) => candidate.workspaceRoot === "/")).toBe(true);
   }, 60_000);
 
   it("keeps Browser Human secret input out of Console, MCP, screen, and PostgreSQL observations", async () => {
@@ -274,8 +304,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     page = await browser.newPage({ viewport: { height: 1_100, width: 1_600 } });
     await page.goto(consoleServer.url, { waitUntil: "networkidle" });
 
-    await page.getByLabel("Workspace root").fill(workspace);
-    await page.getByRole("button", { name: "Create persistent shell" }).click();
+    await page.getByRole("button", { name: "New Session" }).click();
     await waitForPageText(page, ".status-strip", "READY");
     const [session] = await callTool<readonly SessionResult[]>(mcp, "session_list", {});
     if (session === undefined) throw new Error("Browser secret Session was not created");
@@ -397,8 +426,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     page = await browser.newPage({ viewport: { height: 1_100, width: 1_600 } });
     await page.goto(consoleServer.url, { waitUntil: "networkidle" });
 
-    await page.getByLabel("Workspace root").fill(workspace);
-    await page.getByRole("button", { name: "Create persistent shell" }).click();
+    await page.getByRole("button", { name: "New Session" }).click();
     await waitForPageText(page, ".status-strip", "READY");
     const sessions = await callTool<readonly SessionResult[]>(mcp, "session_list", {});
     const session = required(sessions[0]);
@@ -729,6 +757,7 @@ function required<T>(value: T | undefined): T {
 interface SessionResult {
   readonly generation: number;
   readonly id: string;
+  readonly workspaceRoot: string;
 }
 
 interface ApprovalResult {

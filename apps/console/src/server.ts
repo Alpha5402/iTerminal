@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { resolve } from "node:path";
 
@@ -194,6 +195,10 @@ export async function createHumanConsoleApp(
   const pendingStreamAdmissions = new WeakMap<object, ConsoleStreamReservation>();
   const streamAdmissions = new ConsoleStreamAdmissions(limits);
   const requestRates = new ConsoleRequestRates(limits, now);
+  const mcpConfigJson =
+    options.mcpConfigPath === undefined
+      ? undefined
+      : await readMcpConfiguration(options.mcpConfigPath);
   const app = Fastify({
     bodyLimit: 1024 * 1024,
     logger: options.logger ?? false,
@@ -248,11 +253,11 @@ export async function createHumanConsoleApp(
         minColumns: MIN_TERMINAL_COLUMNS,
         minRows: MIN_TERMINAL_ROWS,
       },
-      ...(options.mcpConfigPath === undefined
+      ...(mcpConfigJson === undefined
         ? {}
         : {
             mcpConnection: {
-              configPath: options.mcpConfigPath,
+              configJson: mcpConfigJson,
               serverName: "iterminal",
             },
           }),
@@ -667,6 +672,15 @@ export async function createHumanConsoleApp(
   }
 
   return app;
+}
+
+async function readMcpConfiguration(path: string): Promise<string> {
+  const source = await readFile(path, "utf8");
+  const parsed: unknown = JSON.parse(source);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("MCP configuration must be a JSON object");
+  }
+  return JSON.stringify(parsed, null, 2);
 }
 
 export async function startHumanConsole(

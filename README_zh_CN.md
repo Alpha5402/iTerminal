@@ -188,8 +188,9 @@ pnpm install
 pnpm local
 ```
 
-最终的 `iterminal.local.ready` JSON 行包含精确的 `consoleUrl` 和私有 `mcpConfigPath`。
-生成的 MCP 配置属于凭据材料。按一次 Ctrl+C 会 Drain Runtime 并停止托管 Stack，同时保留
+打开最终 `iterminal.local.ready` JSON 行里的精确 `consoleUrl`。Console 右侧的
+**Connect MCP** 可以直接复制完整 `mcpServers` JSON，不需要再查找或打开配置文件。复制出的
+MCP 配置属于凭据材料。按一次 Ctrl+C 会 Drain Runtime 并停止托管 Stack，同时保留
 PostgreSQL Volume。
 
 外部 PostgreSQL、配置、关闭、恢复以及刻意保留的单 Runtime 边界，参见
