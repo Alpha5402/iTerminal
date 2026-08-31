@@ -70,6 +70,10 @@ const requiredReports = [
     level: "L3",
     path: "docs/verification/M10/2026-08-31-console-ingress-hardening.md",
   },
+  {
+    level: "L2",
+    path: "docs/verification/M10/2026-08-31-layered-authorization-matrix.md",
+  },
 ];
 
 for (const report of requiredReports) {

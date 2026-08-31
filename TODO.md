@@ -1,10 +1,10 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
-> 状态：Implementation Baseline v6.25 — M10.9 已闭合 opaque Runtime grant、credential-safe RPC error 与 PostgreSQL/RabbitMQ operational diagnostics；M10.8 exact-authority Console ingress 已通过真实 loopback HTTP/WebSocket 与 Chrome Human + official MCP Agent L3 路径；M9.18 已闭合本机 failure/pressure L4 gate；M4 autonomous-model L3 与 repository release L4 仍待完成
+> 状态：Implementation Baseline v6.26 — M10.10 已闭合 Capability、Actor type、Input Policy/Guard、Secret 与 Agent Execute Approval 分层授权矩阵；M10.9 已闭合 credential-safe RPC/diagnostics；M9.18 已闭合本机 failure/pressure L4 gate；M4 autonomous-model L3 与 repository release L4 仍待完成
 >
 > 基线日期：2026-08-31
 >
-> 当前仓库状态：M0–M9 的既有实现与证据保持不变。M10.1 已完成 closed/canonical Actor capability 与 immutable durable identity；M10.2 已完成 signed/expiring operation + Actor scoped Runtime RPC grant；M10.3b 已完成 durable Agent Execute Approval；M10.4 已完成 metadata-only Human SecretInputAction、显式敏感期、Executor-first 全量输出抑制、PostgreSQL/RPC/Router/Console 接入，以及真实 Chrome Human + official MCP 只读观察的无明文抽检；M10.5 已完成 PostgreSQL-authoritative Artifact logical-byte budget、per-row limit、bounded expiry cleanup、operator maintenance command，以及预算拒绝后的 Session `BROKEN`/Execution `UNKNOWN` durability transaction；M10.6 已完成 Application-owned 8 KiB/50 ms PTY output Event coalescing，保持 live screen callback-real-time、exact attribution/ordering/secret boundaries，并让真实一百万字节 node-pty 输出进入 Artifact；M10.7 已完成 database-authoritative Event age/count/batch policy、contiguous-prefix cleanup、latest anchor、durable watermark、stale-cursor resync 与 metadata-only operator command；M10.8 已完成 exact configured Host/port、exact Origin scheme/host/port、all-API request header、Fetch Metadata、Actor/stream/body/message bounds，并通过真实 Chrome shared path；M10.9 已完成 verified/configured/issued grant ordinary-serialization opacity、fixed RPC validation/unknown/transport failures、PostgreSQL/RabbitMQ code-only diagnostics，以及 state/Outbox retry sentinel 抽检。Action/Approval/Outbox 等 normalized facts retention、Artifact/export/recording 生命周期、whole-database disk limit/alert、跨操作 Capability/Policy/Approval 矩阵、Shell marker/path、HTTP request-rate 等其他 hostile-input 安全项与 release/dogfood 仍未完成。真正整机/VM fencing、跨主机/跨平台 soak、autonomous model 授权、daemon restart 后 durable wait 与 repository release L4 仍未证明。
+> 当前仓库状态：M0–M9 的既有实现与证据保持不变。M10.1 已完成 closed/canonical Actor capability 与 immutable durable identity；M10.2 已完成 signed/expiring operation + Actor scoped Runtime RPC grant；M10.3b 已完成 durable Agent Execute Approval；M10.4 已完成 metadata-only Human SecretInputAction、显式敏感期、Executor-first 全量输出抑制、PostgreSQL/RPC/Router/Console 接入，以及真实 Chrome Human + official MCP 只读观察的无明文抽检；M10.5 已完成 PostgreSQL-authoritative Artifact logical-byte budget、per-row limit、bounded expiry cleanup、operator maintenance command，以及预算拒绝后的 Session `BROKEN`/Execution `UNKNOWN` durability transaction；M10.6 已完成 Application-owned 8 KiB/50 ms PTY output Event coalescing，保持 live screen callback-real-time、exact attribution/ordering/secret boundaries，并让真实一百万字节 node-pty 输出进入 Artifact；M10.7 已完成 database-authoritative Event age/count/batch policy、contiguous-prefix cleanup、latest anchor、durable watermark、stale-cursor resync 与 metadata-only operator command；M10.8 已完成 exact configured Host/port、exact Origin scheme/host/port、all-API request header、Fetch Metadata、Actor/stream/body/message bounds，并通过真实 Chrome shared path；M10.9 已完成 verified/configured/issued grant ordinary-serialization opacity、fixed RPC validation/unknown/transport failures、PostgreSQL/RabbitMQ code-only diagnostics，以及 state/Outbox retry sentinel 抽检；M10.10 已完成 Capability、Actor type、Input Policy/Guard、Secret 与 Agent Execute Approval 的分层矩阵、缺 capability 零 Action/PTY 副作用、over-capable Actor 不升格、四 Actor required-Approval scope，以及真实 Unix RPC/PTY focused gate。Action/Approval/Outbox 等 normalized facts retention、Artifact/export/recording 生命周期、whole-database disk limit/alert、Shell marker/path、HTTP request-rate 等其他 hostile-input 安全项与 release/dogfood 仍未完成。真正整机/VM fencing、跨主机/跨平台 soak、autonomous model 授权、daemon restart 后 durable wait 与 repository release L4 仍未证明。
 >
 > 一句话定义：构建一个 Human 与 Agent 对等协作的共享终端 Runtime；每个 Session 拥有一个真实、持久的 PTY 与 Shell，所有 Actor 通过结构化 Action 操作同一份 cwd、env、Shell 与 foreground process 状态。
 
@@ -701,7 +701,7 @@ MVP 假设单机受信用户；Agent 可能犯错或受提示注入影响，但 
 - [x] 不继承完整宿主 env；Runtime env、Shell env、checkpoint env 分开定义。
 - [x] Secret 不进入 Action payload、Event、Snapshot、Checkpoint、MCP result、普通 log/recording（M10.4 sentinel 抽检覆盖 Action/Event/search/Artifact/Execution/Screen/sensitive state 与 MCP 观察；Snapshot/Checkpoint schema 不承载输入或 raw PTY output；OS swap/core/browser devtools 不在此声明）。
 - [x] Human-only secret channel 直接写 PTY，只记录 lifecycle metadata；敏感期间 Executor-first 抑制 screen/event/recording 原始输出（M10.4）。
-- [ ] Approval 绑定 immutable Action request hash + session generation + actor + expiry；任何变化使批准失效。
+- [x] Approval 绑定 immutable Action request hash + session generation + actor + expiry；任何变化使批准失效（M10.3b durable atomic consumption；M10.10 分层矩阵）。
 - [ ] PTY/Shell 独立 process group/session；close/timeout 使用可配置 Control -> SIGTERM -> SIGKILL，并验证子进程回收。
 - [ ] 限制 Session、event bytes、artifact bytes、单次返回、WS backlog、screen geometry、Action rate。
 - [x] Shell marker parser 抵抗注入、oversize frame、partial frame 与 nonce replay。
@@ -1046,7 +1046,7 @@ Exit Gate：已通过 8 Worker 持续 chaos/pressure；每个 generation 最多�
 - [x] M10.2 authenticated Runtime RPC Actor grant：HMAC-SHA256 signed/expiring grant 绑定 canonical operation allowlist 与 exact/paired-prefix Actor scope；direct daemon、central Router verified-context forwarding + owner re-verification、Worker exact service identity 均通过真实路径（L2；同 OS user local trust domain，不等于 remote/multi-user sandbox）。
 - [x] M10.3a Approval contract：ADR-0049 冻结 Agent Execute 的 optional/required policy、exact proposed-Action identity、PENDING→APPROVED/DENIED/EXPIRED→CONSUMED 状态机、Human-only decision、DB-time TTL 与 Action admission 同事务一次性消费；实现证据见 M10.3b。
 - [x] M10.3b durable Agent Execute Approval：domain/Application/PostgreSQL/Runtime RPC/Router/MCP/Human Console；真实 PostgreSQL 原子回滚/单次消费、required policy、真实 Chrome Human + official MCP Agent 路径（L3）。
-- [ ] Capability/Policy/Approval 完整矩阵。
+- [x] M10.10 Capability/Policy/Approval 完整矩阵：ADR-0056 冻结 capability、Actor type、Input Policy/Guard、Secret 与 Agent Execute Approval 的独立合取层；缺 capability 零 Action/PTY 副作用、全 capability 不升格、四 Actor required-Approval scope 与真实 Unix RPC/PTY focused gate（L2；不扩大 Approval 范围，不等于 OS sandbox/remote auth）。
 - [x] M10.4 secret channel、敏感期 recording redaction、Action/Event/search/Artifact/Execution/Screen/sensitive state 自动抽检（L3 local Browser Human + official MCP observation；不等于 OS memory/swap/core protection）。
 - [x] M10.4 Human-only secret input 与敏感期交互：metadata-only Action、exact Human finish、普通 Input 阻断、Human Control 保留、disconnect/Execution exit fail-closed。
 - [x] M10.5 bounded Artifact storage：PostgreSQL-authoritative aggregate/per-row logical-byte budget、exact usage accounting、bounded expiry cleanup、metadata-only operator command；live durability admission failure 原子落下 Session `BROKEN`、Execution/Action `UNKNOWN` 并释放 lease（L2；不等于 whole-database 磁盘预算、告警或 PTY 小分块聚合）。
@@ -1157,7 +1157,7 @@ Exit Gate：已通过 8 Worker 持续 chaos/pressure；每个 generation 最多�
 - [x] Session 忙时 fail-fast，不建 Execute Queue；并行用 fork Session。
 - [x] Human READY 使用 composer，RUNNING 使用 interactive input。
 - [x] ADR-0023 冻结 M6.5 policy/Guard 精确契约；默认 `human_guarded`、TTL 500 ms（50 ms–5 s）、最多续租 3 次。
-- [x] Human emergency Control 的 `bypassGuard` 仅按 trusted-local Human role 绕过 Guard，不绕过 policy/stale/approval；完整 capability 待 M10。
+- [x] Human emergency Control 的 `bypassGuard` 仅按 trusted-local Human role 绕过 Guard，不绕过 policy/stale/approval；M10.10 已验证全 capability Agent 仍不能请求 bypass。
 - [ ] Checkpoint 只保存 cwd + shell + filtered exported env + workspace。
 - [x] PostgreSQL 为 durable truth；单个持久化 PTY output chunk 达阈值转 Artifact。
 - [x] MCP M4 先 stdio；对外 HTTP 后续实现 Origin/Auth。
@@ -1228,5 +1228,6 @@ v1.0 还必须满足 M7–M10、fork 语义、故障矩阵、owner routing、mul
 34. [x] `feat(storage): bound cursor-safe Event retention`：migration 018、database-authoritative age/count/batch policy、one-generation/one-prefix bounded cleanup、latest anchor、durable watermark、stale cursor resync 与 metadata-only operator path（M10.7 L2；normalized facts/whole-database disk 未包含）。
 35. [x] `fix(console): harden loopback ingress boundaries`：exact Host/Origin tuple、all-API request header + Fetch Metadata、Actor/stream/body/message limits、1008/1009 fail-closed WebSocket 与真实 Chrome shared-path evidence（M10.8 L3；remote/multi-user/sandbox 未包含）。
 36. [x] `fix(security): keep credentials out of operational diagnostics`：opaque Runtime grant/client/issuer serialization、fixed RPC failure contract、code-only PostgreSQL/RabbitMQ state 与 credential-free Outbox retry sentinel evidence（M10.9 L2；issuer stdout 仍是显式 credential channel）。
+37. [x] `test(security): close layered authorization matrix`：ADR-0056、完整 capability/role/policy/Guard/Secret/Approval 操作表、缺权限零 Action/PTY、over-capable Actor 不升格与四 Actor Execute Approval scope（M10.10 L2；不扩大 Approval 范围）。
 
 M5 shared path 已闭合，但 M6 完整 L3 与其余 MVP Gate 未闭合前，不因为 M8 已有故障证据就宣称 MVP。
