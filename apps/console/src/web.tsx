@@ -165,7 +165,7 @@ interface ResumeState {
   readonly screenVersion: number;
 }
 
-interface ReadyCommandLayout {
+interface CursorComposerLayout {
   readonly height: number;
   readonly left: number;
   readonly top: number;
@@ -186,6 +186,9 @@ function App(): React.JSX.Element {
   const [approvalReason, setApprovalReason] = useState("Reviewed in Human Console");
   const [sensitiveInput, setSensitiveInput] = useState<SensitiveInput>();
   const [secret, setSecret] = useState("");
+  const [secretSubmitting, setSecretSubmitting] = useState(false);
+  const [secureInputRequested, setSecureInputRequested] = useState(false);
+  const [dismissedSecretPromptKey, setDismissedSecretPromptKey] = useState<string>();
   const [cursor, setCursor] = useState(0);
   const latestCursor = useRef(0);
   const [streamState, setStreamState] = useState<"offline" | "connecting" | "live" | "gap">(
@@ -200,9 +203,10 @@ function App(): React.JSX.Element {
   const [resizeColumns, setResizeColumns] = useState(SCREEN_COLUMNS.toString());
   const [resizeRows, setResizeRows] = useState(SCREEN_ROWS.toString());
   const [browserTerminalMirror, setBrowserTerminalMirror] = useState("");
-  const [readyCommandLayout, setReadyCommandLayout] = useState<ReadyCommandLayout>();
+  const [cursorComposerLayout, setCursorComposerLayout] = useState<CursorComposerLayout>();
   const interactiveState = useRef(false);
   const commandEditor = useRef<HTMLDivElement>(null);
+  const secretEditor = useRef<HTMLInputElement>(null);
   const terminalHost = useRef<HTMLDivElement>(null);
   const terminalSurface = useRef<HTMLDivElement>(null);
   const terminal = useRef<Terminal | undefined>(undefined);
@@ -227,6 +231,13 @@ function App(): React.JSX.Element {
   const sensitiveInputRevision = timeline.findLast((event) =>
     event.type.startsWith("sensitive_input."),
   )?.sequence;
+  const secretPromptKey = detectSecretPromptKey(session, screen);
+  const secureInputVisible =
+    session?.status === "RUNNING" &&
+    sensitiveInput?.status !== "ACTIVE" &&
+    (secureInputRequested ||
+      (secretPromptKey !== undefined && secretPromptKey !== dismissedSecretPromptKey));
+  const cursorComposerRequested = session?.status === "READY" || secureInputVisible;
 
   useEffect(() => {
     latestSession.current = session;
@@ -318,30 +329,30 @@ function App(): React.JSX.Element {
     if (terminal.current !== undefined && screen !== undefined) {
       renderScreen(terminal.current, screen, session?.status === "RUNNING", (text) => {
         setBrowserTerminalMirror(text);
-        if (session?.status === "READY") {
+        if (cursorComposerRequested) {
           window.requestAnimationFrame(() => {
-            syncReadyCommandLayout(
+            syncCursorComposerLayout(
               terminalHost.current,
               terminalSurface.current,
               screen,
-              setReadyCommandLayout,
+              setCursorComposerLayout,
             );
           });
         }
       });
     }
-  }, [screen, session?.status]);
+  }, [cursorComposerRequested, screen, session?.status]);
 
   useEffect(() => {
-    if (session?.status !== "READY" || screen === undefined) {
-      setReadyCommandLayout(undefined);
+    if (!cursorComposerRequested || screen === undefined) {
+      setCursorComposerLayout(undefined);
       return;
     }
     const host = terminalHost.current;
     const surface = terminalSurface.current;
     if (host === null || surface === null) return;
     const sync = (): void => {
-      syncReadyCommandLayout(host, surface, screen, setReadyCommandLayout);
+      syncCursorComposerLayout(host, surface, screen, setCursorComposerLayout);
     };
     const frame = window.requestAnimationFrame(sync);
     const observer = new ResizeObserver(sync);
@@ -355,9 +366,9 @@ function App(): React.JSX.Element {
       host.removeEventListener("scroll", sync);
       window.removeEventListener("resize", sync);
     };
-  }, [screen, session?.status]);
+  }, [cursorComposerRequested, screen]);
 
-  const readyCommandVisible = readyCommandLayout !== undefined;
+  const readyCommandVisible = session?.status === "READY" && cursorComposerLayout !== undefined;
   useEffect(() => {
     if (session?.status !== "READY" || !readyCommandVisible) return;
     const frame = window.requestAnimationFrame(() => {
@@ -366,6 +377,20 @@ function App(): React.JSX.Element {
     });
     return () => window.cancelAnimationFrame(frame);
   }, [readyCommandVisible, session?.generation, session?.id, session?.status]);
+
+  useEffect(() => {
+    if (!secureInputVisible || cursorComposerLayout === undefined) return;
+    terminal.current?.blur();
+    setInteractive(false);
+    const frame = window.requestAnimationFrame(() => secretEditor.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [cursorComposerLayout, secureInputVisible]);
+
+  useEffect(() => {
+    setDismissedSecretPromptKey(undefined);
+    setSecureInputRequested(false);
+    setSecret("");
+  }, [session?.activeExecutionId, session?.generation, session?.id]);
 
   useEffect(() => {
     if (screen === undefined) return;
@@ -586,9 +611,11 @@ function App(): React.JSX.Element {
 
   const beginSecretInput = async (event: React.FormEvent): Promise<void> => {
     event.preventDefault();
+    if (secretSubmitting) return;
     const currentSession = requiredRunningSession();
     const transientSecret = secret;
     setSecret("");
+    setSecretSubmitting(true);
     try {
       await api(`/api/sessions/${encodeURIComponent(currentSession.id)}/secret-input`, {
         body: {
@@ -604,8 +631,11 @@ function App(): React.JSX.Element {
           `/api/sessions/${encodeURIComponent(currentSession.id)}/secret-input?generation=${currentSession.generation.toString()}`,
         ),
       );
+      setSecureInputRequested(false);
     } catch (reason) {
       setError(normalizeClientError(reason));
+    } finally {
+      setSecretSubmitting(false);
     }
   };
 
@@ -1109,17 +1139,17 @@ function App(): React.JSX.Element {
             />
             {session?.status === "READY" &&
               sensitiveInput?.status !== "ACTIVE" &&
-              readyCommandLayout !== undefined && (
+              cursorComposerLayout !== undefined && (
                 <form
                   aria-label="Shell prompt command line"
-                  className="ready-terminal-command"
+                  className="terminal-cursor-composer"
                   onSubmit={(event) => void execute(event)}
                   style={{
-                    height: readyCommandLayout.height,
-                    left: readyCommandLayout.left,
-                    lineHeight: `${readyCommandLayout.height.toString()}px`,
-                    top: readyCommandLayout.top,
-                    width: readyCommandLayout.width,
+                    height: cursorComposerLayout.height,
+                    left: cursorComposerLayout.left,
+                    lineHeight: `${cursorComposerLayout.height.toString()}px`,
+                    top: cursorComposerLayout.top,
+                    width: cursorComposerLayout.width,
                   }}
                 >
                   <div
@@ -1151,6 +1181,41 @@ function App(): React.JSX.Element {
                   />
                 </form>
               )}
+            {secureInputVisible && cursorComposerLayout !== undefined && (
+              <form
+                aria-label="Secure terminal input"
+                className="terminal-cursor-composer"
+                onSubmit={(event) => void beginSecretInput(event)}
+                style={{
+                  height: cursorComposerLayout.height,
+                  left: cursorComposerLayout.left,
+                  lineHeight: `${cursorComposerLayout.height.toString()}px`,
+                  top: cursorComposerLayout.top,
+                  width: cursorComposerLayout.width,
+                }}
+              >
+                <input
+                  aria-label="Human-only secret input"
+                  autoComplete="off"
+                  autoFocus
+                  className="secure-command-editor"
+                  disabled={secretSubmitting}
+                  onChange={(event) => setSecret(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Escape") return;
+                    event.preventDefault();
+                    setDismissedSecretPromptKey(secretPromptKey);
+                    setSecureInputRequested(false);
+                    setSecret("");
+                    terminal.current?.focus();
+                  }}
+                  ref={secretEditor}
+                  spellCheck={false}
+                  type="password"
+                  value={secret}
+                />
+              </form>
+            )}
           </div>
           <pre className="screen-reader-output" data-testid="screen-reader-output">
             {screen?.lines.join("\n") ?? ""}
@@ -1203,30 +1268,25 @@ function App(): React.JSX.Element {
                     <button onClick={() => void sendControl("CTRL_C")} type="button">
                       Send TTY Ctrl+C
                     </button>
+                    <button
+                      aria-pressed={secureInputVisible}
+                      onClick={() => {
+                        if (secureInputVisible) {
+                          setDismissedSecretPromptKey(secretPromptKey);
+                          setSecureInputRequested(false);
+                          setSecret("");
+                          terminal.current?.focus();
+                        } else {
+                          setDismissedSecretPromptKey(undefined);
+                          setSecureInputRequested(true);
+                        }
+                      }}
+                      type="button"
+                    >
+                      {secureInputVisible ? "Leave secure input" : "Enter secure input at cursor"}
+                    </button>
                     <span>Raw keys become 20 ms InputAction batches.</span>
                   </div>
-                  <form
-                    className="secret-channel"
-                    onSubmit={(event) => void beginSecretInput(event)}
-                  >
-                    <label htmlFor="secret-input">Human-only secret input</label>
-                    <div>
-                      <input
-                        autoComplete="off"
-                        id="secret-input"
-                        onChange={(event) => setSecret(event.target.value)}
-                        required
-                        spellCheck={false}
-                        type="password"
-                        value={secret}
-                      />
-                      <button type="submit">Send once and redact output</button>
-                    </div>
-                    <small>
-                      The value is transient and is not stored in Action, Event, screen, or
-                      recording data.
-                    </small>
-                  </form>
                 </>
               ) : (
                 <p className="mode-note">
@@ -1512,11 +1572,11 @@ function placeCaretAtEnd(element: HTMLElement): void {
   selection.addRange(range);
 }
 
-function syncReadyCommandLayout(
+function syncCursorComposerLayout(
   host: HTMLDivElement | null,
   surface: HTMLDivElement | null,
   screen: ScreenSnapshot,
-  setLayout: React.Dispatch<React.SetStateAction<ReadyCommandLayout | undefined>>,
+  setLayout: React.Dispatch<React.SetStateAction<CursorComposerLayout | undefined>>,
 ): void {
   if (host === null || surface === null) return;
   const xtermScreen = host.querySelector<HTMLElement>(".xterm-screen");
@@ -1543,6 +1603,26 @@ function syncReadyCommandLayout(
       ? current
       : next,
   );
+}
+
+function detectSecretPromptKey(
+  session: Session | undefined,
+  screen: ScreenSnapshot | undefined,
+): string | undefined {
+  if (session?.status !== "RUNNING" || screen === undefined) return undefined;
+  const line = screen.lines[screen.cursor.row] ?? "";
+  const beforeCursor = line.slice(0, screen.cursor.column).trimEnd();
+  if (!/(?:\b(?:password|passphrase)\b|密码|口令)[^:\n：]{0,160}[:：]\s*$/iu.test(beforeCursor)) {
+    return undefined;
+  }
+  return [
+    session.id,
+    session.generation.toString(),
+    session.activeExecutionId ?? "none",
+    screen.cursor.row.toString(),
+    screen.cursor.column.toString(),
+    beforeCursor,
+  ].join(":");
 }
 
 function captureBrowserTerminal(terminal: Terminal, rows: number): string {

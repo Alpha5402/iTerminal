@@ -412,7 +412,7 @@ textarea {
   background: #080d14;
 }
 
-.ready-terminal-command {
+.terminal-cursor-composer {
   position: absolute;
   z-index: 4;
   margin: 0;
@@ -424,8 +424,28 @@ textarea {
   scrollbar-width: none;
 }
 
-.ready-terminal-command::-webkit-scrollbar {
+.terminal-cursor-composer::-webkit-scrollbar {
   display: none;
+}
+
+.secure-command-editor {
+  width: 100%;
+  min-width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  background: #070a0f;
+  color: transparent;
+  caret-color: #67e8f9;
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 13px;
+  line-height: inherit;
+}
+
+.secure-command-editor:focus {
+  box-shadow: none;
 }
 
 .command-editor {

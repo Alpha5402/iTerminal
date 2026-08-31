@@ -286,12 +286,33 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
 
     await page
       .getByLabel("READY command composer")
-      .fill(`IFS= read -r ITERM_SECRET; printf 'ECHO:%s\\n' "$ITERM_SECRET"; sleep 30`);
+      .fill(
+        `printf 'Password:'; IFS= read -r ITERM_SECRET; printf 'ECHO:%s\\n' "$ITERM_SECRET"; sleep 30`,
+      );
     await page.getByLabel("READY command composer").press("Enter");
     await waitForPageText(page, ".status-strip", "RUNNING");
+    await waitForPageText(page, '[data-testid="screen-reader-output"]', "Password:");
+    await page.getByLabel("Human-only secret input").waitFor({ state: "visible" });
+    const securePlacement = await page.getByLabel("Human-only secret input").evaluate((input) => {
+      const inputRect = input.getBoundingClientRect();
+      const xtermScreen = document.querySelector<HTMLElement>(".xterm-screen");
+      const screenRect = xtermScreen?.getBoundingClientRect();
+      return {
+        bottomPanelSecretInputs: document.querySelectorAll(
+          '.mode-panel [aria-label="Human-only secret input"]',
+        ).length,
+        insideTerminal:
+          screenRect !== undefined &&
+          inputRect.left >= screenRect.left - 1 &&
+          inputRect.top >= screenRect.top - 1 &&
+          inputRect.right <= screenRect.right + 1 &&
+          inputRect.bottom <= screenRect.bottom + 1,
+      };
+    });
+    expect(securePlacement).toEqual({ bottomPanelSecretInputs: 0, insideTerminal: true });
     const secret = "BROWSER_SECRET_SENTINEL_752c";
     await page.getByLabel("Human-only secret input").fill(secret);
-    await page.getByRole("button", { name: "Send once and redact output" }).click();
+    await page.getByLabel("Human-only secret input").press("Enter");
     await waitForPageText(page, ".secret-channel.active", "Sensitive output redaction is active");
     await waitForPageText(
       page,

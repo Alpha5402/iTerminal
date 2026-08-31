@@ -27,7 +27,7 @@ ITERM_RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5673 \
 pnpm test:m8:dispatch
 ```
 
-- M8.2 owner dispatch: 4 tests passed.
+- M8.2 owner dispatch: 6 tests passed.
 - Application external-dispatch and Runtime RPC regression: 6 tests passed.
 - M1 immediate-dispatch regression: 5 tests passed.
 
@@ -41,7 +41,22 @@ pnpm test:m8:dispatch
 | Worker crash before RPC            | Worker acquires Inbox then receives `SIGKILL`; RabbitMQ redelivery plus the expired Inbox lease lets a replacement Worker dispatch once                      |
 | Runtime crash after PTY write      | Runtime receives `SIGKILL` immediately after Executor write; replacement owner marks the old generation `BROKEN/UNKNOWN`; retry is stale and not replayed    |
 | Runtime crash before finish commit | The real command appends once, Runtime dies after command completion but before terminal persistence, and recovery records `UNKNOWN` without a second append |
+| Router-mode multi-owner dispatch   | One Worker routes two admitted Executions to two explicit Runtime owners; both real zsh side effects complete and two Inbox records settle once              |
 | Durable uncertainty boundary       | Exactly one `execution.write_attempted` Event exists for every dispatched crash scenario                                                                     |
+
+## CI timing correction — 2026-08-31
+
+The delivery suite originally assigned its healthy in-process Runtime fixtures a 300 ms owner
+lease. On a contended Ubuntu runner, two Runtime registrations, Router placement, PostgreSQL work,
+and real zsh startup could miss that synthetic deadline. Owner-loss recovery then correctly changed
+an in-flight Session from `STARTING` to `BROKEN`; the later Shell-ready callback surfaced the
+secondary `Expected STARTING, received BROKEN` error.
+
+These cases exercise delivery/replay rather than sub-second lease expiry, so their fixture lease is
+now 2 seconds (production remains 15 seconds). The actual Runtime-crash fixtures keep an explicit
+300 ms lease where fast replacement is part of the scenario. The corrected six-test suite passed
+five consecutive full runs, and the router-mode case passed ten consecutive focused runs against
+isolated PostgreSQL 17 and RabbitMQ 4.3 containers.
 
 ## Failure semantics observed
 

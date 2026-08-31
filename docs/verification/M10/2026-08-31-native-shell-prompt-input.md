@@ -61,6 +61,12 @@ following:
    real Python REPL, enforced the Human Interaction Guard, and returned to the prompt.
 5. The page viewport remained fixed without requiring a document scroll to reach a separate READY
    input control.
+6. A RUNNING command printed `Password:` and blocked on a real PTY read. The Console detected the
+   prompt, mounted the Human-only password editor geometrically inside `.xterm-screen` at the
+   canonical cursor, and rendered no secret textbox in `.mode-panel`. Enter used the existing
+   SecretInputAction path; the sentinel remained absent from Console text, screen, MCP observation,
+   Action/Event payloads, search, artifacts, and sensitive-input metadata while output redaction was
+   active.
 
 ## Failed attempts and corrections
 
@@ -75,6 +81,10 @@ following:
 - A strict prompt regex assumed cwd and prompt characters occupied one row. The real 120-column
   terminal correctly wrapped the long fixture path, so the assertion now verifies native identity
   and prompt-command fragments independently.
+- The first secret-input UI placed its password field in the bottom RUNNING mode panel. The final
+  presentation recognizes common password/passphrase prompts and places the transient password
+  editor at the Virtual Screen cursor; unknown prompts retain an explicit manual secure-input
+  control. This changes presentation only, not the Human-only/redaction persistence boundary.
 
 ## Not proven
 

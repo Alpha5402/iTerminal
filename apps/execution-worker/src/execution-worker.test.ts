@@ -129,7 +129,7 @@ describeDispatch("M8.2 owner-local Execution dispatch", () => {
       databaseUrl: databaseUrl ?? "",
       executionDispatch: "external",
       ownerId,
-      ownerLeaseMilliseconds: 300,
+      ownerLeaseMilliseconds: 2_000,
       rpcAuthentication: authentication,
       socketPath: fixture.socketPath,
     });
@@ -348,7 +348,15 @@ describeDispatch("M8.2 owner-local Execution dispatch", () => {
     return prefix;
   }
 
-  async function createDaemon(socketPath: string, ownerId: string): Promise<RuntimeDaemonHandle> {
+  async function createDaemon(
+    socketPath: string,
+    ownerId: string,
+    // M8.2 exercises delivery and replay, not sub-second owner failure detection. A 300 ms lease
+    // is shorter than ordinary scheduling stalls on a contended CI runner and can falsely recover
+    // a healthy owner while its real zsh PTY is still starting. Crash fixtures below explicitly
+    // retain their 300 ms lease where fast owner replacement is part of the scenario.
+    ownerLeaseMilliseconds = 2_000,
+  ): Promise<RuntimeDaemonHandle> {
     const daemon = await startRuntimeDaemon({
       databaseHealthCheckMilliseconds: 50,
       databaseReconnectInitialMilliseconds: 25,
@@ -357,7 +365,7 @@ describeDispatch("M8.2 owner-local Execution dispatch", () => {
       databaseUrl: databaseUrl ?? "",
       executionDispatch: "external",
       ownerId,
-      ownerLeaseMilliseconds: 300,
+      ownerLeaseMilliseconds,
       socketPath,
     });
     await daemon.waitUntilReady();
