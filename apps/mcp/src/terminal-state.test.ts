@@ -155,7 +155,7 @@ describeFixtures("M6.7 bounded terminal-state evidence", () => {
       command: requiredProgram("top"),
       key: "state-top",
     });
-    await waitUntilRunning(activeClient, monitor.execution.id);
+    await waitForText(activeClient, session, "load", false);
     await expectState(activeClient, session, {
       confidence: "high",
       executionId: monitor.execution.id,
@@ -264,9 +264,10 @@ async function waitForText(
   activeClient: Client,
   session: SessionResult,
   text: string,
+  caseSensitive = true,
 ): Promise<void> {
   const result = await callTool<WaitResult>(activeClient, "screen_wait", {
-    condition: { caseSensitive: true, text, type: "text" },
+    condition: { caseSensitive, text, type: "text" },
     generation: session.generation,
     sessionId: session.id,
     timeoutMilliseconds: 5_000,
