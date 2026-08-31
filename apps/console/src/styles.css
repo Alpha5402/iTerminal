@@ -351,6 +351,13 @@ textarea {
   overflow: hidden;
 }
 
+.terminal-surface {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  background: #070a0f;
+}
+
 .status-strip {
   gap: 1rem;
   min-height: 2.8rem;
@@ -365,6 +372,7 @@ textarea {
 }
 
 .terminal-host {
+  height: 100%;
   min-height: 0;
   padding: 0.9rem;
   overflow: auto;
@@ -404,53 +412,41 @@ textarea {
   background: #080d14;
 }
 
-.terminal-command-line {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 0.35rem 0.65rem;
-  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+.ready-terminal-command {
+  position: absolute;
+  z-index: 4;
+  margin: 0;
+  padding: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 0;
+  background: #070a0f;
+  scrollbar-width: none;
 }
 
-.command-prompt {
-  color: #67e8f9;
-  font-weight: 700;
+.ready-terminal-command::-webkit-scrollbar {
+  display: none;
 }
 
 .command-editor {
-  min-width: 0;
-  min-height: 2.35rem;
-  padding: 0.55rem 0.15rem;
-  overflow-x: auto;
-  color: #ecfeff;
+  display: inline-block;
+  width: max-content;
+  min-width: 100%;
+  height: 100%;
+  padding: 0;
+  overflow: visible;
+  color: #dbeafe;
   caret-color: #67e8f9;
-  line-height: 1.25rem;
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 13px;
+  line-height: inherit;
   outline: none;
-  white-space: nowrap;
-}
-
-.command-editor:empty::before {
-  color: #526078;
-  content: attr(data-placeholder);
-  pointer-events: none;
+  vertical-align: top;
+  white-space: pre;
 }
 
 .command-editor:focus {
   text-shadow: 0 0 0.8rem rgb(103 232 249 / 18%);
-}
-
-.terminal-command-line button {
-  border-color: #155e75;
-  background: #0c2530;
-}
-
-.command-hint {
-  display: flex;
-  grid-column: 2 / 4;
-  justify-content: space-between;
-  color: #64748b;
-  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
-  font-size: 0.65rem;
 }
 
 .interactive-controls {

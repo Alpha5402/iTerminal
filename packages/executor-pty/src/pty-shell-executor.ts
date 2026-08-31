@@ -9,6 +9,7 @@ import {
   readSync,
   realpathSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -46,6 +47,10 @@ const EXECUTION_RING_BYTES = 2 * 1024 * 1024;
 const PTY_BARRIER_PREFIX = "\x1b]1337;iTerminalBarrier=";
 const PTY_BARRIER_SUFFIX = "\x07";
 const MAX_PTY_BARRIER_TOKEN_CHARACTERS = 64;
+const BASH_DISPATCH_LOAD_SEQUENCE = "\x18\x01";
+const BASH_DISPATCH_ACCEPT_SEQUENCE = "\x1b[A\r";
+const ZSH_DISPATCH_LOAD_SEQUENCE = "\x1b[99~";
+const ZSH_DISPATCH_ACCEPT_SEQUENCE = "\r";
 
 interface PendingExecution {
   readonly token: string;
@@ -85,6 +90,8 @@ export class PtyShellExecutor implements ShellExecutor {
   readonly #controlFifo: string;
   readonly #controlFd: number;
   readonly #controlPoll: NodeJS.Timeout;
+  readonly #dispatchCommandFile: string;
+  readonly #dispatchTokenFile: string;
   readonly #decoder = new ControlFrameDecoder();
   readonly #events: ControlEvent[] = [];
   readonly #waiters = new Set<ControlWaiter>();
@@ -130,6 +137,8 @@ export class PtyShellExecutor implements ShellExecutor {
         this.#runtimeDirectory,
         this.#controlFifo,
       );
+      this.#dispatchCommandFile = profile.dispatchCommandFile;
+      this.#dispatchTokenFile = profile.dispatchTokenFile;
       shellPty = pty.spawn(profile.executable, [...profile.args], {
         cols: CANONICAL_TERMINAL_COLUMNS,
         cwd: initialCwd,
@@ -221,7 +230,17 @@ export class PtyShellExecutor implements ShellExecutor {
         token,
       };
       this.#pending = pending;
-      this.#pty.write(`${wrapCommand(command, token)}\r`);
+      try {
+        writeFileSync(this.#dispatchCommandFile, command, { encoding: "utf8", mode: 0o600 });
+        writeFileSync(this.#dispatchTokenFile, token, { encoding: "utf8", mode: 0o600 });
+        this.#pty.write(
+          this.shell === "bash" ? BASH_DISPATCH_LOAD_SEQUENCE : ZSH_DISPATCH_LOAD_SEQUENCE,
+        );
+      } catch (error) {
+        clearTimeout(pending.timer);
+        this.#pending = undefined;
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
     });
   }
 
@@ -338,6 +357,9 @@ export class PtyShellExecutor implements ShellExecutor {
     if (event.type === "preexec" && pending !== undefined && !pending.started) {
       pending.started = true;
       pending.callbacks.onStarted(event.command);
+      this.#pty.write(
+        this.shell === "bash" ? BASH_DISPATCH_ACCEPT_SEQUENCE : ZSH_DISPATCH_ACCEPT_SEQUENCE,
+      );
     } else if (event.type === "result" && pending !== undefined) {
       pending.resultExitCode = event.exitCode;
     } else if (event.type === "ready" && pending !== undefined && pending.started) {
@@ -492,14 +514,6 @@ export class PtyShellExecutor implements ShellExecutor {
     this.#waiters.clear();
     queueMicrotask(() => this.close());
   }
-}
-
-function wrapCommand(command: string, barrierToken: string): string {
-  return `__it_execute ${quote(command)} ${quote(barrierToken)}`;
-}
-
-function quote(value: string): string {
-  return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 function childEnvironment(extra: Readonly<Record<string, string>>): Record<string, string> {

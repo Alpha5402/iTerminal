@@ -100,10 +100,42 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     await page.getByLabel("Workspace root").fill(workspace);
     await page.getByRole("button", { name: "Create persistent shell" }).click();
     await waitForPageText(page, ".status-strip", "READY");
+    await page.getByLabel("READY command composer").waitFor({ state: "visible" });
+    await page.waitForFunction(
+      () => document.activeElement?.getAttribute("aria-label") === "READY command composer",
+    );
+    const promptPlacement = await page.evaluate(() => {
+      const editor = document.querySelector<HTMLElement>('[aria-label="READY command composer"]');
+      const xtermScreen = document.querySelector<HTMLElement>(".xterm-screen");
+      if (editor === null || xtermScreen === null) {
+        throw new Error("READY command editor was not rendered inside the terminal");
+      }
+      const editorRect = editor.getBoundingClientRect();
+      const screenRect = xtermScreen.getBoundingClientRect();
+      return {
+        activeLabel: document.activeElement?.getAttribute("aria-label"),
+        editorBottom: editorRect.bottom,
+        editorLeft: editorRect.left,
+        editorTop: editorRect.top,
+        screenBottom: screenRect.bottom,
+        screenLeft: screenRect.left,
+        screenTop: screenRect.top,
+      };
+    });
+    expect(promptPlacement.activeLabel).toBe("READY command composer");
+    expect(promptPlacement.editorLeft).toBeGreaterThan(promptPlacement.screenLeft);
+    expect(promptPlacement.editorTop).toBeGreaterThanOrEqual(promptPlacement.screenTop);
+    expect(promptPlacement.editorBottom).toBeLessThanOrEqual(promptPlacement.screenBottom + 1);
+    expect(await page.locator(".mode-panel").count()).toBe(0);
     await page.getByLabel("READY command composer").fill("cd subdir && export ITERM_M5=shared");
-    await page.getByRole("button", { name: "Execute Action" }).click();
+    await page.getByLabel("READY command composer").press("Enter");
     await waitForPageText(page, ".timeline", "execution.completed");
     await waitForPageText(page, ".status-strip", "READY");
+    const firstScreen = await page.getByTestId("screen-reader-output").textContent();
+    expect(firstScreen).toContain("cd subdir && export ITERM_M5=shared");
+    expect(firstScreen).not.toContain("__it_execute");
+    expect(firstScreen).toMatch(/[^\s@]+@[^\s]+ /u);
+    expect(firstScreen).toMatch(/[%#$] cd subdir/u);
 
     const sessions = await callTool<readonly SessionResult[]>(mcp, "session_list", {});
     expect(sessions).toHaveLength(1);
@@ -184,7 +216,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     await page
       .getByLabel("READY command composer")
       .fill('printf "PWD=%s ENV=%s\\n" "$PWD" "$ITERM_M5"');
-    await page.getByRole("button", { name: "Execute Action" }).click();
+    await page.getByLabel("READY command composer").press("Enter");
     await waitForPageText(
       page,
       '[data-testid="screen-reader-output"]',
@@ -255,7 +287,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     await page
       .getByLabel("READY command composer")
       .fill(`IFS= read -r ITERM_SECRET; printf 'ECHO:%s\\n' "$ITERM_SECRET"; sleep 30`);
-    await page.getByRole("button", { name: "Execute Action" }).click();
+    await page.getByLabel("READY command composer").press("Enter");
     await waitForPageText(page, ".status-strip", "RUNNING");
     const secret = "BROWSER_SECRET_SENTINEL_752c";
     await page.getByLabel("Human-only secret input").fill(secret);
@@ -294,7 +326,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
       { timeout: 10_000 },
     );
     await page.getByLabel("READY command composer").fill("printf 'VISIBLE_AFTER_SECRET\\n'");
-    await page.getByRole("button", { name: "Execute Action" }).click();
+    await page.getByLabel("READY command composer").press("Enter");
     await waitForPageText(page, '[data-testid="screen-reader-output"]', "VISIBLE_AFTER_SECRET");
 
     const durable = await pool.query<{
@@ -540,7 +572,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     await page
       .getByLabel("READY command composer")
       .fill('git status --short && printf \'GIT_OK PWD=%s SAFE=%s\\n\' "$PWD" "$ITERM_M7_SAFE"');
-    await page.getByRole("button", { name: "Execute Action" }).click();
+    await page.getByLabel("READY command composer").press("Enter");
     await waitForPageText(page, '[data-testid="screen-reader-output"]', "GIT_OK");
     await waitForPageText(page, '[data-testid="screen-reader-output"]', `PWD=${restoredCwd}`);
     await waitForPageText(page, '[data-testid="screen-reader-output"]', "SAFE=historical");

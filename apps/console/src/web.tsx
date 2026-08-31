@@ -165,6 +165,13 @@ interface ResumeState {
   readonly screenVersion: number;
 }
 
+interface ReadyCommandLayout {
+  readonly height: number;
+  readonly left: number;
+  readonly top: number;
+  readonly width: number;
+}
+
 function App(): React.JSX.Element {
   const [bootstrap, setBootstrap] = useState<Bootstrap>();
   const [sessions, setSessions] = useState<readonly Session[]>([]);
@@ -193,9 +200,11 @@ function App(): React.JSX.Element {
   const [resizeColumns, setResizeColumns] = useState(SCREEN_COLUMNS.toString());
   const [resizeRows, setResizeRows] = useState(SCREEN_ROWS.toString());
   const [browserTerminalMirror, setBrowserTerminalMirror] = useState("");
+  const [readyCommandLayout, setReadyCommandLayout] = useState<ReadyCommandLayout>();
   const interactiveState = useRef(false);
   const commandEditor = useRef<HTMLDivElement>(null);
   const terminalHost = useRef<HTMLDivElement>(null);
+  const terminalSurface = useRef<HTMLDivElement>(null);
   const terminal = useRef<Terminal | undefined>(undefined);
   const socket = useRef<WebSocket | undefined>(undefined);
   const reconnectTimer = useRef<number | undefined>(undefined);
@@ -307,14 +316,56 @@ function App(): React.JSX.Element {
 
   useEffect(() => {
     if (terminal.current !== undefined && screen !== undefined) {
-      renderScreen(
-        terminal.current,
-        screen,
-        session?.status === "RUNNING",
-        setBrowserTerminalMirror,
-      );
+      renderScreen(terminal.current, screen, session?.status === "RUNNING", (text) => {
+        setBrowserTerminalMirror(text);
+        if (session?.status === "READY") {
+          window.requestAnimationFrame(() => {
+            syncReadyCommandLayout(
+              terminalHost.current,
+              terminalSurface.current,
+              screen,
+              setReadyCommandLayout,
+            );
+          });
+        }
+      });
     }
   }, [screen, session?.status]);
+
+  useEffect(() => {
+    if (session?.status !== "READY" || screen === undefined) {
+      setReadyCommandLayout(undefined);
+      return;
+    }
+    const host = terminalHost.current;
+    const surface = terminalSurface.current;
+    if (host === null || surface === null) return;
+    const sync = (): void => {
+      syncReadyCommandLayout(host, surface, screen, setReadyCommandLayout);
+    };
+    const frame = window.requestAnimationFrame(sync);
+    const observer = new ResizeObserver(sync);
+    observer.observe(host);
+    observer.observe(surface);
+    host.addEventListener("scroll", sync);
+    window.addEventListener("resize", sync);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+      host.removeEventListener("scroll", sync);
+      window.removeEventListener("resize", sync);
+    };
+  }, [screen, session?.status]);
+
+  const readyCommandVisible = readyCommandLayout !== undefined;
+  useEffect(() => {
+    if (session?.status !== "READY" || !readyCommandVisible) return;
+    const frame = window.requestAnimationFrame(() => {
+      commandEditor.current?.focus();
+      if (commandEditor.current !== null) placeCaretAtEnd(commandEditor.current);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [readyCommandVisible, session?.generation, session?.id, session?.status]);
 
   useEffect(() => {
     if (screen === undefined) return;
@@ -1028,19 +1079,79 @@ function App(): React.JSX.Element {
             {session?.activeExecutionId !== undefined && <code>{session.activeExecutionId}</code>}
           </div>
           <div
-            aria-label={`Canonical ${screen?.columns ?? SCREEN_COLUMNS} by ${screen?.rows ?? SCREEN_ROWS} terminal viewport`}
-            aria-readonly={session?.status !== "RUNNING"}
-            className={`terminal-host ${session?.status === "RUNNING" ? "terminal-running" : "terminal-readonly"}${interactive ? " interactive" : ""}`}
-            onBlur={() => {
-              setInteractive(false);
-              releaseGuardAfterPendingInput();
+            className="terminal-surface"
+            onClick={(event) => {
+              if (
+                session?.status !== "READY" ||
+                commandEditor.current?.contains(event.target as Node) === true ||
+                terminal.current?.hasSelection() === true
+              ) {
+                return;
+              }
+              commandEditor.current?.focus();
+              if (commandEditor.current !== null) placeCaretAtEnd(commandEditor.current);
             }}
-            onFocus={() => {
-              if (session?.status === "RUNNING") setInteractive(true);
-            }}
-            ref={terminalHost}
-            tabIndex={session?.status === "RUNNING" ? 0 : -1}
-          />
+            ref={terminalSurface}
+          >
+            <div
+              aria-label={`Canonical ${screen?.columns ?? SCREEN_COLUMNS} by ${screen?.rows ?? SCREEN_ROWS} terminal viewport`}
+              aria-readonly={session?.status !== "RUNNING"}
+              className={`terminal-host ${session?.status === "RUNNING" ? "terminal-running" : "terminal-readonly"}${interactive ? " interactive" : ""}`}
+              onBlur={() => {
+                setInteractive(false);
+                releaseGuardAfterPendingInput();
+              }}
+              onFocus={() => {
+                if (session?.status === "RUNNING") setInteractive(true);
+              }}
+              ref={terminalHost}
+              tabIndex={session?.status === "RUNNING" ? 0 : -1}
+            />
+            {session?.status === "READY" &&
+              sensitiveInput?.status !== "ACTIVE" &&
+              readyCommandLayout !== undefined && (
+                <form
+                  aria-label="Shell prompt command line"
+                  className="ready-terminal-command"
+                  onSubmit={(event) => void execute(event)}
+                  style={{
+                    height: readyCommandLayout.height,
+                    left: readyCommandLayout.left,
+                    lineHeight: `${readyCommandLayout.height.toString()}px`,
+                    top: readyCommandLayout.top,
+                    width: readyCommandLayout.width,
+                  }}
+                >
+                  <div
+                    aria-label="READY command composer"
+                    aria-multiline="false"
+                    autoFocus
+                    className="command-editor"
+                    contentEditable
+                    onInput={(event) => {
+                      const raw = event.currentTarget.textContent ?? "";
+                      const next = raw.replace(/[\r\n]+/gu, " ");
+                      if (next !== raw) {
+                        event.currentTarget.textContent = next;
+                        placeCaretAtEnd(event.currentTarget);
+                      }
+                      setCommand(next);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+                      event.preventDefault();
+                      if (command.trim() !== "") {
+                        event.currentTarget.closest("form")?.requestSubmit();
+                      }
+                    }}
+                    ref={commandEditor}
+                    role="textbox"
+                    spellCheck={false}
+                    suppressContentEditableWarning
+                  />
+                </form>
+              )}
+          </div>
           <pre className="screen-reader-output" data-testid="screen-reader-output">
             {screen?.lines.join("\n") ?? ""}
           </pre>
@@ -1051,112 +1162,81 @@ function App(): React.JSX.Element {
           >
             {browserTerminalMirror}
           </pre>
-          <div className="mode-panel">
-            {sensitiveInput?.status === "ACTIVE" ? (
-              <div className="secret-channel active" aria-live="polite">
-                <strong>Sensitive output redaction is active.</strong>
-                <span>Finish only after the foreground program can no longer echo the secret.</span>
-                <div>
-                  <button onClick={() => void sendControl("CTRL_C")} type="button">
-                    Send TTY Ctrl+C while redacted
-                  </button>
-                  <button onClick={() => void finishSecretInput("completed")} type="button">
-                    Complete and stop redaction
-                  </button>
-                  <button onClick={() => void finishSecretInput("cancelled")} type="button">
-                    Cancel and stop redaction
-                  </button>
-                </div>
-              </div>
-            ) : session?.status === "READY" ? (
-              <form className="terminal-command-line" onSubmit={(event) => void execute(event)}>
-                <span aria-hidden="true" className="command-prompt">
-                  $
-                </span>
-                <div
-                  aria-label="READY command composer"
-                  aria-multiline="false"
-                  className="command-editor"
-                  contentEditable
-                  data-placeholder="Type a command and press Enter"
-                  onInput={(event) => {
-                    const raw = event.currentTarget.textContent ?? "";
-                    const next = raw.replace(/[\r\n]+/gu, " ");
-                    if (next !== raw) {
-                      event.currentTarget.textContent = next;
-                      placeCaretAtEnd(event.currentTarget);
-                    }
-                    setCommand(next);
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
-                    event.preventDefault();
-                    if (command.trim() !== "") event.currentTarget.closest("form")?.requestSubmit();
-                  }}
-                  ref={commandEditor}
-                  role="textbox"
-                  spellCheck={false}
-                  suppressContentEditableWarning
-                />
-                <button disabled={command.trim() === ""} type="submit">
-                  Execute Action
-                </button>
-                <div className="command-hint">
-                  READY · ExecuteAction
-                  <span>Enter to run</span>
-                </div>
-              </form>
-            ) : session?.status === "RUNNING" ? (
-              <>
-                <div className="interactive-controls">
-                  <button
-                    aria-pressed={interactive}
-                    onClick={() => {
-                      if (interactive) {
-                        terminal.current?.blur();
-                        setInteractive(false);
-                      } else {
-                        terminal.current?.focus();
-                        setInteractive(true);
-                      }
-                    }}
-                    type="button"
-                  >
-                    {interactive ? "Leave interactive focus" : "Enter interactive focus"}
-                  </button>
-                  <button onClick={() => void sendControl("CTRL_C")} type="button">
-                    Send TTY Ctrl+C
-                  </button>
-                  <span>Raw keys become 20 ms InputAction batches.</span>
-                </div>
-                <form className="secret-channel" onSubmit={(event) => void beginSecretInput(event)}>
-                  <label htmlFor="secret-input">Human-only secret input</label>
+          {(sensitiveInput?.status === "ACTIVE" || session?.status !== "READY") && (
+            <div className="mode-panel">
+              {sensitiveInput?.status === "ACTIVE" ? (
+                <div className="secret-channel active" aria-live="polite">
+                  <strong>Sensitive output redaction is active.</strong>
+                  <span>
+                    Finish only after the foreground program can no longer echo the secret.
+                  </span>
                   <div>
-                    <input
-                      autoComplete="off"
-                      id="secret-input"
-                      onChange={(event) => setSecret(event.target.value)}
-                      required
-                      spellCheck={false}
-                      type="password"
-                      value={secret}
-                    />
-                    <button type="submit">Send once and redact output</button>
+                    <button onClick={() => void sendControl("CTRL_C")} type="button">
+                      Send TTY Ctrl+C while redacted
+                    </button>
+                    <button onClick={() => void finishSecretInput("completed")} type="button">
+                      Complete and stop redaction
+                    </button>
+                    <button onClick={() => void finishSecretInput("cancelled")} type="button">
+                      Cancel and stop redaction
+                    </button>
                   </div>
-                  <small>
-                    The value is transient and is not stored in Action, Event, screen, or recording
-                    data.
-                  </small>
-                </form>
-              </>
-            ) : (
-              <p className="mode-note">
-                {session?.status === "BROKEN"
-                  ? "Historical generation: no live PTY or screen. Rebuild from its checkpoint."
-                  : "Select or create a READY Session."}
-              </p>
-            )}
-          </div>
+                </div>
+              ) : session?.status === "RUNNING" ? (
+                <>
+                  <div className="interactive-controls">
+                    <button
+                      aria-pressed={interactive}
+                      onClick={() => {
+                        if (interactive) {
+                          terminal.current?.blur();
+                          setInteractive(false);
+                        } else {
+                          terminal.current?.focus();
+                          setInteractive(true);
+                        }
+                      }}
+                      type="button"
+                    >
+                      {interactive ? "Leave interactive focus" : "Enter interactive focus"}
+                    </button>
+                    <button onClick={() => void sendControl("CTRL_C")} type="button">
+                      Send TTY Ctrl+C
+                    </button>
+                    <span>Raw keys become 20 ms InputAction batches.</span>
+                  </div>
+                  <form
+                    className="secret-channel"
+                    onSubmit={(event) => void beginSecretInput(event)}
+                  >
+                    <label htmlFor="secret-input">Human-only secret input</label>
+                    <div>
+                      <input
+                        autoComplete="off"
+                        id="secret-input"
+                        onChange={(event) => setSecret(event.target.value)}
+                        required
+                        spellCheck={false}
+                        type="password"
+                        value={secret}
+                      />
+                      <button type="submit">Send once and redact output</button>
+                    </div>
+                    <small>
+                      The value is transient and is not stored in Action, Event, screen, or
+                      recording data.
+                    </small>
+                  </form>
+                </>
+              ) : (
+                <p className="mode-note">
+                  {session?.status === "BROKEN"
+                    ? "Historical generation: no live PTY or screen. Rebuild from its checkpoint."
+                    : "Select or create a READY Session."}
+                </p>
+              )}
+            </div>
+          )}
         </section>
 
         <aside className="inspector" aria-label="Interaction and timeline">
@@ -1430,6 +1510,39 @@ function placeCaretAtEnd(element: HTMLElement): void {
   range.collapse(false);
   selection.removeAllRanges();
   selection.addRange(range);
+}
+
+function syncReadyCommandLayout(
+  host: HTMLDivElement | null,
+  surface: HTMLDivElement | null,
+  screen: ScreenSnapshot,
+  setLayout: React.Dispatch<React.SetStateAction<ReadyCommandLayout | undefined>>,
+): void {
+  if (host === null || surface === null) return;
+  const xtermScreen = host.querySelector<HTMLElement>(".xterm-screen");
+  if (xtermScreen === null) return;
+  const screenRect = xtermScreen.getBoundingClientRect();
+  const surfaceRect = surface.getBoundingClientRect();
+  if (screenRect.width === 0 || screenRect.height === 0) return;
+  const cellWidth = screenRect.width / screen.columns;
+  const cellHeight = screenRect.height / screen.rows;
+  const left = screenRect.left - surfaceRect.left + screen.cursor.column * cellWidth;
+  const top = screenRect.top - surfaceRect.top + screen.cursor.row * cellHeight;
+  const next = {
+    height: cellHeight,
+    left,
+    top,
+    width: Math.max(cellWidth, screenRect.right - surfaceRect.left - left),
+  };
+  setLayout((current) =>
+    current !== undefined &&
+    Math.abs(current.height - next.height) < 0.1 &&
+    Math.abs(current.left - next.left) < 0.1 &&
+    Math.abs(current.top - next.top) < 0.1 &&
+    Math.abs(current.width - next.width) < 0.1
+      ? current
+      : next,
+  );
 }
 
 function captureBrowserTerminal(terminal: Terminal, rows: number): string {

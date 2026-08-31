@@ -6,6 +6,8 @@ import type { ShellKind } from "@iterminal/domain";
 export interface ShellLaunchProfile {
   readonly executable: string;
   readonly args: readonly string[];
+  readonly dispatchCommandFile: string;
+  readonly dispatchTokenFile: string;
   readonly env: Readonly<Record<string, string>>;
 }
 
@@ -14,12 +16,23 @@ export function createShellLaunchProfile(
   runtimeDirectory: string,
   controlFifo: string,
 ): ShellLaunchProfile {
+  const dispatchCommandFile = join(runtimeDirectory, "dispatch-command");
+  const dispatchTokenFile = join(runtimeDirectory, "dispatch-token");
+  writeFileSync(dispatchCommandFile, "", { mode: 0o600 });
+  writeFileSync(dispatchTokenFile, "", { mode: 0o600 });
+  const dispatchEnvironment = {
+    ITERMINAL_CONTROL_FIFO: controlFifo,
+    ITERMINAL_DISPATCH_COMMAND_FILE: dispatchCommandFile,
+    ITERMINAL_DISPATCH_TOKEN_FILE: dispatchTokenFile,
+  };
   if (shell === "bash") {
     const rcFile = join(runtimeDirectory, "bashrc");
     writeFileSync(rcFile, bashRc(), { mode: 0o600 });
     return {
       args: ["--noprofile", "--rcfile", rcFile, "-i"],
-      env: { ITERMINAL_CONTROL_FIFO: controlFifo },
+      dispatchCommandFile,
+      dispatchTokenFile,
+      env: { ...dispatchEnvironment, BASH_SILENCE_DEPRECATION_WARNING: "1" },
       executable: "/bin/bash",
     };
   }
@@ -28,16 +41,19 @@ export function createShellLaunchProfile(
   writeFileSync(join(zshDirectory, ".zshrc"), zshRc(), { mode: 0o600 });
   return {
     args: ["-d", "-i"],
-    env: { ITERMINAL_CONTROL_FIFO: controlFifo, ZDOTDIR: zshDirectory },
+    dispatchCommandFile,
+    dispatchTokenFile,
+    env: { ...dispatchEnvironment, ZDOTDIR: zshDirectory },
     executable: "/bin/zsh",
   };
 }
 
 function bashRc(): string {
   return String.raw`
-PS1='iterminal:bash$ '
-PS2='iterminal:bash> '
-__IT_PREEXEC_EMITTED=0
+PS1='\u@\h \w \$ '
+PS2='> '
+unset HISTFILE
+builtin history -c
 
 __it_control() {
   builtin printf '%s\000%s\000%s\000%s\000' "$1" "$2" "$3" "$4" > "$ITERMINAL_CONTROL_FIFO"
@@ -59,54 +75,44 @@ __it_checkpoint_env() {
   IFS="$__it_old_ifs"
 }
 
-__it_execute() {
-  trap - DEBUG
-  command /bin/bash --noprofile --norc -n -c "$1"
-  local __it_syntax_status=$?
-  if [[ "$__it_syntax_status" -ne 0 ]]; then
-    trap '__it_debug' DEBUG
-    builtin printf '\033]1337;iTerminalBarrier=%s\007' "$2"
-    __it_control 'RESULT' "$__it_syntax_status" ''
-    return "$__it_syntax_status"
+__it_load_action() {
+  local __it_buffer
+  if [[ ! -s "$ITERMINAL_DISPATCH_TOKEN_FILE" ]]; then
+    return
   fi
-  builtin eval "$1"
-  local __it_status=$?
-  trap '__it_debug' DEBUG
-  builtin printf '\033]1337;iTerminalBarrier=%s\007' "$2"
-  __it_control 'RESULT' "$__it_status" ''
-  return "$__it_status"
-}
-
-__it_debug() {
-  local __it_previous_status=$?
-  if [[ "${"$"}{FUNCNAME[1]:-}" == "__it_execute" || "${"$"}{FUNCNAME[1]:-}" == "__it_precmd" ]]; then
-    return "$__it_previous_status"
-  fi
-  if [[ "$__IT_PREEXEC_EMITTED" -eq 0 ]]; then
-    __it_control 'PREEXEC' "$BASH_COMMAND" ''
-    __IT_PREEXEC_EMITTED=1
-  fi
-  return "$__it_previous_status"
+  __it_buffer="$(command cat -- "$ITERMINAL_DISPATCH_COMMAND_FILE"; builtin printf '\034')"
+  __it_buffer="${"$"}{__it_buffer%$'\034'}"
+  builtin history -s "$__it_buffer"
+  __it_control 'PREEXEC' "$__it_buffer" ''
+  builtin printf '\033[1A\r\033[2K'
 }
 
 __it_precmd() {
   local __it_status="$1"
-  local __it_checkpoint
-  __IT_PREEXEC_EMITTED=0
+  local __it_checkpoint __it_token
+  [[ "$__it_status" =~ ^[0-9]+$ ]] || __it_status=1
+  __it_status=$((__it_status & 255))
+  if [[ -s "$ITERMINAL_DISPATCH_TOKEN_FILE" ]]; then
+    IFS= builtin read -r __it_token < "$ITERMINAL_DISPATCH_TOKEN_FILE"
+    : > "$ITERMINAL_DISPATCH_TOKEN_FILE"
+    : > "$ITERMINAL_DISPATCH_COMMAND_FILE"
+    builtin printf '\033]1337;iTerminalBarrier=%s\007' "$__it_token"
+    __it_control 'RESULT' "$__it_status" ''
+  fi
   __it_checkpoint="$(__it_checkpoint_env)"
   __it_control 'READY' "$__it_status" "$PWD" "$__it_checkpoint"
 }
 
 __it_control 'HELLO' 'bash' "$$"
-trap '__it_debug' DEBUG
+bind -x '"\C-x\C-a":__it_load_action'
 PROMPT_COMMAND='__it_precmd "$?"'
 `;
 }
 
 function zshRc(): string {
   return String.raw`
-PS1='iterminal:zsh%# '
-PS2='iterminal:zsh> '
+PROMPT='%n@%m %~ %# '
+PROMPT2='> '
 autoload -Uz add-zsh-hook
 
 __it_control() {
@@ -126,26 +132,36 @@ __it_checkpoint_env() {
   done
 }
 
-__it_execute() {
-  builtin eval "$1"
-  local __it_status=$?
-  builtin printf '\033]1337;iTerminalBarrier=%s\007' "$2"
-  __it_control 'RESULT' "$__it_status" ''
-  return "$__it_status"
-}
-
-__it_preexec() {
-  __it_control 'PREEXEC' "$1" ''
+__it_load_action() {
+  local __it_buffer
+  if [[ ! -s "$ITERMINAL_DISPATCH_TOKEN_FILE" ]]; then
+    BUFFER=''
+    CURSOR=0
+    return
+  fi
+  __it_buffer="$(command cat -- "$ITERMINAL_DISPATCH_COMMAND_FILE"; builtin printf '\034')"
+  BUFFER="${"$"}{__it_buffer%$'\034'}"
+  CURSOR="${"$"}{#BUFFER}"
+  __it_control 'PREEXEC' "$BUFFER" ''
 }
 
 __it_precmd() {
   local __it_status=$?
+  local __it_token
+  if [[ -s "$ITERMINAL_DISPATCH_TOKEN_FILE" ]]; then
+    IFS= builtin read -r __it_token < "$ITERMINAL_DISPATCH_TOKEN_FILE"
+    : > "$ITERMINAL_DISPATCH_TOKEN_FILE"
+    : > "$ITERMINAL_DISPATCH_COMMAND_FILE"
+    builtin printf '\033]1337;iTerminalBarrier=%s\007' "$__it_token"
+    __it_control 'RESULT' "$__it_status" ''
+  fi
   local __it_checkpoint="$(__it_checkpoint_env)"
   __it_control 'READY' "$__it_status" "$PWD" "$__it_checkpoint"
 }
 
 __it_control 'HELLO' 'zsh' "$$"
-add-zsh-hook preexec __it_preexec
+zle -N __it_load_action
+bindkey '\e[99~' __it_load_action
 add-zsh-hook precmd __it_precmd
 `;
 }

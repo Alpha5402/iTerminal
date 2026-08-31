@@ -63,6 +63,7 @@ ADRs capture decisions that change runtime truth, not routine implementation det
 | [0057](./0057-hostile-input-and-ingress-resource-bounds.md)              | Bound hostile Shell/path and local ingress resources       | Accepted for M10.11      |
 | [0058][adr-0058]                                                         | Bound normalized facts and signal database capacity        | Accepted for M10.12      |
 | [0059](./0059-one-command-local-stack-and-mcp-bootstrap.md)              | Compose one authenticated durable local quickstart         | Accepted for M10.13      |
+| [0060](./0060-native-shell-line-editor-dispatch.md)                      | Dispatch through native readline/ZLE without wrapper echo  | Accepted for M10.14      |
 
 Statuses:
 
