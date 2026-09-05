@@ -43,9 +43,9 @@
 
 | ID                                   | 任务                              | 依赖                         | 建议 | 状态   |
 | ------------------------------------ | --------------------------------- | ---------------------------- | ---- | ------ |
-| [A01](01-correctness.md#a01)         | Shell 生命周期向 Application 传播 | 无                           | Sol  | 未开始 |
+| [A01](01-correctness.md#a01)         | Shell 生命周期向 Application 传播 | 无                           | Sol  | 进行中 |
 | [A02](01-correctness.md#a02)         | 移除隐式执行寿命，核实失败清理    | A01                          | Sol  | 未开始 |
-| [A03](01-correctness.md#a03)         | 修复请求 schema 漂移              | 无                           | Luna | 未开始 |
+| [A03](01-correctness.md#a03)         | 修复请求 schema 漂移              | 无                           | Luna | 已验收 |
 | [A04](01-correctness.md#a04)         | HTTP 与 Application 幂等顺序一致  | 无                           | Sol  | 未开始 |
 | [A05](01-correctness.md#a05)         | 协议与运行能力握手                | A03                          | Sol  | 未开始 |
 | [A06](01-correctness.md#a06)         | 按请求身份查询已接受 Action       | A05                          | Sol  | 未开始 |
