@@ -32,6 +32,7 @@ import {
 } from "./input-mode.js";
 import { ActiveWindowFit, fittedGeometry } from "./terminal-fit.js";
 import { terminalSelectionText } from "./terminal-copy.js";
+import { describeInputUncertainty } from "./input-uncertainty.js";
 import {
   DISMISSED_TABS_KEY,
   dismissSessionTab,
@@ -1879,6 +1880,28 @@ function App(): React.JSX.Element {
     [bootstrap?.actor.id],
   );
 
+  const interruptUnknownInput = (): void => {
+    const current = latestSession.current;
+    if (
+      session === undefined ||
+      activeRawInputTarget === undefined ||
+      current?.id !== session.id ||
+      current.generation !== session.generation ||
+      current.activeExecutionId !== activeRawInputTarget.executionId
+    ) {
+      setError({
+        allowedNextActions: ["refresh_session", "target_current_execution"],
+        code: "EXECUTION_CHANGED",
+        details: {},
+        message: "The active Execution changed; refresh before interrupting.",
+        requestId: crypto.randomUUID(),
+        retryable: false,
+      });
+      return;
+    }
+    void sendControl("CTRL_C");
+  };
+
   const toggleInspector = (view: InspectorView): void => {
     if (inspectorOpen && inspectorView === view) {
       setInspectorOpen(false);
@@ -2129,6 +2152,41 @@ function App(): React.JSX.Element {
                   <span>execution {session.activeExecutionId}</span>
                 )}
               </details>
+              {interaction?.inputContext?.state === "unknown" &&
+                interaction.inputContext.unknownReason !== undefined && (
+                  <section
+                    className="input-uncertainty"
+                    aria-label="Input uncertainty"
+                    role="alert"
+                  >
+                    <span>{describeInputUncertainty(interaction.inputContext.unknownReason)}</span>
+                    {interaction.inputContext.unknownReason === "untracked_input" && (
+                      <div className="input-uncertainty-actions">
+                        <button
+                          disabled={
+                            sensitiveInput?.status === "ACTIVE" || session?.status !== "RUNNING"
+                          }
+                          onClick={() => selectInputMode("raw")}
+                          type="button"
+                        >
+                          Raw keys
+                        </button>
+                        <button onClick={() => toggleInspector("session")} type="button">
+                          View current Execution
+                        </button>
+                        <button
+                          disabled={
+                            session?.status !== "RUNNING" || activeRawInputTarget === undefined
+                          }
+                          onClick={interruptUnknownInput}
+                          type="button"
+                        >
+                          Interrupt (Ctrl-C)
+                        </button>
+                      </div>
+                    )}
+                  </section>
+                )}
               {sensitiveInput?.status === "ACTIVE" && (
                 <button
                   aria-label={

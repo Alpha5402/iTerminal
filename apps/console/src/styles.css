@@ -688,6 +688,19 @@ textarea {
   color: #fbbf24;
 }
 
+.input-uncertainty {
+  display: grid;
+  gap: 0.45rem;
+  flex-basis: 100%;
+  color: #fbbf24;
+}
+
+.input-uncertainty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
 .status-strip code {
   margin-left: auto;
 }
