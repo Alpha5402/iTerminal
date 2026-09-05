@@ -61,7 +61,7 @@
 | [C03](03-console.md#c03)             | 输入上下文不确定的可操作解释      | C02                          | Luna | 未开始 |
 | [C04](03-console.md#c04)             | 保留屏幕颜色与单元格属性          | A05                          | Sol  | 未开始 |
 | [C05](03-console.md#c05)             | 有界滚动历史与选择行为            | C04                          | Sol  | 未开始 |
-| [C06](03-console.md#c06)             | 信息层级、布局与新会话目录        | 无                           | Luna | 进行中 |
+| [C06](03-console.md#c06)             | 信息层级、布局与新会话目录        | 无                           | Luna | 已验收 |
 | [D01](04-reliability.md#d01)         | 单 session 故障隔离               | A01                          | Sol  | 未开始 |
 | [D02](04-reliability.md#d02)         | 部分可用的会话发现                | A05                          | Sol  | 未开始 |
 | [D03](04-reliability.md#d03)         | Console/MCP 动态凭据提供器        | 无                           | Sol  | 未开始 |
