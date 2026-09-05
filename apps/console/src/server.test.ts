@@ -564,7 +564,7 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
     expect(restored.actor).toEqual(first.actor);
   });
 
-  it("reconciles a lost Execute response without a second PTY write and denies an invalid grant", async () => {
+  it("looks up a lost Execute response without another PTY write or cross-Actor disclosure", async () => {
     const fixture = await createFixture(fixtures);
     const secret = randomBytes(32);
     const audience = "iterminal-a04-console";
@@ -587,6 +587,7 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
       grantId: "a04-console-grant",
       issuedAt,
       operations: [
+        "action.lookup",
         "events.query",
         "execution.start",
         "execution.wait",
@@ -629,6 +630,47 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
     expect(accepted?.actionId).toBeDefined();
     expect(accepted?.executionId).toBeDefined();
 
+    const lookupPath = `/api/sessions/${session.id}/actions/lookup`;
+    const lookup = await requestResult<{
+      readonly actionId: string;
+      readonly actionStatus: string;
+      readonly executionId: string;
+      readonly executionStatus: string;
+      readonly kind: string;
+    }>(consoleServer, cookie, lookupPath, {
+      body: { generation: session.generation, idempotencyKey: executeBody.idempotencyKey },
+      method: "POST",
+    });
+    expect(lookup).toMatchObject({
+      actionId: accepted?.actionId,
+      actionStatus: "COMPLETED",
+      executionId: accepted?.executionId,
+      executionStatus: "COMPLETED",
+      kind: "found",
+    });
+    expect(lookup).not.toHaveProperty("requestHash");
+    expect(lookup).not.toHaveProperty("command");
+    expect(lookup).not.toHaveProperty("actor");
+    expect(await readFile(marker, "utf8")).toBe("once\n");
+
+    const secondBootstrap = await requestBootstrap(consoleServer);
+    const secondCookie = required(secondBootstrap.headers.get("set-cookie")).split(";", 1)[0] ?? "";
+    await expect(
+      requestResult(consoleServer, secondCookie, lookupPath, {
+        body: { generation: session.generation, idempotencyKey: executeBody.idempotencyKey },
+        method: "POST",
+      }),
+    ).resolves.toMatchObject({ kind: "not_found", mayStillBeInFlight: true });
+    const forgedBody = await request(consoleServer, cookie, lookupPath, {
+      body: {
+        actor: bootstrap.actor,
+        generation: session.generation,
+        idempotencyKey: executeBody.idempotencyKey,
+      },
+      method: "POST",
+    });
+    expect(forgedBody.status).toBe(400);
+
     const replay = await requestResult<{
       readonly action: { readonly id: string };
       readonly execution: { readonly id: string; readonly status: string };
@@ -659,6 +701,13 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
     expect(deniedBody).not.toContain(required(accepted?.actionId));
     expect(deniedBody).not.toContain(required(accepted?.executionId));
     expect(deniedBody).not.toContain(marker);
+
+    const deniedLookup = await request(consoleServer, cookie, lookupPath, {
+      body: { generation: session.generation, idempotencyKey: executeBody.idempotencyKey },
+      method: "POST",
+    });
+    expect(deniedLookup.status).toBe(403);
+    expect(await deniedLookup.text()).not.toContain(required(accepted?.actionId));
 
     await runtime.closeSession(session.id, session.generation);
   }, 30_000);

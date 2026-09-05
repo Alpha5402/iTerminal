@@ -87,6 +87,9 @@ adapter-owned wall-clock lifetime, and fatal settlement preserves the write-acce
 See also [ADR-0068](./0068-runtime-capability-negotiation.md): running Runtime and Router
 processes report bounded protocol, build, and exact-owner feature capabilities.
 
+See also [ADR-0069](./0069-action-lookup-by-request-identity.md): reconcile accepted Actions by
+exact authenticated request identity without replaying a mutation or disclosing payloads.
+
 Statuses:
 
 - Proposed: evidence or owner decision is still required.

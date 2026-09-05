@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 
 import type {
+  ActionLookupFound,
+  ActionLookupRequest,
   DurableApprovalDecision,
   DurableApprovalMutationResult,
   DurableApprovalRequest,
@@ -46,7 +48,7 @@ import {
   prepareSessionCreationAdmission,
 } from "./session-creation-retention.js";
 import { PostgresRuntimeRepository } from "./postgres-runtime-repository.js";
-import { persistActor } from "./actors.js";
+import { assertPersistedActorIdentity, persistActor } from "./actors.js";
 import {
   actionRateLimitPolicy,
   type ActionRateLimitOptions,
@@ -139,6 +141,46 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
 
   public async close(): Promise<void> {
     await Promise.all([this.#pool.end(), this.#observation.close(), this.#admission.close()]);
+  }
+
+  public async lookupAction(request: ActionLookupRequest): Promise<ActionLookupFound | undefined> {
+    const client = await this.#pool.connect();
+    try {
+      if (!(await assertPersistedActorIdentity(client, request.actor))) return undefined;
+      const result = await client.query<{
+        accepted_at: Date;
+        action_id: string;
+        action_status: ActionLookupFound["actionStatus"];
+        action_type: ActionLookupFound["actionType"];
+        execution_id: string | null;
+        execution_status: Exclude<ActionLookupFound["executionStatus"], undefined> | null;
+      }>(
+        `SELECT action.id AS action_id, action.kind AS action_type,
+                action.status AS action_status, action.accepted_at,
+                execution.id AS execution_id, execution.status AS execution_status
+           FROM actions action
+           LEFT JOIN executions execution ON execution.action_id = action.id
+          WHERE action.session_id = $1 AND action.session_generation = $2
+            AND action.actor_id = $3 AND action.idempotency_key = $4`,
+        [request.sessionId, request.generation, request.actor.id, request.idempotencyKey],
+      );
+      const row = result.rows[0];
+      if (row === undefined) return undefined;
+      return {
+        acceptedAt: row.accepted_at.toISOString(),
+        actionId: row.action_id,
+        actionStatus: row.action_status,
+        actionType: row.action_type,
+        ...(row.execution_id === null ? {} : { executionId: row.execution_id }),
+        ...(row.execution_status === null ? {} : { executionStatus: row.execution_status }),
+        generation: request.generation,
+        idempotencyKey: request.idempotencyKey,
+        kind: "found",
+        sessionId: request.sessionId,
+      };
+    } finally {
+      client.release();
+    }
   }
 
   public requestApproval(

@@ -39,6 +39,7 @@ describe("M4 stdio MCP bridge", () => {
     const first = await connectClient("m4-client-first");
     const listed = await first.listTools();
     expect(listed.tools.map((tool) => tool.name).sort()).toEqual([
+      "action_lookup",
       "approval_get",
       "approval_list",
       "approval_request",
@@ -72,7 +73,12 @@ describe("M4 stdio MCP bridge", () => {
     );
     expect(capabilities).toEqual({
       buildId: "a05-mcp-l2",
-      features: ["action.execute.v1", "action.input.v1", "runtime.capabilities.v1"],
+      features: [
+        "action.execute.v1",
+        "action.input.v1",
+        "action.lookup.v1",
+        "runtime.capabilities.v1",
+      ],
       protocolVersion: "1",
     });
 
@@ -91,6 +97,13 @@ describe("M4 stdio MCP bridge", () => {
       status: "READY",
     });
     expect(sessions.some((candidate) => candidate.id === session.id)).toBe(true);
+    expect(
+      await callTool<ActionLookupResult>(first, "action_lookup", {
+        generation: session.generation,
+        idempotencyKey: "m4-shared-state",
+        sessionId: session.id,
+      }),
+    ).toMatchObject({ kind: "not_found", mayStillBeInFlight: true });
     const proposal = await callTool<ApprovalResult>(first, "approval_request", {
       actionIdempotencyKey: "m10-approved-action",
       command: "export ITERM_APPROVED=yes",
@@ -147,6 +160,21 @@ describe("M4 stdio MCP bridge", () => {
       sessionId: session.id,
     });
     await callTool(first, "execution_wait", { executionId: mutation.execution.id });
+    const lookup = await callTool<ActionLookupResult>(first, "action_lookup", {
+      generation: session.generation,
+      idempotencyKey: "m4-shared-state",
+      sessionId: session.id,
+    });
+    expect(lookup).toMatchObject({
+      actionId: mutation.action.id,
+      actionStatus: "COMPLETED",
+      executionId: mutation.execution.id,
+      executionStatus: "COMPLETED",
+      kind: "found",
+    });
+    expect(lookup).not.toHaveProperty("requestHash");
+    expect(lookup).not.toHaveProperty("command");
+    expect(lookup).not.toHaveProperty("actor");
     const firstPage = await callTool<EventPageResult>(first, "events_query", {
       after: 0,
       generation: session.generation,
@@ -306,6 +334,13 @@ describe("M4 stdio MCP bridge", () => {
       executionId: python.execution.id,
     });
     expect(pythonCompleted.output).toContain("42");
+    expect(
+      await callTool<ActionLookupResult>(second, "action_lookup", {
+        generation: session.generation,
+        idempotencyKey: "m4-python-agent",
+        sessionId: session.id,
+      }),
+    ).toMatchObject({ actionStatus: "DELIVERED", actionType: "input", kind: "found" });
 
     const sleeping = await callTool<StartedResult>(second, "execute", {
       command: "sleep 30",
@@ -325,6 +360,13 @@ describe("M4 stdio MCP bridge", () => {
       executionId: sleeping.execution.id,
     });
     expect(interrupted.status).toBe("INTERRUPTED");
+    expect(
+      await callTool<ActionLookupResult>(second, "action_lookup", {
+        generation: session.generation,
+        idempotencyKey: "m4-sleep-control",
+        sessionId: session.id,
+      }),
+    ).toMatchObject({ actionStatus: "DELIVERED", actionType: "control", kind: "found" });
 
     const replay = await callTool<StartedResult>(second, "execute", {
       command: "true",
@@ -431,6 +473,16 @@ type SessionResult = {
 type StartedResult = {
   readonly action: { readonly id: string };
   readonly execution: { readonly id: string };
+};
+
+type ActionLookupResult = {
+  readonly actionId?: string;
+  readonly actionStatus?: string;
+  readonly actionType?: string;
+  readonly executionId?: string;
+  readonly executionStatus?: string;
+  readonly kind: string;
+  readonly mayStillBeInFlight?: boolean;
 };
 
 type ExecutionResult = {

@@ -4,6 +4,8 @@ import { isAbsolute, join } from "node:path";
 import {
   sessionCreationRequestHash,
   type AcquireInteractionGuardRequest,
+  type ActionLookupRequest,
+  type ActionLookupResult,
   type ControlRequest,
   type BeginSecretInputRequest,
   type CreateSessionRequest,
@@ -105,8 +107,44 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
   ) {
     this.#capabilities = defineRuntimeCapabilities({
       ...(options.buildId === undefined ? {} : { buildId: options.buildId }),
-      features: ["runtime.capabilities.v1", "runtime.owner-capabilities.v1"],
+      features: ["action.lookup.v1", "runtime.capabilities.v1", "runtime.owner-capabilities.v1"],
     });
+  }
+
+  public async lookupAction(request: ActionLookupRequest): Promise<ActionLookupResult> {
+    try {
+      return await this.#withSession(request.sessionId, "action.lookup", (client) =>
+        client.lookupAction(request),
+      );
+    } catch (error) {
+      const identity = {
+        generation: request.generation,
+        idempotencyKey: request.idempotencyKey,
+        sessionId: request.sessionId,
+      };
+      if (error instanceof RuntimeError && error.code === "SESSION_NOT_FOUND") {
+        return {
+          ...identity,
+          kind: "not_found",
+          mayStillBeInFlight: true,
+          message:
+            "No accepted Action is currently observable; the original request may still be in flight, so do not generate a replacement idempotency key",
+        };
+      }
+      if (
+        error instanceof RuntimeError &&
+        (error.code === "RUNTIME_UNAVAILABLE" || error.code === "OWNER_ROUTE_UNAVAILABLE")
+      ) {
+        return {
+          ...identity,
+          kind: "unavailable",
+          message: "The exact Runtime owner route is temporarily unavailable",
+          reason: "owner_route_unavailable",
+          retryable: true,
+        };
+      }
+      throw error;
+    }
   }
 
   public getRuntimeCapabilities(

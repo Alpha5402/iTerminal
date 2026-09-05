@@ -7,6 +7,7 @@ import {
   RuntimeError,
 } from "@iterminal/domain";
 import {
+  actionLookupTransportRequestSchema,
   executeTransportRequestSchema,
   inputTransportRequestSchema,
   runtimeCapabilitiesRequestSchema,
@@ -75,6 +76,26 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
         }
         return gateway.getRuntimeCapabilities(input);
       }),
+  );
+
+  server.registerTool(
+    "action_lookup",
+    {
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      description:
+        "Look up an accepted Action by this authenticated Actor's exact Session, generation, and idempotency key. not_found does not prove the original request was never accepted or is no longer in flight; never generate a replacement key from that result.",
+      inputSchema: actionLookupTransportRequestSchema,
+      title: "Look up accepted Action",
+    },
+    async (input) =>
+      call(() =>
+        gateway.lookupAction({
+          actor,
+          generation: input.generation,
+          idempotencyKey: input.idempotencyKey,
+          sessionId: input.sessionId,
+        }),
+      ),
   );
 
   server.registerTool(
