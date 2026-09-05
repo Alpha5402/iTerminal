@@ -68,6 +68,16 @@ body {
   .status-strip .diagnostics {
     flex-basis: 100%;
   }
+  .input-mode-bar {
+    align-items: flex-start;
+    grid-template-columns: 1fr;
+  }
+  .input-mode-switch {
+    justify-self: stretch;
+  }
+  .input-mode-switch button {
+    flex: 1;
+  }
 }
 
 button,
@@ -608,6 +618,74 @@ textarea {
   border-bottom: 1px solid #172033;
   color: #94a3b8;
   font-size: 0.75rem;
+}
+
+.terminal-toolbar {
+  min-width: 0;
+}
+
+.input-mode-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.45rem 1rem;
+  align-items: center;
+  min-width: 0;
+  padding: 0.65rem 1rem;
+  border-bottom: 1px solid #172033;
+  background: #0b1220;
+}
+
+.input-mode-target {
+  display: flex;
+  gap: 0.45rem 0.8rem;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.input-mode-target strong {
+  flex: none;
+  color: #e2e8f0;
+  font-size: 0.8rem;
+}
+
+.input-mode-target span,
+.input-mode-help,
+.input-mode-notice {
+  min-width: 0;
+  color: #94a3b8;
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+.input-mode-target code {
+  color: #67e8f9;
+}
+
+.input-mode-switch {
+  display: inline-flex;
+  gap: 0.25rem;
+}
+
+.input-mode-switch button {
+  padding: 0.35rem 0.65rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+}
+
+.input-mode-switch button[aria-pressed="true"] {
+  border-color: #22d3ee;
+  color: #071015;
+  background: #67e8f9;
+  font-weight: 800;
+}
+
+.input-mode-help {
+  grid-column: 1 / -1;
+}
+
+.input-mode-notice {
+  grid-column: 1 / -1;
+  color: #fbbf24;
 }
 
 .status-strip code {
