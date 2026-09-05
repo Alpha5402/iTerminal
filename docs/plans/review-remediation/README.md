@@ -1,10 +1,12 @@
 # iTerminal 审阅整改执行计划
 
-日期：2026-09-05。状态：执行中。适用对象：按单张任务卡工作的 Sol / Luna。
+> **当前验收（2026-09-06）**：36/36 张卡按约定范围已验收；F03 为授权设计完成，不是 Session ACL 实施。见 [最终对账](./final-reconciliation.md) 和 [当前验证报告](../../verification/review-remediation/2026-09-06-final-verification.md)。[19/36 历史交接](./HANDOFF-2026-09-05.md) 保留作过程记录。
+
+计划日期：2026-09-05；验收日期：2026-09-06。状态：本轮已验收。卡内模型分配建议保留作历史计划，收尾由 Astra 独立完成。
 
 本计划把本轮审阅的 28 项意见转成 36 张任务卡。它规定目标行为和验证方法，不要求执行模型再次进行全仓架构审阅，也不把“模型能力不足”当成已证实的根因。优先修正真实语义错误、不可恢复的操作体验和 Agent 观察成本，再优化结构。
 
-调度更新：遵循 [小批次调度与工作树恢复](DISPATCH.md)，最多同时两个开发 worktree 加一个集成 worktree；等待任务只留在队列，不提前创建。旧执行提示词中的“不提交”受用户后续 commit/push 授权覆盖，但 main 只由集成工作统一推送。
+历史调度见 [小批次调度与工作树恢复](DISPATCH.md)，已停止，不自动恢复旧 worker。用户已授权正常 commit/push 到已有 main；由集成工作树统一交付，不覆盖原始目录的用户改动。
 
 ## 使用方法
 
@@ -19,7 +21,7 @@
 
 - 审阅基于 HEAD `138dfb6` 加当时未提交工作区；已有 57 个修改或未跟踪条目，其中包括本地行草稿、credential-file、终端回复等新实现。这个数字只描述计划编写时的基线。
 - 执行前重新读 `git status --short`，保护已有工作。不自动 reset、stash、checkout、全仓格式化、提交或推送。不以 HEAD 文件覆盖当前工作文件。
-- 本次仅新增计划文档，没有实施任何运行时代码修改。原 `TODO.md` 和历史验证记录没有被重写。
+- 计划初稿只新增文档；当前实现和验收见上方入口。原里程碑和历史验证统计保持不变，`TODO.md` 仅追加当前整改入口。
 - 卡中路径均相对仓库根目录；标记“新增”的文件或接口是计划产物，不是已经存在的能力。源码行号可能移动，以符号为准。
 - 不控制用户已有会话，不重启用户服务，不向现有终端发送测试命令。测试创建独立临时目录、独立 owner/socket、独立会话；清理只能影响该测试的资源。
 - PostgreSQL 集成测试只能使用隔离测试实例中的 `iterminal_test`。现有部分测试会 TRUNCATE；仅数据库名字正确不足以证明它与用户运行环境隔离。
@@ -59,26 +61,26 @@
 | [C01](03-console.md#c01)             | 浏览器提交身份与 UNKNOWN 核对     | A04、A06                     | Sol  | 已验收 |
 | [C02](03-console.md#c02)             | 可见的行输入 / 原始输入模式       | C01                          | Sol  | 已验收 |
 | [C03](03-console.md#c03)             | 输入上下文不确定的可操作解释      | C02                          | Luna | 已验收 |
-| [C04](03-console.md#c04)             | 保留屏幕颜色与单元格属性          | A05                          | Sol  | 未开始 |
-| [C05](03-console.md#c05)             | 有界滚动历史与选择行为            | C04                          | Sol  | 未开始 |
+| [C04](03-console.md#c04)             | 保留屏幕颜色与单元格属性          | A05                          | Sol  | 已验收 |
+| [C05](03-console.md#c05)             | 有界滚动历史与选择行为            | C04                          | Sol  | 已验收 |
 | [C06](03-console.md#c06)             | 信息层级、布局与新会话目录        | 无                           | Luna | 已验收 |
-| [D01](04-reliability.md#d01)         | 单 session 故障隔离               | A01                          | Sol  | 进行中 |
-| [D02](04-reliability.md#d02)         | 部分可用的会话发现                | A05                          | Sol  | 未开始 |
+| [D01](04-reliability.md#d01)         | 单 session 故障隔离               | A01                          | Sol  | 已验收 |
+| [D02](04-reliability.md#d02)         | 部分可用的会话发现                | A05                          | Sol  | 已验收 |
 | [D03](04-reliability.md#d03)         | Console/MCP 动态凭据提供器        | 无                           | Sol  | 已验收 |
-| [D04](04-reliability.md#d04)         | 本地 supervisor 自动续期          | D03                          | Sol  | 进行中 |
-| [D05](04-reliability.md#d05)         | 明确各 Agent 身份                 | D04                          | Luna | 未开始 |
-| [D06](04-reliability.md#d06)         | CLI 接入共享 daemon               | A05、B03                     | Sol  | 未开始 |
-| [D07](04-reliability.md#d07)         | 跨会话待审批入口                  | A05、D02                     | Sol  | 未开始 |
-| [E01](05-engineering.md#e01)         | WS 观察版本、合并与背压           | A05、C04                     | Sol  | 未开始 |
-| [E02](05-engineering.md#e02)         | 真正的字节环形缓冲                | B02                          | Sol  | 未开始 |
-| [E03](05-engineering.md#e03)         | FIFO 与屏幕投影热点测量及局部优化 | E01、E02                     | Sol  | 未开始 |
-| [E04](05-engineering.md#e04)         | Application 内部职责拆分          | A02、B07、D01                | Sol  | 未开始 |
-| [E05](05-engineering.md#e05)         | Console 控制器拆分                | C01、C02、C05、C06、D07、E01 | Luna | 未开始 |
-| [E06](05-engineering.md#e06)         | 必须执行的分层测试门禁            | A02、B04、C01、C04、D04      | Sol  | 未开始 |
+| [D04](04-reliability.md#d04)         | 本地 supervisor 自动续期          | D03                          | Sol  | 已验收 |
+| [D05](04-reliability.md#d05)         | 明确各 Agent 身份                 | D04                          | Luna | 已验收 |
+| [D06](04-reliability.md#d06)         | CLI 接入共享 daemon               | A05、B03                     | Sol  | 已验收 |
+| [D07](04-reliability.md#d07)         | 跨会话待审批入口                  | A05、D02                     | Sol  | 已验收 |
+| [E01](05-engineering.md#e01)         | WS 观察版本、合并与背压           | A05、C04                     | Sol  | 已验收 |
+| [E02](05-engineering.md#e02)         | 真正的字节环形缓冲                | B02                          | Sol  | 已验收 |
+| [E03](05-engineering.md#e03)         | FIFO 与屏幕投影热点测量及局部优化 | E01、E02                     | Sol  | 已验收 |
+| [E04](05-engineering.md#e04)         | Application 内部职责拆分          | A02、B07、D01                | Sol  | 已验收 |
+| [E05](05-engineering.md#e05)         | Console 控制器拆分                | C01、C02、C05、C06、D07、E01 | Luna | 已验收 |
+| [E06](05-engineering.md#e06)         | 必须执行的分层测试门禁            | A02、B04、C01、C04、D04      | Sol  | 已验收 |
 | [F01](06-product-and-handoff.md#f01) | Shell 支持边界与兼容场景          | 无                           | Luna | 已验收 |
-| [F02](06-product-and-handoff.md#f02) | Agent 用户任务基准                | B04、B05、C02、E06           | Sol  | 未开始 |
-| [F03](06-product-and-handoff.md#f03) | 多 Agent 授权边界设计稿           | D05                          | Sol  | 未开始 |
-| [F04](06-product-and-handoff.md#f04) | 路线收敛和完成度对账              | F01、F02、F03                | Luna | 未开始 |
+| [F02](06-product-and-handoff.md#f02) | Agent 用户任务基准                | B04、B05、C02、E06           | Sol  | 已验收 |
+| [F03](06-product-and-handoff.md#f03) | 多 Agent 授权边界设计稿           | D05                          | Sol  | 已验收 |
+| [F04](06-product-and-handoff.md#f04) | 路线收敛和完成度对账              | F01、F02、F03                | Luna | 已验收 |
 
 ## 原审阅 28 项的覆盖关系
 

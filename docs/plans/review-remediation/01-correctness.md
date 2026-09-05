@@ -1,10 +1,12 @@
 # A：运行语义与请求身份
 
+当前状态：本轮卡已按约定范围验收；具体等级与未做事项见 [最终对账](final-reconciliation.md)。下文保留原验收条件。
+
 先读 [共同约束](README.md)。以下路径相对仓库根目录。所有测试名字为应增加的场景描述；新增文件会明确标识。
 
 ## A01
 
-- [ ] Shell 生命周期向 Application 传播。依赖：无。建议 Sol。
+- [x] Shell 生命周期向 Application 传播。依赖：无。建议 Sol。
 
 **问题与结果：** 目前 executor 的空闲 Shell 退出没有活动 execution 可供失败回调，Application 可继续显示 READY。任何非主动关闭的当前 generation Shell 退出后，Application 必须停止接受新 Execute，按现有状态机进入 BROKEN。
 
@@ -25,7 +27,7 @@
 
 ## A02
 
-- [ ] 移除隐式执行寿命并收紧异常清理。依赖：A01。建议 Sol。
+- [x] 移除隐式执行寿命并收紧异常清理。依赖：A01。建议 Sol。
 
 **先读：** executor 的 24 小时计时器与 `execute`；Application 的 `failDispatchedExecution`、execution completion；现有启动超时与 drain ADR。
 
@@ -42,7 +44,7 @@
 
 ## A03
 
-- [ ] 对齐 Execute/Input schema。依赖：无。建议 Luna。
+- [x] 对齐 Execute/Input schema。依赖：无。建议 Luna。
 
 **先读：** `packages/protocol/src/schemas.ts`；domain 请求类型；RPC、HTTP、MCP 对应 Execute/Input schema；现有 `line-input.test.ts` 与 ADR 0065。
 
@@ -56,7 +58,7 @@
 
 ## A04
 
-- [ ] 去除 HTTP 中先于幂等判断的状态决策。依赖：无。建议 Sol。
+- [x] 去除 HTTP 中先于幂等判断的状态决策。依赖：无。建议 Sol。
 
 **先读：** `apps/console/src/server.ts` 的 Execute 路由、`requireRunningTarget`、Input/Control；Application 各写方法的幂等 lookup 与 guard 顺序。
 
@@ -68,7 +70,7 @@
 
 ## A05
 
-- [ ] 增加运行能力握手并建立新契约统一来源。依赖：A03。建议 Sol。
+- [x] 增加运行能力握手并建立新契约统一来源。依赖：A03。建议 Sol。
 
 **先读：** `packages/protocol`、`packages/runtime-rpc/src/index.ts`、`apps/mcp/src/server.ts`、Console bootstrap、router dispatch。
 
@@ -85,7 +87,7 @@
 
 ## A06
 
-- [ ] 提供按请求身份的 Action 核对接口。依赖：A05。建议 Sol。
+- [x] 提供按请求身份的 Action 核对接口。依赖：A05。建议 Sol。
 
 **先读：** Application 幂等路径、`ports.ts` 的 durability/repository 接口、`postgres-runtime-durability.ts`、RPC grants、Console actor 绑定；ADR 0011、0056。
 

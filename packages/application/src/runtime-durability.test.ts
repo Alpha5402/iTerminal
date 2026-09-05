@@ -27,6 +27,7 @@ import { MemoryRuntimeStore } from "@iterminal/runtime-memory";
 import { describe, expect, it } from "vitest";
 
 import { RuntimeService } from "./runtime-service.js";
+import { sessionDurabilityFailure } from "./durability-failure.js";
 
 const actor = {
   client: "durability-test",
@@ -240,6 +241,10 @@ describe("Runtime durable write-ahead boundary", () => {
     expect(runtime.isDurabilityHealthy()).toBe(true);
     const replacement = await runtime.createSession({ shell: "zsh", workspaceRoot: "/tmp" });
     expect(replacement.status).toBe("READY");
+    factory.executors[0]?.emitOutput("late closed PTY output");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(runtime.isDurabilityHealthy()).toBe(true);
+    expect(runtime.getSession(replacement.id).status).toBe("READY");
     expect(runtime.getSession(left.id).status).toBe("BROKEN");
     expect(runtime.getSession(right.id).status).toBe("BROKEN");
     await runtime.closeSession(replacement.id, replacement.generation);
@@ -275,6 +280,214 @@ describe("Runtime durable write-ahead boundary", () => {
     expect(factory.executors[0]?.closed).toBe(true);
     expect(factory.executors[1]?.closed).toBe(false);
     await runtime.closeSession(healthy.id, healthy.generation);
+  });
+
+  it("isolates an exact Session-fence failure while another Session keeps control and execute", async () => {
+    const durability = new ControlledDurability();
+    const factory = new TrackingFactory();
+    const runtime = new RuntimeService(new MemoryRuntimeStore(), factory, {
+      durability,
+      ownerId: "owner-session-fence-isolation-test",
+    });
+    const isolated = await runtime.createSession({ shell: "zsh", workspaceRoot: "/tmp" });
+    const healthy = await runtime.createSession({ shell: "zsh", workspaceRoot: "/tmp" });
+    const isolatedExecution = await runtime.startExecute({
+      actor,
+      command: "isolated-interactive",
+      idempotencyKey: "isolated-interactive",
+      sessionGeneration: isolated.generation,
+      sessionId: isolated.id,
+    });
+    const healthyExecution = await runtime.startExecute({
+      actor,
+      command: "healthy-interactive",
+      idempotencyKey: "healthy-interactive",
+      sessionGeneration: healthy.generation,
+      sessionId: healthy.id,
+    });
+    await Promise.all([isolatedExecution.started, healthyExecution.started]);
+    const isolatedWaiter = runtime.waitExecutionV2({
+      executionId: isolatedExecution.execution.id,
+      waitMs: 1_000,
+    });
+    durability.interactionError = sessionDurabilityFailure(
+      "SESSION_LEASE_LOST",
+      "injected exact Session fence rejection",
+      durability.sessionFence(isolated.id),
+      { failureRecord: "not_committed" },
+    );
+
+    await expect(
+      runtime.sendInput({
+        actor,
+        data: "must-not-reach-pty\n",
+        idempotencyKey: "isolated-fenced-input",
+        sessionGeneration: isolated.generation,
+        sessionId: isolated.id,
+        targetExecutionId: isolatedExecution.execution.id,
+      }),
+    ).rejects.toMatchObject({ code: "SESSION_LEASE_LOST" });
+
+    expect(await isolatedWaiter).toMatchObject({
+      completed: true,
+      executionState: "UNKNOWN",
+    });
+    expect(runtime.isDurabilityHealthy()).toBe(true);
+    expect(runtime.getSession(isolated.id).status).toBe("BROKEN");
+    expect(runtime.getSession(healthy.id).status).toBe("RUNNING");
+    expect(factory.executors[0]?.closed).toBe(true);
+    expect(factory.executors[0]?.inputs).toEqual([]);
+    expect(factory.executors[1]?.closed).toBe(false);
+
+    durability.interactionError = undefined;
+    await runtime.sendControl({
+      actor,
+      delivery: { control: "ESC", mode: "TTY_CONTROL" },
+      idempotencyKey: "healthy-control-after-isolation",
+      sessionGeneration: healthy.generation,
+      sessionId: healthy.id,
+      targetExecutionId: healthyExecution.execution.id,
+    });
+    expect(factory.executors[1]?.controls).toHaveLength(1);
+    factory.executors[1]?.complete();
+    await healthyExecution.completion;
+    const continued = await runtime.startExecute({
+      actor,
+      command: "healthy-after-isolation",
+      idempotencyKey: "healthy-execute-after-isolation",
+      sessionGeneration: healthy.generation,
+      sessionId: healthy.id,
+    });
+    await continued.started;
+    expect(factory.executors[1]?.commands).toEqual([
+      "healthy-interactive",
+      "healthy-after-isolation",
+    ]);
+    factory.executors[1]?.complete();
+    await continued.completion;
+    await runtime.closeSession(healthy.id, healthy.generation);
+  });
+
+  it("keeps delayed old-token and old-generation failures from poisoning the current Session queue", async () => {
+    const durability = new ControlledDurability();
+    const executor = new RecordingExecutor();
+    const runtime = new RuntimeService(new MemoryRuntimeStore(), new RecordingFactory(executor), {
+      durability,
+      ownerId: "owner-stale-session-fence-test",
+    });
+    const session = await runtime.createSession({ shell: "zsh", workspaceRoot: "/tmp" });
+    const currentFence = durability.sessionFence(session.id);
+    durability.executeError = sessionDurabilityFailure(
+      "SESSION_LEASE_LOST",
+      "delayed rejection from an obsolete fencing token",
+      { ...currentFence, fencingToken: "0" },
+      { failureRecord: "not_committed" },
+    );
+
+    await expect(
+      runtime.startExecute({
+        actor,
+        command: "obsolete-request",
+        idempotencyKey: "obsolete-request",
+        sessionGeneration: session.generation,
+        sessionId: session.id,
+      }),
+    ).rejects.toMatchObject({ code: "SESSION_LEASE_LOST" });
+    expect(runtime.getSession(session.id).status).toBe("READY");
+    expect(executor.closed).toBe(false);
+
+    durability.executeError = sessionDurabilityFailure(
+      "SESSION_LEASE_LOST",
+      "delayed rejection from an obsolete Session generation",
+      { ...currentFence, generation: currentFence.generation - 1 },
+      { failureRecord: "not_committed" },
+    );
+    await expect(
+      runtime.startExecute({
+        actor,
+        command: "obsolete-generation-request",
+        idempotencyKey: "obsolete-generation-request",
+        sessionGeneration: session.generation,
+        sessionId: session.id,
+      }),
+    ).rejects.toMatchObject({ code: "SESSION_LEASE_LOST" });
+    expect(runtime.getSession(session.id).status).toBe("READY");
+    expect(executor.closed).toBe(false);
+
+    durability.executeError = undefined;
+    const current = await runtime.startExecute({
+      actor,
+      command: "current-request",
+      idempotencyKey: "current-request",
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+    });
+    await current.started;
+    expect(executor.commands).toEqual(["current-request"]);
+    executor.complete();
+    await current.completion;
+    await runtime.closeSession(session.id, session.generation);
+  });
+
+  it("keeps owner lease loss and untrusted Session lease errors owner-wide", async () => {
+    for (const error of [
+      new RuntimeError("OWNER_LEASE_LOST", "injected owner heartbeat lease loss"),
+      new RuntimeError(
+        "SESSION_LEASE_LOST",
+        "message contains lease but has no trusted exact fence scope",
+        { durabilityFailureScope: { kind: "session", sessionId: "forged" } },
+      ),
+    ]) {
+      const durability = new ControlledDurability();
+      const factory = new TrackingFactory();
+      const runtime = new RuntimeService(new MemoryRuntimeStore(), factory, {
+        durability,
+        ownerId: `owner-wide-${error.code.toLowerCase()}`,
+      });
+      const left = await runtime.createSession({ shell: "zsh", workspaceRoot: "/tmp" });
+      const right = await runtime.createSession({ shell: "zsh", workspaceRoot: "/tmp" });
+      durability.executeError = error;
+
+      await expect(
+        runtime.startExecute({
+          actor,
+          command: "must-not-run",
+          idempotencyKey: `owner-wide-${error.code.toLowerCase()}`,
+          sessionGeneration: left.generation,
+          sessionId: left.id,
+        }),
+      ).rejects.toMatchObject({ code: error.code });
+      expect(runtime.isDurabilityHealthy()).toBe(false);
+      expect(runtime.getSession(left.id).status).toBe("BROKEN");
+      expect(runtime.getSession(right.id).status).toBe("BROKEN");
+      expect(factory.executors.every((executor) => executor.closed)).toBe(true);
+    }
+  });
+
+  it("fails an unknown durability exception owner-wide instead of silently ignoring it", async () => {
+    const durability = new ControlledDurability();
+    const factory = new TrackingFactory();
+    const runtime = new RuntimeService(new MemoryRuntimeStore(), factory, {
+      durability,
+      ownerId: "owner-unknown-database-error-test",
+    });
+    const left = await runtime.createSession({ shell: "zsh", workspaceRoot: "/tmp" });
+    const right = await runtime.createSession({ shell: "zsh", workspaceRoot: "/tmp" });
+    durability.executeError = new Error("injected unknown database exception");
+
+    await expect(
+      runtime.startExecute({
+        actor,
+        command: "must-not-run",
+        idempotencyKey: "unknown-database-error",
+        sessionGeneration: left.generation,
+        sessionId: left.id,
+      }),
+    ).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    expect(runtime.isDurabilityHealthy()).toBe(false);
+    expect(runtime.getSession(left.id).status).toBe("BROKEN");
+    expect(runtime.getSession(right.id).status).toBe("BROKEN");
+    expect(factory.executors.every((executor) => executor.closed)).toBe(true);
   });
 
   it("does not publish a recertified checkpoint before durable fork admission", async () => {
@@ -805,16 +1018,18 @@ class RecordingExecutor implements ShellExecutor {
 }
 
 class ControlledDurability implements RuntimeDurability {
-  public executeError: RuntimeError | undefined;
+  public executeError: unknown;
   public forkError: RuntimeError | undefined;
   public failExecute = false;
   public failInteraction = false;
+  public interactionError: unknown;
   public writeAttempts = 0;
   public interactionWriteAttempts = 0;
   public readonly outputEvents: DurableSessionEvent[] = [];
   public historyLookup:
     ((request: HistoryLookupRequest) => Promise<HistoryLookupResult | undefined>) | undefined;
   readonly #actionReplays = new Map<string, Extract<DurableActionReplay, { kind: "full" }>>();
+  readonly #sessionLeases = new Map<string, SessionLease>();
   #nextFencingToken = 1;
 
   public lookupAction(): Promise<undefined> {
@@ -913,19 +1128,19 @@ class ControlledDurability implements RuntimeDurability {
     _events: readonly unknown[],
     owner: RuntimeOwnerIdentity,
   ): Promise<{ readonly kind: "created"; readonly lease: SessionLease }> {
-    return Promise.resolve({
-      kind: "created",
-      lease: this.#lease(session.id, session.generation, owner),
-    });
+    const lease = this.#lease(session.id, session.generation, owner);
+    this.#sessionLeases.set(session.id, lease);
+    return Promise.resolve({ kind: "created", lease });
   }
 
   public createForkSession(
     input: { readonly child: { readonly generation: number; readonly id: string } },
     owner: RuntimeOwnerIdentity,
   ): Promise<SessionLease> {
-    return this.forkError === undefined
-      ? Promise.resolve(this.#lease(input.child.id, input.child.generation, owner))
-      : Promise.reject(this.forkError);
+    if (this.forkError !== undefined) return Promise.reject(this.forkError);
+    const lease = this.#lease(input.child.id, input.child.generation, owner);
+    this.#sessionLeases.set(input.child.id, lease);
+    return Promise.resolve(lease);
   }
 
   public renewSessionLeases(
@@ -959,6 +1174,8 @@ class ControlledDurability implements RuntimeDurability {
     _fence: SessionFence,
     input: DurableExecuteAdmission,
   ): Promise<DurableExecuteAdmissionResult> {
+    // Deliberately inject untrusted non-Error values to verify fail-closed scope classification.
+    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
     if (this.executeError !== undefined) return Promise.reject(this.executeError);
     if (this.failExecute) return Promise.reject(unavailable());
     this.#remember(input.action, input.execution);
@@ -991,6 +1208,9 @@ class ControlledDurability implements RuntimeDurability {
     _fence: SessionFence,
     action: Parameters<RuntimeDurability["acceptInteraction"]>[1],
   ): Promise<void> {
+    // Deliberate untrusted rejection fixture; it must not gain trusted durability scope.
+    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+    if (this.interactionError !== undefined) return Promise.reject(this.interactionError);
     if (this.failInteraction) return Promise.reject(unavailable());
     this.#remember(action);
     return Promise.resolve();
@@ -1000,6 +1220,9 @@ class ControlledDurability implements RuntimeDurability {
     _fence: SessionFence,
     action: Parameters<RuntimeDurability["acceptSecretInput"]>[1],
   ): Promise<void> {
+    // Deliberate untrusted rejection fixture; it must not gain trusted durability scope.
+    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+    if (this.interactionError !== undefined) return Promise.reject(this.interactionError);
     if (this.failInteraction) return Promise.reject(unavailable());
     this.#remember(action);
     return Promise.resolve();
@@ -1057,6 +1280,12 @@ class ControlledDurability implements RuntimeDurability {
     readonly unknownExecutions: number;
   }> {
     return Promise.resolve({ brokenSessions: 0, rebuildableSessions: [], unknownExecutions: 0 });
+  }
+
+  public sessionFence(sessionId: string): SessionFence {
+    const lease = this.#sessionLeases.get(sessionId);
+    if (lease === undefined) throw new Error(`Missing test Session fence for ${sessionId}`);
+    return lease;
   }
 
   #remember(action: SessionAction, execution?: Execution): void {

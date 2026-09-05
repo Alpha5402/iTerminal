@@ -59,7 +59,11 @@ describe("local stack credential bootstrap", () => {
         ITERM_RUNTIME_SOCKET: runtimeSocketPath,
       },
     });
-    const grantToken = configuration.mcpServers.iterminal.env.ITERM_RPC_GRANT;
+    expect(configuration.mcpServers.iterminal.env.ITERM_RPC_GRANT).toBeUndefined();
+    const privatePath = configuration.mcpServers.iterminal.env.ITERM_MCP_CONFIG_FILE;
+    if (privatePath === undefined) throw new Error("Missing dynamic credential source");
+    const privateConfig = JSON.parse(await readFile(privatePath, "utf8")) as LocalMcpConfiguration;
+    const grantToken = privateConfig.mcpServers.iterminal.env.ITERM_RPC_GRANT;
     expect(grantToken).toBeTypeOf("string");
     if (grantToken === undefined) throw new Error("MCP runtime grant was not written");
     const [encodedGrant] = grantToken.split(".");
@@ -122,6 +126,186 @@ describeDatabase("M10.13 durable local stack", () => {
   });
 
   afterAll(async () => pool.end());
+
+  it("keeps the same Shell through two credential renewals and distinct Agent actions", async () => {
+    const fixtureRoot = await createFixture(fixtures, "it-renew-");
+    const stateRoot = join(fixtureRoot, "state");
+    const staticRoot = join(fixtureRoot, "web");
+    await mkdir(staticRoot);
+    await writeFile(join(staticRoot, "index.html"), "<title>fixture</title>");
+    stack = await startLocalStack({
+      consolePort: 0,
+      databaseUrl: databaseUrl ?? "",
+      repositoryRoot,
+      runtimeSocketPath: join(stateRoot, "r.sock"),
+      stateRoot,
+      staticRoot,
+      grantTtlSeconds: 4,
+      agentName: "alpha",
+      additionalAgentNames: ["beta"],
+    });
+    const connect = async (path: string) => {
+      const config = JSON.parse(await readFile(path, "utf8")) as LocalMcpConfiguration;
+      const mcp = config.mcpServers.iterminal;
+      const client = new Client({ name: "renewal-test", version: "1.0.0" });
+      clients.push(client);
+      await client.connect(
+        new StdioClientTransport({
+          args: [...mcp.args],
+          command: mcp.command,
+          cwd: repositoryRoot,
+          env: { ...getDefaultEnvironment(), ...mcp.env, NODE_ENV: "test" },
+          stderr: "pipe",
+        }),
+      );
+      return client;
+    };
+    const alpha = await connect(stack.mcpConfigPath);
+    const beta = await connect(join(stateRoot, "mcp-beta.json"));
+    const session = await callTool<SessionResult>(alpha, "session_create", {
+      idempotencyKey: "renew-session",
+      shell: "zsh",
+      workspaceRoot: fixtureRoot,
+    });
+    const execute = async (client: Client, key: string) => {
+      const started = await callTool<StartedResult>(client, "execute", {
+        sessionId: session.id,
+        generation: session.generation,
+        idempotencyKey: key,
+        command: "printf '%s\\n' $$",
+      });
+      const completed = await callTool<ExecutionResult>(client, "execution_wait", {
+        executionId: started.execution.id,
+      });
+      expect(completed.status).toBe("COMPLETED");
+      const pid = completed.output?.match(/\r?\n(\d+)\r?\n/)?.[1];
+      if (!pid) throw new Error("Missing fixture Shell PID line");
+      return pid;
+    };
+    const shell = await execute(alpha, "renew-before");
+    const persistedPid = await pool.query<{ shell_pid: number }>(
+      "SELECT shell_pid FROM session_generations WHERE session_id=$1 AND generation=$2",
+      [session.id, session.generation],
+    );
+    expect(shell).toBe(String(persistedPid.rows[0]?.shell_pid));
+    const credentialPath = join(stateRoot, "credentials/mcp-alpha.json");
+    const first = await readFile(credentialPath, "utf8");
+    await expect
+      .poll(() => readFile(credentialPath, "utf8"), { timeout: 6000, interval: 100 })
+      .not.toBe(first);
+    const second = await readFile(credentialPath, "utf8");
+    await expect
+      .poll(() => readFile(credentialPath, "utf8"), { timeout: 6000, interval: 100 })
+      .not.toBe(second);
+    expect(await execute(alpha, "renew-after-alpha")).toBe(shell);
+    expect(await execute(beta, "renew-after-beta")).toBe(shell);
+    const spoof = await alpha.callTool({
+      name: "execute",
+      arguments: {
+        sessionId: session.id,
+        generation: session.generation,
+        idempotencyKey: "spoof-beta",
+        command: "true",
+        actor: { id: "agent-beta" },
+      },
+    });
+    expect(spoof.isError).toBe(true);
+    await alpha.close();
+    clients.splice(clients.indexOf(alpha), 1);
+    const restartedAlpha = await connect(stack.mcpConfigPath);
+    expect(await execute(restartedAlpha, "renew-restarted-alpha")).toBe(shell);
+    const actions = await pool.query<{ actor_id: string }>(
+      "SELECT actor_id FROM actions WHERE session_id = $1 AND kind = 'execute' ORDER BY accepted_at",
+      [session.id],
+    );
+    expect(new Set(actions.rows.map((row) => row.actor_id))).toEqual(
+      new Set(["agent-alpha", "agent-beta"]),
+    );
+    const bootstrap = await fetch(`${stack.consoleUrl}/api/bootstrap`, {
+      headers: { "x-iterminal-request": "console" },
+    });
+    expect(bootstrap.status).toBe(200);
+    expect(await readFile(stack.mcpConfigPath, "utf8")).not.toContain("ITERM_RPC_GRANT");
+  }, 25_000);
+
+  it("rejects writes across failed renewal expiry then resumes the same Shell after issuer recovery", async () => {
+    const fixtureRoot = await createFixture(fixtures, "it-renew-failure-");
+    const stateRoot = join(fixtureRoot, "state");
+    const staticRoot = join(fixtureRoot, "web");
+    await mkdir(staticRoot);
+    await writeFile(join(staticRoot, "index.html"), "<title>fixture</title>");
+    stack = await startLocalStack({
+      consolePort: 0,
+      databaseUrl: databaseUrl ?? "",
+      repositoryRoot,
+      runtimeSocketPath: join(stateRoot, "r.sock"),
+      stateRoot,
+      staticRoot,
+      grantTtlSeconds: 4,
+    });
+    const config = JSON.parse(await readFile(stack.mcpConfigPath, "utf8")) as LocalMcpConfiguration;
+    const mcp = config.mcpServers.iterminal;
+    const client = new Client({ name: "renewal-failure", version: "1.0.0" });
+    clients.push(client);
+    await client.connect(
+      new StdioClientTransport({
+        args: [...mcp.args],
+        command: mcp.command,
+        cwd: repositoryRoot,
+        env: { ...getDefaultEnvironment(), ...mcp.env, NODE_ENV: "test" },
+        stderr: "pipe",
+      }),
+    );
+    const session = await callTool<SessionResult>(client, "session_create", {
+      idempotencyKey: "expiry-session",
+      shell: "zsh",
+      workspaceRoot: fixtureRoot,
+    });
+    const before = await pool.query(
+      "SELECT shell_pid FROM session_generations WHERE session_id=$1 AND generation=$2",
+      [session.id, session.generation],
+    );
+    const secretPath = join(stateRoot, "credentials/runtime-rpc.secret");
+    const issuer = await readFile(secretPath, "utf8");
+    // Break only the fixture issuer: already issued credential files stay readable.
+    await writeFile(secretPath, "invalid-fixture-issuer", { mode: 0o600 });
+    try {
+      await expect.poll(() => stack!.credentialStatus().phase, { timeout: 6000 }).toBe("expired");
+      const rejected = await client.callTool({
+        name: "execute",
+        arguments: {
+          sessionId: session.id,
+          generation: session.generation,
+          idempotencyKey: "expired-write",
+          command: "touch must-not-exist",
+        },
+      });
+      expect(rejected.isError).toBe(true);
+      expect(JSON.stringify(rejected)).toContain("expired");
+      await expect(access(join(fixtureRoot, "must-not-exist"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await writeFile(secretPath, issuer, { mode: 0o600 });
+    }
+    await expect.poll(() => stack!.credentialStatus().phase, { timeout: 9000 }).toBe("scheduled");
+    const resumed = await callTool<StartedResult>(client, "execute", {
+      sessionId: session.id,
+      generation: session.generation,
+      idempotencyKey: "valid-after-renewal",
+      command: "printf renewal-restored",
+    });
+    expect(
+      await callTool<ExecutionResult>(client, "execution_wait", {
+        executionId: resumed.execution.id,
+      }),
+    ).toMatchObject({ status: "COMPLETED" });
+    const after = await pool.query(
+      "SELECT shell_pid FROM session_generations WHERE session_id=$1 AND generation=$2",
+      [session.id, session.generation],
+    );
+    expect(after.rows).toEqual(before.rows);
+  }, 25_000);
 
   it("serves one authenticated MCP and Console path over a durable Runtime", async () => {
     const fixtureRoot = await createFixture(fixtures, "iterminal-local-stack-");

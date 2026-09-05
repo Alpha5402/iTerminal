@@ -28,7 +28,7 @@ and Human Console, then write a private MCP config under .iterminal/local.
 Set ITERM_DATABASE_URL or ITERM_DATABASE_URLS to use an external writable PostgreSQL primary without
 managing Docker. Optional: ITERM_LOCAL_STATE_DIR, ITERM_LOCAL_POSTGRES_PORT,
 ITERM_LOCAL_COMPOSE_PROJECT, ITERM_CONSOLE_PORT, ITERM_AGENT_EXECUTE_APPROVAL,
-ITERM_LOCAL_SKIP_CONSOLE_BUILD=1.
+ITERM_LOCAL_SKIP_CONSOLE_BUILD=1, ITERM_AGENT_NAME (stable per-Agent identity), ITERM_ADDITIONAL_AGENT_NAMES (comma-separated).
 `);
     return;
   }
@@ -171,6 +171,12 @@ async function runStack(input: {
     }
     if (databaseUrl === undefined) throw new Error("Local PostgreSQL target is missing");
     stack = await startLocalStack({
+      ...(process.env.ITERM_ADDITIONAL_AGENT_NAMES === undefined
+        ? {}
+        : { additionalAgentNames: process.env.ITERM_ADDITIONAL_AGENT_NAMES.split(",") }),
+      ...(process.env.ITERM_AGENT_NAME === undefined
+        ? {}
+        : { agentName: process.env.ITERM_AGENT_NAME }),
       agentExecuteApproval: parseApproval(process.env.ITERM_AGENT_EXECUTE_APPROVAL),
       consolePort: parsePort("ITERM_CONSOLE_PORT", process.env.ITERM_CONSOLE_PORT ?? "4173", true),
       databaseUrl,

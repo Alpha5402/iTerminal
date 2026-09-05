@@ -1,4 +1,9 @@
-import type { RuntimeOwnerIdentity, SessionFence, SessionLease } from "@iterminal/application";
+import {
+  sessionDurabilityFailure,
+  type RuntimeOwnerIdentity,
+  type SessionFence,
+  type SessionLease,
+} from "@iterminal/application";
 import { RuntimeError } from "@iterminal/domain";
 import type { PoolClient } from "pg";
 
@@ -155,18 +160,19 @@ export function sessionLease(row: SessionLeaseRow): SessionLease {
 }
 
 export function throwSessionLeaseLost(fence: SessionFence): never {
-  throw new RuntimeError(
+  throw sessionDurabilityFailure(
     "SESSION_LEASE_LOST",
     "Session generation lease is expired, released, or owned by another Runtime incarnation",
+    fence,
     {
-      fencingToken: fence.fencingToken,
-      generation: fence.generation,
-      ownerEpoch: fence.epoch,
-      ownerId: fence.ownerId,
-      ownerInstanceId: fence.instanceId,
-      sessionId: fence.sessionId,
+      details: {
+        ownerEpoch: fence.epoch,
+        ownerId: fence.ownerId,
+        ownerInstanceId: fence.instanceId,
+      },
+      failureRecord: "not_committed",
+      retryable: false,
     },
-    false,
   );
 }
 

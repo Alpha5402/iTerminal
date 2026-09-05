@@ -168,14 +168,14 @@ describeDatabase("M9.1 Runtime daemon owner registry lifecycle", () => {
     await mkdir(workspace, { recursive: true });
     const ownerId = "owner-m9-fenced";
     const daemon = await startRuntimeDaemon({
-      databaseHealthCheckMilliseconds: 25,
+      databaseHealthCheckMilliseconds: 1_000,
       databaseReconnectInitialMilliseconds: 20,
       databaseReconnectJitterRatio: 0,
       databaseReconnectMaxMilliseconds: 20,
       databaseUrl: databaseUrl ?? "",
       ownerId,
       ownerInstanceId: "owner-m9-fenced-a",
-      ownerLeaseMilliseconds: 250,
+      ownerLeaseMilliseconds: 5_000,
       socketPath: join(root, "a.sock"),
     });
     daemons.push(daemon);
@@ -254,6 +254,119 @@ describeDatabase("M9.1 Runtime daemon owner registry lifecycle", () => {
     });
   }, 30_000);
 
+  it("isolates one direct Session fence rejection while a second Session keeps progressing", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "itm9-d01-")));
+    fixtures.push(root);
+    const workspace = join(root, "workspace");
+    await mkdir(workspace, { recursive: true });
+    const ownerId = "owner-m9-session-isolation";
+    const daemon = await startRuntimeDaemon({
+      databaseHealthCheckMilliseconds: 10_000,
+      databaseUrl: databaseUrl ?? "",
+      ownerId,
+      ownerInstanceId: "owner-m9-session-isolation-a",
+      ownerLeaseMilliseconds: 30_000,
+      sessionLeaseMilliseconds: 30_000,
+      socketPath: join(root, "runtime.sock"),
+    });
+    daemons.push(daemon);
+    const rpc = new UnixRuntimeClient(daemon.socketPath);
+    const isolated = await rpc.createSession({ shell: "zsh", workspaceRoot: workspace });
+    const healthy = await rpc.createSession({ shell: "zsh", workspaceRoot: workspace });
+    const isolatedExecution = await rpc.startExecute({
+      actor: testActor,
+      command: "sleep 30",
+      idempotencyKey: "m9-isolated-sleep",
+      sessionGeneration: isolated.generation,
+      sessionId: isolated.id,
+    });
+    const healthyExecution = await rpc.startExecute({
+      actor: testActor,
+      command: "sleep 30",
+      idempotencyKey: "m9-healthy-sleep",
+      sessionGeneration: healthy.generation,
+      sessionId: healthy.id,
+    });
+    await waitUntil(
+      () =>
+        daemon.runtime.getExecution(isolatedExecution.execution.id).status === "RUNNING" &&
+        daemon.runtime.getExecution(healthyExecution.execution.id).status === "RUNNING",
+    );
+
+    await pool.query(
+      `UPDATE session_leases
+          SET released_at = now(), release_reason = 'injected direct Session revocation',
+              lease_expires_at = now(), version = version + 1
+        WHERE session_id = $1 AND session_generation = $2`,
+      [isolated.id, isolated.generation],
+    );
+    const isolatedRejection = await rpc
+      .sendControl({
+        actor: testActor,
+        delivery: { control: "ESC", mode: "TTY_CONTROL" },
+        idempotencyKey: "m9-isolated-fenced-control",
+        sessionGeneration: isolated.generation,
+        sessionId: isolated.id,
+        targetExecutionId: isolatedExecution.execution.id,
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    expect(isolatedRejection).toMatchObject({ retryable: false });
+    expect(["SESSION_LEASE_LOST", "SESSION_BROKEN"]).toContain(
+      (isolatedRejection as { code?: string }).code,
+    );
+
+    await waitUntil(() => daemon.runtime.getSession(isolated.id).status === "BROKEN");
+    expect(daemon.runtime.isDurabilityHealthy()).toBe(true);
+    expect(daemon.runtime.getExecution(isolatedExecution.execution.id).status).toBe("UNKNOWN");
+    expect(daemon.runtime.getSession(healthy.id).status).toBe("RUNNING");
+    expect(daemon.durabilityState().phase).toBe("READY");
+    const isolatedDurable = await pool.query<{
+      broken_events: string;
+      released_at: Date | null;
+      status: string;
+    }>(
+      `SELECT session.status, lease.released_at,
+              (SELECT count(*)::text FROM session_events event
+                WHERE event.session_id = session.id AND event.event_type = 'session.broken')
+                AS broken_events
+         FROM sessions session
+         JOIN session_leases lease
+           ON lease.session_id = session.id
+          AND lease.session_generation = session.current_generation
+        WHERE session.id = $1`,
+      [isolated.id],
+    );
+    expect(isolatedDurable.rows[0]).toMatchObject({
+      broken_events: "0",
+      status: "RUNNING",
+    });
+    expect(isolatedDurable.rows[0]?.released_at).not.toBeNull();
+
+    await rpc.sendControl({
+      actor: testActor,
+      delivery: { control: "CTRL_C", mode: "TTY_CONTROL" },
+      idempotencyKey: "m9-healthy-control-after-isolation",
+      sessionGeneration: healthy.generation,
+      sessionId: healthy.id,
+      targetExecutionId: healthyExecution.execution.id,
+    });
+    expect((await rpc.waitExecution(healthyExecution.execution.id)).status).toBe("INTERRUPTED");
+    const continued = await rpc.startExecute({
+      actor: testActor,
+      command: "printf healthy-after-session-isolation",
+      idempotencyKey: "m9-healthy-execute-after-isolation",
+      sessionGeneration: healthy.generation,
+      sessionId: healthy.id,
+    });
+    expect((await rpc.waitExecution(continued.execution.id)).output).toContain(
+      "healthy-after-session-isolation",
+    );
+    await rpc.closeSession(healthy.id, healthy.generation);
+  }, 30_000);
+
   it("closes the local PTY and recovers only as a new Session after its Session fence is revoked", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "iterminal-m9-session-fence-")));
     fixtures.push(root);
@@ -268,13 +381,14 @@ describeDatabase("M9.1 Runtime daemon owner registry lifecycle", () => {
       databaseUrl: databaseUrl ?? "",
       ownerId,
       ownerInstanceId: "owner-m9-session-fence-a",
-      ownerLeaseMilliseconds: 500,
-      sessionLeaseMilliseconds: 250,
+      ownerLeaseMilliseconds: 5_000,
+      sessionLeaseMilliseconds: 5_000,
       socketPath: join(root, "a.sock"),
     });
     daemons.push(daemon);
     const rpc = new UnixRuntimeClient(daemon.socketPath);
     const session = await rpc.createSession({ shell: "zsh", workspaceRoot: workspace });
+    const sibling = await rpc.createSession({ shell: "zsh", workspaceRoot: workspace });
     const sleeping = await rpc.startExecute({
       actor: {
         client: "m93-fence-test",
@@ -289,6 +403,7 @@ describeDatabase("M9.1 Runtime daemon owner registry lifecycle", () => {
       sessionId: session.id,
     });
     await waitUntil(() => daemon.runtime.getExecution(sleeping.execution.id).status === "RUNNING");
+    await delay(100);
 
     await pool.query(
       `UPDATE session_leases
@@ -299,6 +414,7 @@ describeDatabase("M9.1 Runtime daemon owner registry lifecycle", () => {
     );
 
     await waitUntil(() => daemon.runtime.getSession(session.id).status === "BROKEN");
+    await waitUntil(() => daemon.runtime.getSession(sibling.id).status === "BROKEN");
     await waitUntil(
       () => daemon.durabilityState().phase === "READY" && daemon.runtime.isDurabilityHealthy(),
     );
@@ -312,6 +428,11 @@ describeDatabase("M9.1 Runtime daemon owner registry lifecycle", () => {
       execution_status: "UNKNOWN",
       session_status: "BROKEN",
     });
+    const siblingDurable = await pool.query<{ status: string }>(
+      "SELECT status FROM sessions WHERE id = $1",
+      [sibling.id],
+    );
+    expect(siblingDurable.rows[0]?.status).toBe("BROKEN");
 
     const replacement = await rpc.createSession({ shell: "zsh", workspaceRoot: workspace });
     expect(replacement).toMatchObject({ generation: 1, ownerId, status: "READY" });
@@ -324,6 +445,14 @@ describeDatabase("M9.1 Runtime daemon owner registry lifecycle", () => {
     return observer;
   }
 });
+
+const testActor = {
+  client: "m93-fence-test",
+  id: "agent-m93-fence-test",
+  principal: "m93-fence-test",
+  capabilities: ACTOR_CAPABILITY_PROFILES.agent,
+  type: "agent" as const,
+};
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));

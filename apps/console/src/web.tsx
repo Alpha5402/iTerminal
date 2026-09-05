@@ -1,3 +1,13 @@
+import { useSessionDiscovery, type SessionDiscoveryPage } from "./session-navigation.js";
+import { useApprovalInbox } from "./approval-inbox.js";
+import { Diagnostics } from "./diagnostics.js";
+import { api, ConsoleApiError, normalizeClientError, type ApiErrorBody } from "./console-client.js";
+import { connectConsoleStream } from "./stream-controller.js";
+import { applyScreenDelta, type ScreenDelta } from "./screen-delta.js";
+import type { TerminalConsoleFrame } from "@iterminal/domain";
+import { TerminalHistory } from "./terminal-history.js";
+import type { TerminalScreenCell } from "@iterminal/domain";
+import { renderScreen } from "./terminal-renderer.js";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 
@@ -65,6 +75,8 @@ interface Actor {
 }
 
 interface Session {
+  readonly createdAt: string;
+  readonly liveAvailability?: "available" | "unavailable" | "historical" | "conflict";
   readonly activeExecutionId?: string;
   readonly eventSequence: number;
   readonly generation: number;
@@ -128,6 +140,8 @@ interface InteractionState {
 }
 
 interface Approval {
+  readonly sessionId: string;
+  readonly sessionGeneration: number;
   readonly actionIdempotencyKey: string;
   readonly command: string;
   readonly expiresAt: string;
@@ -152,6 +166,7 @@ interface SensitiveInput {
 }
 
 interface ScreenSnapshot {
+  readonly cells?: readonly TerminalScreenCell[];
   readonly columns: number;
   readonly cursor: { readonly column: number; readonly row: number };
   readonly geometryVersion: number;
@@ -198,16 +213,10 @@ interface Bootstrap {
   readonly sessions: readonly Session[];
 }
 
-interface ApiErrorBody {
-  readonly allowedNextActions: readonly string[];
-  readonly code: string;
-  readonly details: Readonly<Record<string, unknown>>;
-  readonly message: string;
-  readonly requestId: string;
-  readonly retryable: boolean;
-}
-
 interface StreamFrame {
+  readonly screenDelta?: ScreenDelta;
+  readonly partial?: boolean;
+  readonly persistenceLagMilliseconds?: number;
   readonly actor?: Actor;
   readonly cursor?: number;
   readonly error?: ApiErrorBody;
@@ -263,6 +272,10 @@ const INSPECTOR_TITLES: Record<InspectorView, string> = {
 };
 
 function App(): React.JSX.Element {
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [discoveryNotice, setDiscoveryNotice] = useState("");
+  const [persistencePartial, setPersistencePartial] = useState(false);
+  const [sessionsCursor, setSessionsCursor] = useState<string | null>(null);
   const [bootstrap, setBootstrap] = useState<Bootstrap>();
   const [sessions, setSessions] = useState<readonly Session[]>([]);
   const [dismissedTabs, setDismissedTabs] = useState<readonly string[]>(() => {
@@ -360,8 +373,6 @@ function App(): React.JSX.Element {
   const terminalSurface = useRef<HTMLDivElement>(null);
   const terminal = useRef<Terminal | undefined>(undefined);
   const socket = useRef<WebSocket | undefined>(undefined);
-  const reconnectTimer = useRef<number | undefined>(undefined);
-  const reconnectAttempt = useRef(0);
   const createIdempotency = useRef<
     { readonly key: string; readonly signature: string } | undefined
   >(undefined);
@@ -380,6 +391,8 @@ function App(): React.JSX.Element {
   const approvalRevision = timeline.findLast((event) =>
     event.type.startsWith("approval."),
   )?.sequence;
+  const inbox = useApprovalInbox(approvalRevision, setError, bootstrap !== undefined);
+  const { items: inboxApprovals, partial: inboxPartial, nextCursor: inboxCursor } = inbox;
   const sensitiveInputRevision = timeline.findLast((event) =>
     event.type.startsWith("sensitive_input."),
   )?.sequence;
@@ -408,7 +421,12 @@ function App(): React.JSX.Element {
   const command = commandDraft.value;
   const cursorComposerRequested =
     session?.status === "READY" || foregroundLineVisible || secureInputVisible;
-  const pendingApprovalCount = approvals.filter((approval) => approval.status === "PENDING").length;
+  const pendingApprovalCount = inboxApprovals.length;
+  const displayApprovals = [
+    ...new Map(
+      [...approvals, ...inboxApprovals].map((approval) => [approval.id, approval]),
+    ).values(),
+  ];
   const transitionSubmissionIntent = useCallback(
     (event: SubmissionIntentEvent): SubmissionIntentState => {
       const next = submissionIntentReducer(submissionIntentRef.current, event);
@@ -570,8 +588,14 @@ function App(): React.JSX.Element {
     );
   }, [cursor, screen, session, timeline]);
 
-  const refreshSessions = useCallback(async (): Promise<void> => {
-    const next = await api<readonly Session[]>("/api/sessions");
+  const applySessionDiscovery = useCallback((page: SessionDiscoveryPage<Session>): void => {
+    const next = page.sessions;
+    setDiscoveryNotice(
+      page.partial
+        ? "Some Runtime owners are unavailable; this list includes historical metadata."
+        : "",
+    );
+    setSessionsCursor(page.nextCursor);
     setSessions(next);
     setSelectedId((current) =>
       selectedSessionTab(
@@ -581,23 +605,23 @@ function App(): React.JSX.Element {
       ),
     );
   }, []);
+  const navigation = useSessionDiscovery(applySessionDiscovery, setError, bootstrap !== undefined);
+  const refreshSessions = navigation.refresh;
 
   useEffect(() => {
-    void api<Bootstrap>("/api/bootstrap")
+    const abort = new AbortController();
+    void api<Bootstrap>("/api/bootstrap", { signal: abort.signal })
       .then((value) => {
+        if (abort.signal.aborted) return;
         setBootstrap(value);
         setSessions(value.sessions);
         setSelectedId(visibleSessionTabs(value.sessions, dismissedTabsRef.current)[0]?.id);
       })
-      .catch((reason: unknown) => setError(normalizeClientError(reason)));
+      .catch((reason: unknown) => {
+        if (!abort.signal.aborted) setError(normalizeClientError(reason));
+      });
+    return () => abort.abort();
   }, []);
-
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      void refreshSessions().catch((reason: unknown) => setError(normalizeClientError(reason)));
-    }, 3_000);
-    return () => window.clearInterval(interval);
-  }, [refreshSessions]);
 
   useEffect(() => {
     if (terminalHost.current === null) return;
@@ -766,17 +790,40 @@ function App(): React.JSX.Element {
   }, [bootstrap, selectedId, selectedGeneration]);
 
   useEffect(() => {
+    let disposed = false;
     const view = terminal.current;
+    const renderingSocket = socket.current;
     if (view !== undefined && screen !== undefined) {
       renderScreen(
         view,
         screen,
         session?.status === "RUNNING" && !cursorComposerRequested,
         (text) => {
-          if (terminal.current === view) renderedCopyScreen.current = screen;
+          if (
+            disposed ||
+            terminal.current !== view ||
+            latestSession.current?.id !== session?.id ||
+            latestSession.current?.generation !== session?.generation
+          )
+            return;
+          if (terminal.current === view) {
+            renderedCopyScreen.current = screen;
+            if (
+              socket.current === renderingSocket &&
+              renderingSocket?.readyState === WebSocket.OPEN
+            )
+              renderingSocket.send(
+                JSON.stringify({
+                  type: "ack",
+                  screenVersion: screen.screenVersion,
+                  cursor: latestCursor.current,
+                }),
+              );
+          }
           setBrowserTerminalMirror(text);
           if (cursorComposerRequested) {
             window.requestAnimationFrame(() => {
+              if (disposed) return;
               syncCursorComposerLayout(
                 terminalHost.current,
                 terminalSurface.current,
@@ -788,9 +835,12 @@ function App(): React.JSX.Element {
         },
       );
     }
-  }, [cursorComposerRequested, screen, session?.status]);
+    return () => {
+      disposed = true;
+    };
+  }, [cursorComposerRequested, screen, session?.status, session?.id, session?.generation]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!cursorComposerRequested || screen === undefined) {
       setCursorComposerLayout(undefined);
       return;
@@ -801,6 +851,7 @@ function App(): React.JSX.Element {
     const sync = (): void => {
       syncCursorComposerLayout(host, surface, screen, setCursorComposerLayout);
     };
+    sync();
     const frame = window.requestAnimationFrame(sync);
     const observer = new ResizeObserver(sync);
     observer.observe(host);
@@ -813,7 +864,7 @@ function App(): React.JSX.Element {
       surface.removeEventListener("scroll", sync);
       window.removeEventListener("resize", sync);
     };
-  }, [cursorComposerRequested, screen]);
+  }, [cursorComposerRequested, screen, inspectorOpen, inspectorView]);
 
   const readyCommandVisible =
     session?.id === selectedId &&
@@ -878,6 +929,7 @@ function App(): React.JSX.Element {
   }, [screen?.columns, screen?.rows]);
 
   const applyStreamFrame = useCallback((frame: StreamFrame): void => {
+    setPersistencePartial(frame.partial === true);
     if (frame.error !== undefined) setError(frame.error);
     if (frame.type === "resync_required") {
       setStreamState("gap");
@@ -963,56 +1015,36 @@ function App(): React.JSX.Element {
         disposed = true;
       };
     }
-    const connect = (): void => {
-      if (disposed) return;
-      setStreamState("connecting");
-      const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-      const priorScreen = latestScreen.current?.screenVersion ?? saved?.screenVersion;
-      const query = new URLSearchParams({
-        after: latestCursor.current.toString(),
-        generation: selected.generation.toString(),
-        ...(priorScreen === undefined ? {} : { afterScreenVersion: priorScreen.toString() }),
-      });
-      const next = new WebSocket(
-        `${protocol}//${location.host}/api/sessions/${encodeURIComponent(selected.id)}/stream?${query.toString()}`,
-      );
-      socket.current = next;
-      next.onopen = () => {
-        reconnectAttempt.current = 0;
-      };
-      next.onmessage = (message) => {
-        try {
-          const frame = JSON.parse(String(message.data)) as StreamFrame;
-          applyStreamFrame(frame);
-          if (frame.cursor !== undefined && frame.screen !== undefined) {
-            next.send(
-              JSON.stringify({
-                cursor: frame.cursor,
-                screenVersion: frame.screen.screenVersion,
-                type: "ack",
-              }),
-            );
+    return connectConsoleStream({
+      sessionId: selected.id,
+      generation: selected.generation,
+      resume: () => ({
+        cursor: latestCursor.current,
+        screenVersion: latestScreen.current?.screenVersion ?? saved?.screenVersion,
+      }),
+      onSocket: (next) => {
+        socket.current = next;
+      },
+      onState: setStreamState,
+      onError: (reason) => setError(normalizeClientError(reason)),
+      onFrame: (value, next) => {
+        let frame = value as StreamFrame;
+        if (frame.screenDelta) {
+          const before = latestScreen.current;
+          const complete =
+            before && "format" in before
+              ? applyScreenDelta(before as TerminalConsoleFrame, frame.screenDelta)
+              : undefined;
+          if (!complete) {
+            next.close(1000, "screen resync required");
+            return;
           }
-        } catch (reason) {
-          setError(normalizeClientError(reason));
+          frame = { ...frame, screen: complete };
         }
-      };
-      next.onclose = () => {
-        if (disposed) return;
-        setStreamState("offline");
-        const delay = Math.min(5_000, 250 * 2 ** reconnectAttempt.current);
-        reconnectAttempt.current += 1;
-        reconnectTimer.current = window.setTimeout(connect, delay);
-      };
-      next.onerror = () => setStreamState("offline");
-    };
-    connect();
-    return () => {
-      disposed = true;
-      if (reconnectTimer.current !== undefined) window.clearTimeout(reconnectTimer.current);
-      socket.current?.close(1000, "session changed");
-      socket.current = undefined;
-    };
+        if (frame.screen) latestScreen.current = frame.screen;
+        applyStreamFrame(frame);
+      },
+    });
   }, [applyStreamFrame, selectedGeneration, selectedId]);
 
   useEffect(() => {
@@ -1036,13 +1068,13 @@ function App(): React.JSX.Element {
   }, [session?.generation, session?.id, session?.status]);
 
   useEffect(() => {
-    if (session === undefined || session.status === "CLOSED" || session.status === "BROKEN") {
+    if (!session || session.status === "CLOSED" || session.status === "BROKEN") {
       setApprovals([]);
       return;
     }
     let disposed = false;
     void api<readonly Approval[]>(
-      `/api/sessions/${encodeURIComponent(session.id)}/approvals?generation=${session.generation.toString()}`,
+      `/api/sessions/${encodeURIComponent(session.id)}/approvals?generation=${session.generation}`,
     )
       .then((next) => {
         if (!disposed) setApprovals(next);
@@ -1053,7 +1085,7 @@ function App(): React.JSX.Element {
     return () => {
       disposed = true;
     };
-  }, [approvalRevision, session?.generation, session?.id, session?.status]);
+  }, [approvalRevision, session?.id, session?.generation, session?.status]);
 
   useEffect(() => {
     if (session === undefined || session.status === "CLOSED" || session.status === "BROKEN") {
@@ -1819,15 +1851,14 @@ function App(): React.JSX.Element {
     approval: Approval,
     decision: "approve" | "deny",
   ): Promise<void> => {
-    if (session === undefined) return;
     try {
       const decided = await api<Approval>(
-        `/api/sessions/${encodeURIComponent(session.id)}/approvals/${encodeURIComponent(approval.id)}/decision`,
+        `/api/sessions/${encodeURIComponent(approval.sessionId)}/approvals/${encodeURIComponent(approval.id)}/decision`,
         {
           body: {
             decision,
             expectedVersion: approval.version,
-            generation: session.generation,
+            generation: approval.sessionGeneration,
             idempotencyKey: crypto.randomUUID(),
             reason: approvalReason,
           },
@@ -2110,7 +2141,12 @@ function App(): React.JSX.Element {
               onClick={() => toggleInspector("approvals")}
               type="button"
             >
-              Approvals <span>{pendingApprovalCount}</span>
+              Approvals{" "}
+              <span>
+                {inboxPartial || inboxCursor ? "At least " : ""}
+                {pendingApprovalCount}
+                {inboxPartial ? " · partial" : ""}
+              </span>
             </button>
             <button
               aria-expanded={inspectorOpen && inspectorView === "session"}
@@ -2235,19 +2271,15 @@ function App(): React.JSX.Element {
                 Input target:{" "}
                 {session?.activeExecutionId === undefined ? "shell" : "shell/active execution"}
               </span>
-              <details className="diagnostics">
-                <summary>Diagnostics</summary>
-                <span>generation {session?.generation ?? "—"}</span>
-                <span>screen v{screen?.screenVersion ?? 0}</span>
-                <span>
-                  geometry {screen?.columns ?? SCREEN_COLUMNS}×{screen?.rows ?? SCREEN_ROWS} v
-                  {screen?.geometryVersion ?? 1}
-                </span>
-                <span>cursor {cursor}</span>
-                {session?.activeExecutionId !== undefined && (
-                  <span>execution {session.activeExecutionId}</span>
-                )}
-              </details>
+              <Diagnostics
+                generation={session?.generation}
+                screenVersion={screen?.screenVersion ?? 0}
+                columns={screen?.columns ?? SCREEN_COLUMNS}
+                rows={screen?.rows ?? SCREEN_ROWS}
+                geometryVersion={screen?.geometryVersion ?? 1}
+                cursor={cursor}
+                executionId={session?.activeExecutionId}
+              />
               {(interaction?.inputContext?.state === "unknown"
                 ? interaction.inputContext.unknownReason
                 : localUncertaintyIsCurrent
@@ -2368,83 +2400,111 @@ function App(): React.JSX.Element {
                 )}
               </section>
             )}
-          </div>
-          {submissionIntent.status !== "idle" && (
-            <section
-              aria-live="polite"
-              className={`submission-intent submission-${submissionIntent.status}`}
-              data-testid="submission-intent"
-            >
-              <div>
-                <strong>
-                  {submissionIntent.payload.kind === "execute"
-                    ? "Shell command"
-                    : "Foreground line"}
-                  {" submission: "}
-                  {submissionIntent.status}
-                </strong>
-                <span>
-                  Session {submissionIntent.sessionId}, generation {submissionIntent.generation}
-                  {submissionIntent.executionId === undefined
-                    ? ""
-                    : `, execution ${submissionIntent.executionId}`}
-                </span>
-                {submissionIntent.status === "submitting" && (
-                  <small>
-                    One frozen request is in flight. Enter will not create another key or send it
-                    again.
-                  </small>
-                )}
-                {submissionIntent.status === "uncertain" && (
-                  <>
-                    <small>{submissionIntent.message}</small>
-                    <small>
-                      This identity exists only in this browser tab. Leaving or refreshing loses the
-                      lookup identity; it does not recover or retry the submission.
-                    </small>
-                  </>
-                )}
-                {submissionIntent.status === "accepted" && (
-                  <small>
-                    Action {submissionIntent.actionId} was found with actual status{" "}
-                    {submissionIntent.actionStatus}
-                    {submissionIntent.executionStatus === undefined
+            {submissionIntent.status !== "idle" && (
+              <section
+                aria-live="polite"
+                className={`submission-intent submission-${submissionIntent.status}`}
+                data-testid="submission-intent"
+              >
+                <div>
+                  <strong>
+                    {submissionIntent.payload.kind === "execute"
+                      ? "Shell command"
+                      : "Foreground line"}
+                    {" submission: "}
+                    {submissionIntent.status}
+                  </strong>
+                  <span>
+                    Session {submissionIntent.sessionId}, generation {submissionIntent.generation}
+                    {submissionIntent.executionId === undefined
                       ? ""
-                      : `; Execution status ${submissionIntent.executionStatus}`}
-                    . This is not proof that the program handled the input or that execution
-                    succeeded.
-                  </small>
+                      : `, execution ${submissionIntent.executionId}`}
+                  </span>
+                  {submissionIntent.status === "submitting" && (
+                    <small>
+                      One frozen request is in flight. Enter will not create another key or send it
+                      again.
+                    </small>
+                  )}
+                  {submissionIntent.status === "uncertain" && (
+                    <>
+                      <small>{submissionIntent.message}</small>
+                      <small>
+                        This identity exists only in this browser tab. Leaving or refreshing loses
+                        the lookup identity; it does not recover or retry the submission.
+                      </small>
+                    </>
+                  )}
+                  {submissionIntent.status === "accepted" && (
+                    <small>
+                      Action {submissionIntent.actionId} was found with actual status{" "}
+                      {submissionIntent.actionStatus}
+                      {submissionIntent.executionStatus === undefined
+                        ? ""
+                        : `; Execution status ${submissionIntent.executionStatus}`}
+                      . This is not proof that the program handled the input or that execution
+                      succeeded.
+                    </small>
+                  )}
+                  {submissionIntent.status === "rejected" && (
+                    <small>
+                      {submissionIntent.code}: {submissionIntent.message}. This request was
+                      definitively rejected before a terminal write; edit the draft and press Enter
+                      to create a new intent.
+                    </small>
+                  )}
+                </div>
+                {submissionIntent.status === "uncertain" && (
+                  <button
+                    disabled={submissionIntent.checking}
+                    onClick={() => void reconcileSubmission()}
+                    type="button"
+                  >
+                    {submissionIntent.checking ? "Checking…" : "Check result"}
+                  </button>
                 )}
-                {submissionIntent.status === "rejected" && (
-                  <small>
-                    {submissionIntent.code}: {submissionIntent.message}. This request was
-                    definitively rejected before a terminal write; edit the draft and press Enter to
-                    create a new intent.
-                  </small>
+                {(submissionIntent.status === "accepted" ||
+                  submissionIntent.status === "rejected") && (
+                  <button
+                    onClick={() => transitionSubmissionIntent({ type: "dismiss" })}
+                    type="button"
+                  >
+                    Dismiss
+                  </button>
                 )}
-              </div>
-              {submissionIntent.status === "uncertain" && (
-                <button
-                  disabled={submissionIntent.checking}
-                  onClick={() => void reconcileSubmission()}
-                  type="button"
-                >
-                  {submissionIntent.checking ? "Checking…" : "Check result"}
-                </button>
-              )}
-              {(submissionIntent.status === "accepted" ||
-                submissionIntent.status === "rejected") && (
-                <button
-                  onClick={() => transitionSubmissionIntent({ type: "dismiss" })}
-                  type="button"
-                >
-                  Dismiss
-                </button>
-              )}
-            </section>
-          )}
+              </section>
+            )}
+            {persistencePartial && (
+              <p role="status">
+                Screen is live; durable timeline is catching up or temporarily unavailable.
+              </p>
+            )}
+            {discoveryNotice && <p role="status">{discoveryNotice}</p>}
+            {sessionsCursor && (
+              <button
+                type="button"
+                disabled={navigation.loading}
+                onClick={() => {
+                  void navigation
+                    .loadMore()
+                    .catch((reason: unknown) => setError(normalizeClientError(reason)));
+                }}
+              >
+                Load more sessions
+              </button>
+            )}
+            {session?.liveAvailability && session.liveAvailability !== "available" && (
+              <p role="status">
+                Session availability: {session.liveAvailability}. Stored state is historical; live
+                writes require the current owner.
+              </p>
+            )}
+          </div>
           <div
             className="terminal-surface"
+            onWheelCapture={(event) => {
+              if (!historyOpen && event.deltaY < 0 && !event.ctrlKey) setHistoryOpen(true);
+            }}
             onClick={(event) => {
               if (
                 (session?.status !== "READY" && !foregroundLineVisible) ||
@@ -2458,6 +2518,26 @@ function App(): React.JSX.Element {
             }}
             ref={terminalSurface}
           >
+            {session && (
+              <button
+                className="history-toggle"
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setHistoryOpen(true);
+                }}
+              >
+                Browse history
+              </button>
+            )}
+            {historyOpen && session && (
+              <TerminalHistory
+                key={`${session.id}:${session.generation}`}
+                sessionId={session.id}
+                generation={session.generation}
+                onClose={() => setHistoryOpen(false)}
+              />
+            )}
             <div
               aria-label={`Canonical ${screen?.columns ?? SCREEN_COLUMNS} by ${screen?.rows ?? SCREEN_ROWS} terminal viewport`}
               aria-readonly={session?.status !== "RUNNING" || !rawInput}
@@ -2692,8 +2772,8 @@ function App(): React.JSX.Element {
                   {mcpConfigCopied ? "Complete JSON copied" : "Copy complete MCP JSON"}
                 </button>
                 <small>
-                  Contains a local 24-hour grant. Keep this stack running; do not share or commit
-                  the copied JSON.
+                  References a private credential file renewed by this local stack. Keep the stack
+                  running; the file path is specific to this machine.
                 </small>
               </section>
             )}
@@ -2702,8 +2782,17 @@ function App(): React.JSX.Element {
               <section className="approval-panel" aria-label="Agent Execute approvals">
                 <div className="section-title">
                   <h2>Approvals</h2>
-                  <span>{pendingApprovalCount}</span>
+                  <span>
+                    {inboxPartial || inboxCursor ? "At least " : ""}
+                    {pendingApprovalCount}
+                    {inboxPartial ? " · partial" : ""}
+                  </span>
                 </div>
+                {inbox.canLoadMore && (
+                  <button type="button" disabled={inbox.loading} onClick={inbox.loadMore}>
+                    Load more approvals
+                  </button>
+                )}
                 {pendingApprovalCount > 0 && (
                   <label>
                     Decision reason
@@ -2715,15 +2804,18 @@ function App(): React.JSX.Element {
                     />
                   </label>
                 )}
-                {approvals.length === 0 ? (
+                {displayApprovals.length === 0 ? (
                   <div className="panel-empty-state">
                     <strong>No commands need your attention.</strong>
                     <span>This panel opens automatically when an Agent requests approval.</span>
                   </div>
                 ) : (
                   <ol className="approval-list">
-                    {approvals.map((approval) => (
+                    {displayApprovals.map((approval) => (
                       <li key={approval.id}>
+                        <button type="button" onClick={() => setSelectedId(approval.sessionId)}>
+                          Open session {approval.sessionId.slice(-8)}
+                        </button>
                         <div className="section-title">
                           <strong>{approval.status}</strong>
                           <small>{formatTime(approval.expiresAt)}</small>
@@ -2971,52 +3063,6 @@ function App(): React.JSX.Element {
   );
 }
 
-async function api<T = unknown>(
-  path: string,
-  options: { readonly body?: unknown; readonly method?: string } = {},
-): Promise<T> {
-  const response = await fetch(path, {
-    credentials: "same-origin",
-    headers: {
-      "x-iterminal-request": "console",
-      ...(options.body === undefined ? {} : { "content-type": "application/json" }),
-    },
-    method: options.method ?? "GET",
-    ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
-  });
-  const payload = (await response.json()) as
-    { readonly result: T } | { readonly error: ApiErrorBody };
-  if (!response.ok || "error" in payload) {
-    throw "error" in payload
-      ? new ConsoleApiError(payload.error)
-      : new Error(`HTTP ${response.status.toString()}`);
-  }
-  return payload.result;
-}
-
-function normalizeClientError(reason: unknown): ApiErrorBody {
-  if (reason instanceof ConsoleApiError) return reason.body;
-  if (isApiError(reason)) return reason;
-  return {
-    allowedNextActions: ["refresh_session", "inspect_timeline"],
-    code: "CLIENT_ERROR",
-    details: {},
-    message: reason instanceof Error ? reason.message : String(reason),
-    requestId: crypto.randomUUID(),
-    retryable: false,
-  };
-}
-
-function isApiError(value: unknown): value is ApiErrorBody {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "code" in value &&
-    "message" in value &&
-    "requestId" in value
-  );
-}
-
 function isDefiniteAdmissionRejection(reason: unknown): boolean {
   return reason instanceof ConsoleApiError && isDefiniteSubmissionRejectionCode(reason.body.code);
 }
@@ -3032,20 +3078,6 @@ function identityOfIntent(
     payload: intent.payload,
     sessionId: intent.sessionId,
   };
-}
-
-function renderScreen(
-  terminal: Terminal,
-  screen: ScreenSnapshot,
-  showCursor: boolean,
-  onRendered: (text: string) => void,
-): void {
-  terminal.resize(screen.columns, screen.rows);
-  const lines = screen.lines.slice(0, screen.rows).map(safeScreenText);
-  terminal.write(
-    `\u001b[2J\u001b[H${lines.join("\r\n")}\u001b[?25${showCursor ? "h" : "l"}\u001b[${(screen.cursor.row + 1).toString()};${(screen.cursor.column + 1).toString()}H`,
-    () => onRendered(captureBrowserTerminal(terminal, screen.rows)),
-  );
 }
 
 function placeCaretAtEnd(element: HTMLTextAreaElement): void {
@@ -3172,22 +3204,6 @@ function detectSecretPromptKey(
   ].join(":");
 }
 
-function captureBrowserTerminal(terminal: Terminal, rows: number): string {
-  const active = terminal.buffer.active;
-  return Array.from({ length: rows }, (_value, row) =>
-    (active.getLine(active.viewportY + row)?.translateToString(true) ?? "").trimEnd(),
-  ).join("\n");
-}
-
-function safeScreenText(line: string): string {
-  return [...line]
-    .map((character) => {
-      const code = character.codePointAt(0) ?? 0;
-      return (code < 32 && code !== 9) || (code >= 127 && code <= 159) ? "�" : character;
-    })
-    .join("");
-}
-
 function mergeEvents(
   current: readonly SessionEvent[],
   incoming: readonly SessionEvent[],
@@ -3254,12 +3270,6 @@ function formatAge(milliseconds: number): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours.toString()}h`;
   return `${Math.floor(hours / 24).toString()}d`;
-}
-
-class ConsoleApiError extends Error {
-  public constructor(public readonly body: ApiErrorBody) {
-    super(body.message);
-  }
 }
 
 const root = document.getElementById("root");

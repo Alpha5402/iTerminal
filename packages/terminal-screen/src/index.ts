@@ -1,3 +1,4 @@
+import { NormalBufferHistory } from "./normal-history.js";
 import type {
   TerminalScreenProjection,
   TerminalScreenProjectionFactory,
@@ -15,6 +16,8 @@ import {
   type TerminalScreenCell,
   type TerminalScreenCellStyle,
   type TerminalScreenCellsResult,
+  type TerminalConsoleFrame,
+  type TerminalHistoryPage,
   type TerminalScreenColor,
   type TerminalScreenDiffResult,
   type TerminalScreenFrame,
@@ -49,10 +52,12 @@ export class XtermScreenProjectionFactory implements TerminalScreenProjectionFac
 
 export class XtermScreenProjection implements TerminalScreenProjection {
   readonly #terminal: XtermTerminal;
+  readonly #normalHistory: NormalBufferHistory;
   #appliedVersion = 0;
   #scheduledVersion = 0;
   #disposed = false;
   #failure: Error | undefined;
+  #consoleFrameCache: TerminalConsoleFrame | undefined;
   #geometryVersion = 1;
   #tail: Promise<void> = Promise.resolve();
   readonly #history: TerminalScreenSnapshot[] = [];
@@ -91,6 +96,7 @@ export class XtermScreenProjection implements TerminalScreenProjection {
       rows: CANONICAL_TERMINAL_ROWS,
       scrollback,
     });
+    this.#normalHistory = new NormalBufferHistory(this.#terminal);
     this.#recordSnapshot();
     this.#terminal.onData((data) => {
       if (isCursorPositionResponse(data)) this.#responseSink?.(data);
@@ -129,6 +135,7 @@ export class XtermScreenProjection implements TerminalScreenProjection {
                   resolve();
                   return;
                 }
+                this.#normalHistory.afterWrite();
                 this.#appliedVersion = screenVersion;
                 const snapshot = this.#recordSnapshot();
                 this.#notifyVersionWaiters(snapshot);
@@ -158,6 +165,47 @@ export class XtermScreenProjection implements TerminalScreenProjection {
       return Promise.reject(new Error("Screen diff afterVersion must be a non-negative integer"));
     }
     return this.#read(() => this.#captureDiff(afterVersion));
+  }
+
+  public history(input: {
+    cursor?: string | undefined;
+    limit?: number | undefined;
+  }): Promise<TerminalHistoryPage> {
+    return this.#read(() =>
+      this.#normalHistory.page(input, { ...this.identity, screenVersion: this.#appliedVersion }),
+    );
+  }
+
+  public consoleFrame(): Promise<TerminalConsoleFrame> {
+    // #read serializes captures with parser writes and other readers. A version is
+    // captured only on demand once, even with concurrent Console subscribers.
+    return this.#read(() => {
+      if (this.#consoleFrameCache?.screenVersion !== this.#appliedVersion) {
+        this.#consoleFrameCache = {
+          ...cloneSnapshot(this.#currentSnapshot()),
+          format: "cells-v1",
+          cells: this.#captureCells({
+            startColumn: 0,
+            startRow: 0,
+            columnCount: this.#terminal.cols,
+            rowCount: this.#terminal.rows,
+          }).cells,
+        };
+      }
+      const frame = this.#consoleFrameCache;
+      return {
+        ...cloneSnapshot(frame),
+        format: frame.format,
+        cells: frame.cells.map((cell) => ({
+          ...cell,
+          style: {
+            ...cell.style,
+            ...(cell.style.foreground ? { foreground: { ...cell.style.foreground } } : {}),
+            ...(cell.style.background ? { background: { ...cell.style.background } } : {}),
+          },
+        })),
+      };
+    });
   }
 
   public cells(input: {
@@ -222,6 +270,7 @@ export class XtermScreenProjection implements TerminalScreenProjection {
     const operation = this.#tail.then(() => {
       this.#assertAvailable();
       this.#terminal.resize(columns, rows);
+      this.#normalHistory.reset();
       this.#geometryVersion += 1;
       this.#appliedVersion = screenVersion;
       const snapshot = this.#recordSnapshot();

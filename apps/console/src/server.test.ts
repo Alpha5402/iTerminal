@@ -767,6 +767,8 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
       issuedAt,
       operations: [
         "action.lookup",
+        "approval.pending.list",
+        "console.observe",
         "events.query",
         "execution.start",
         "execution.wait",
@@ -775,6 +777,7 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
         "session.create",
         "session.get",
         "session.list",
+        "session.list.v2",
       ],
       version: 1,
     } satisfies RuntimeRpcGrantClaims);
@@ -1361,6 +1364,7 @@ function consoleGrant(
   operations: readonly RuntimeRpcGrantClaims["operations"][number][] = [
     "runtime.capabilities",
     "session.list",
+    "session.list.v2",
   ],
   actorOverrides: Partial<Extract<RuntimeRpcGrantClaims["actor"], { kind: "paired_prefix" }>> = {},
 ): string {

@@ -1,3 +1,12 @@
+import { ExecutionCache } from "./execution-cache.js";
+import { runtimeRetentionLimits, requirePositiveInteger } from "./retention-policy.js";
+import { executionObservationText } from "./observation-text.js";
+import {
+  ExecutionWaiters,
+  executionWaitAbortError,
+  nativeExecutionWaitScheduler,
+} from "./execution-waiters.js";
+import { pendingApprovalsPage } from "./discovery.js";
 import { createHash, randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative } from "node:path";
@@ -33,6 +42,13 @@ import type {
   ShellCheckpointView,
   ShellKind,
   TerminalScreenCellsResult,
+  TerminalConsoleFrame,
+  ConsoleObservation,
+  TerminalHistoryPage,
+  SessionDiscoveryPage,
+  SessionDiscoveryRequest,
+  PendingApprovalsRequest,
+  PendingApprovalsPage,
   TerminalScreenDiffResult,
   TerminalScreenRegionResult,
   TerminalScreenSnapshot,
@@ -60,6 +76,11 @@ import {
   TERMINAL_RESPONSE_ACTOR,
 } from "@iterminal/domain";
 import { deliveredInputState, validateLineInput } from "./input-context.js";
+import {
+  sessionDurabilityFailure,
+  trustedDurabilityFailureScope,
+  type DurabilityFailureScope,
+} from "./durability-failure.js";
 
 import type {
   ActionLookupFound,
@@ -75,7 +96,6 @@ import type {
   ExecutionOutputReadResult,
   ExecutionWaitRequest,
   ExecutionWaitResult,
-  ExecutionWaitScheduler,
   HistoryFact,
   HistoryLookupRequest,
   HistoryLookupResult,
@@ -84,7 +104,6 @@ import type {
   DurableOwnerRecoveryResult,
   DurableRebuildableSession,
   RuntimeOwnerIdentity,
-  RuntimeRetentionLimits,
   RuntimeRetentionSnapshot,
   RuntimeDurability,
   RuntimeServiceOptions,
@@ -99,14 +118,9 @@ import type {
   TerminalScreenProjectionFactory,
 } from "./ports.js";
 import {
-  DEFAULT_RUNTIME_RETENTION_LIMITS,
-  DEFAULT_EXECUTION_WAIT_MILLISECONDS,
   MAX_ARTIFACT_READ_BYTES,
   MAX_EXECUTION_OBSERVATION_RESPONSE_BYTES,
-  MAX_EXECUTION_OBSERVATION_TEXT_BYTES,
-  MAX_EXECUTION_OBSERVATION_TEXT_SOURCE_BYTES,
   MAX_EXECUTION_OUTPUT_READ_BYTES,
-  MAX_EXECUTION_WAIT_MILLISECONDS,
 } from "./ports.js";
 import { classifyTerminalState } from "./terminal-state.js";
 
@@ -371,15 +385,6 @@ interface ExecutionDispatchState {
   writeAccepted: boolean;
 }
 
-interface ExecutionWaiter {
-  readonly notify: () => void;
-}
-
-const nativeExecutionWaitScheduler: ExecutionWaitScheduler = {
-  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-  setTimeout: (callback, milliseconds) => setTimeout(callback, milliseconds),
-};
-
 interface Deferred<T> {
   readonly promise: Promise<T>;
   readonly reject: (reason?: unknown) => void;
@@ -412,9 +417,7 @@ export class RuntimeService {
     Readonly<{ executorId: string; generation: number }>
   >();
   readonly #screens = new Map<string, TerminalScreenProjection>();
-  readonly #completions = new Map<string, Promise<Execution>>();
-  readonly #executionWaiters = new Map<string, Set<ExecutionWaiter>>();
-  readonly #started = new Map<string, Promise<void>>();
+  readonly #executionWaiters: ExecutionWaiters;
   readonly #durableQueues = new Map<string, DurableQueueState>();
   readonly #ptyOutputBuffers = new Map<string, PtyOutputBuffer>();
   readonly #actors = new Map<string, Actor>();
@@ -433,9 +436,8 @@ export class RuntimeService {
   readonly #checkpointEnvironmentKeys: readonly string[];
   readonly #durability: RuntimeDurability | undefined;
   #ownerDurabilityFailure: RuntimeError | undefined;
-  readonly #dispatchStates = new Map<string, ExecutionDispatchState>();
+  readonly #executionCache = new ExecutionCache<ExecutionDispatchState>();
   readonly #executionDispatch: "external" | "immediate";
-  readonly #executionWaitScheduler: ExecutionWaitScheduler;
   readonly #hooks: NonNullable<RuntimeServiceOptions["hooks"]>;
   readonly #now: () => Date;
   readonly #ownerId: string;
@@ -458,7 +460,10 @@ export class RuntimeService {
       options.checkpointEnvironmentKeys ?? DEFAULT_CHECKPOINT_ENVIRONMENT_KEYS,
     );
     this.#executionDispatch = options.executionDispatch ?? "immediate";
-    this.#executionWaitScheduler = options.executionWaitScheduler ?? nativeExecutionWaitScheduler;
+    this.#executionWaiters = new ExecutionWaiters(
+      (id) => this.#requireExecution(id),
+      options.executionWaitScheduler ?? nativeExecutionWaitScheduler,
+    );
     this.#hooks = options.hooks ?? {};
     this.#now = options.now ?? (() => new Date());
     this.#ownerId = options.ownerId ?? `owner_${process.pid.toString()}`;
@@ -489,16 +494,15 @@ export class RuntimeService {
     }>;
     readonly store?: RuntimeRetentionSnapshot;
   }> {
-    let executionWaiters = 0;
-    for (const waiters of this.#executionWaiters.values()) executionWaiters += waiters.size;
+    const executionWaiters = this.#executionWaiters.size;
     return {
       application: {
         approvals: this.#approvals.size,
-        completionPromises: this.#completions.size,
-        dispatchStates: this.#dispatchStates.size,
+        completionPromises: this.#executionCache.sizes.completions,
+        dispatchStates: this.#executionCache.sizes.states,
         durableQueues: this.#durableQueues.size,
         executionWaiters,
-        startedPromises: this.#started.size,
+        startedPromises: this.#executionCache.sizes.started,
       },
       ...(this.store.retentionSnapshot === undefined
         ? {}
@@ -959,6 +963,34 @@ export class RuntimeService {
     return this.#launchSession(session);
   }
 
+  public listSessionsV2(request: SessionDiscoveryRequest = {}): SessionDiscoveryPage {
+    const limit = request.limit ?? 50;
+    if (
+      !Number.isSafeInteger(limit) ||
+      limit < 1 ||
+      limit > 200 ||
+      (request.cursor?.length ?? 0) > 256
+    )
+      throw new RuntimeError("INVALID_REQUEST", "Invalid Session discovery page");
+    const sessions = this.listSessions()
+      .filter((session) => request.cursor === undefined || session.id > request.cursor)
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .slice(0, limit + 1);
+    return {
+      items: sessions.slice(0, limit).map((session) => ({
+        session,
+        durableStatus: null,
+        liveAvailability:
+          session.status === "BROKEN" || session.status === "CLOSED"
+            ? ("historical" as const)
+            : ("available" as const),
+      })),
+      unavailableOwners: [],
+      partial: false,
+      nextCursor: sessions.length > limit ? sessions[limit - 1]!.id : null,
+    };
+  }
+
   public getSessionCheckpoint(sessionId: string, generation: number): ShellCheckpointView {
     const session = this.#requireExactGeneration(sessionId, generation);
     if (session.status === "READY" && this.#checkpointInvalid.has(sessionId)) {
@@ -1290,6 +1322,68 @@ export class RuntimeService {
       return result;
     } catch (error) {
       throw this.#screenFailure(request.sessionId, request.generation, error);
+    }
+  }
+
+  public async getScreenHistory(request: {
+    sessionId: string;
+    generation: number;
+    cursor?: string | undefined;
+    limit?: number | undefined;
+  }): Promise<TerminalHistoryPage> {
+    const screen = this.#requireScreen(request.sessionId, request.generation);
+    if (screen.history === undefined)
+      throw new RuntimeError("INVALID_REQUEST", "Screen history is unavailable");
+    const result = await screen.history(request);
+    this.#requireGeneration(request.sessionId, request.generation);
+    return result;
+  }
+
+  public async observeConsole(request: {
+    sessionId: string;
+    generation: number;
+    afterScreenVersion?: number | undefined;
+  }): Promise<ConsoleObservation> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const before = this.#requireGeneration(request.sessionId, request.generation);
+      const target = before.activeExecutionId;
+      const interaction = await this.getInteractionState(request.sessionId, request.generation);
+      const screen =
+        before.screenVersion === request.afterScreenVersion
+          ? undefined
+          : await this.getConsoleFrame(request.sessionId, request.generation);
+      const current = this.#requireGeneration(request.sessionId, request.generation);
+      if (current.activeExecutionId !== target) continue;
+      return {
+        observationVersion: 1,
+        atomic: false,
+        session: { ...current },
+        interaction,
+        ...(screen ? { screen } : {}),
+        screenVersion: screen?.screenVersion ?? request.afterScreenVersion ?? current.screenVersion,
+        generation: current.generation,
+        executionId: target ?? null,
+      };
+    }
+    throw new RuntimeError("RESYNC_REQUIRED", "Execution changed during Console observation", {
+      sessionId: request.sessionId,
+      generation: request.generation,
+    });
+  }
+
+  public async getConsoleFrame(
+    sessionId: string,
+    generation: number,
+  ): Promise<TerminalConsoleFrame> {
+    const screen = this.#requireScreen(sessionId, generation);
+    if (screen.consoleFrame === undefined)
+      throw new RuntimeError("INVALID_REQUEST", "Canonical Console cells are unavailable");
+    try {
+      const frame = await screen.consoleFrame();
+      this.#requireGeneration(sessionId, generation);
+      return frame;
+    } catch (error) {
+      throw this.#screenFailure(sessionId, generation, error);
     }
   }
 
@@ -1637,6 +1731,21 @@ export class RuntimeService {
     });
   }
 
+  public listPendingApprovals(request: PendingApprovalsRequest): PendingApprovalsPage {
+    this.#requireOwnerDurability();
+    this.#validateActor(request.actor);
+    this.#requireActorCapability(request.actor, "approval.decide");
+    if (request.actor.type !== "human")
+      throw new RuntimeError("POLICY_DENIED", "Only Humans may inspect the pending Approval inbox");
+    return pendingApprovalsPage(
+      this.#approvals.values(),
+      request,
+      (id) => this.store.getSession(id),
+      cloneApproval,
+      this.#now().getTime(),
+    );
+  }
+
   public listApprovals(request: ListApprovalsRequest): Promise<readonly Approval[]> {
     return this.#withMutationLock(request.sessionId, async () => {
       await this.#flushDurable(request.sessionId);
@@ -1792,9 +1901,9 @@ export class RuntimeService {
       const execution = this.#requireExecution(replay.executionId);
       return {
         action: replay,
-        completion: this.#completions.get(execution.id) ?? Promise.resolve(execution),
+        completion: this.#executionCache.completion(execution.id) ?? Promise.resolve(execution),
         execution,
-        started: this.#started.get(execution.id) ?? Promise.resolve(),
+        started: this.#executionCache.started(execution.id) ?? Promise.resolve(),
       };
     }
     const durableReplay = await this.#durableActionReplay(
@@ -1951,7 +2060,7 @@ export class RuntimeService {
     const execution = this.#requireExecution(executionId);
     return this.#withMutationLock(execution.sessionId, async () => {
       await this.#flushDurable(execution.sessionId);
-      const dispatch = this.#dispatchStates.get(execution.id);
+      const dispatch = this.#executionCache.get(execution.id);
       if (dispatch === undefined) {
         throw new RuntimeError(
           "DELIVERY_UNKNOWN",
@@ -1977,9 +2086,7 @@ export class RuntimeService {
     };
     void state.started.promise.catch(() => undefined);
     void state.completion.promise.catch(() => undefined);
-    this.#dispatchStates.set(execution.id, state);
-    this.#started.set(execution.id, state.started.promise);
-    this.#completions.set(execution.id, state.completion.promise);
+    this.#executionCache.register(execution.id, state);
     void state.completion.promise.then(
       () => this.#releaseExecutionTransients(execution.id, state),
       () => this.#releaseExecutionTransients(execution.id, state),
@@ -1988,13 +2095,9 @@ export class RuntimeService {
   }
 
   #releaseExecutionTransients(executionId: string, state: ExecutionDispatchState): void {
-    this.#notifyExecutionWaiters(executionId);
+    this.#executionWaiters.notify(executionId);
     if (state.historyPersisted) this.#settleActionHistory(state.action, state.execution);
-    if (this.#dispatchStates.get(executionId) === state) this.#dispatchStates.delete(executionId);
-    if (this.#started.get(executionId) === state.started.promise) this.#started.delete(executionId);
-    if (this.#completions.get(executionId) === state.completion.promise) {
-      this.#completions.delete(executionId);
-    }
+    this.#executionCache.release(executionId, state);
   }
 
   #startDispatch(state: ExecutionDispatchState): void {
@@ -3373,80 +3476,14 @@ export class RuntimeService {
 
   public async waitExecution(executionId: string): Promise<Execution> {
     const execution = this.#requireExecution(executionId);
-    return this.#completions.get(execution.id) ?? execution;
+    return this.#executionCache.completion(execution.id) ?? execution;
   }
 
-  public async waitExecutionV2(
+  public waitExecutionV2(
     request: ExecutionWaitRequest,
     signal?: AbortSignal,
   ): Promise<ExecutionWaitResult> {
-    const waitMs = validateExecutionWaitMilliseconds(request.waitMs);
-    const execution = this.#requireExecution(request.executionId);
-    if (signal?.aborted === true) return Promise.reject(executionWaitAbortError());
-    if (waitMs === 0 || isExecutionTerminal(execution.status)) {
-      return Promise.resolve(executionWaitResult(execution));
-    }
-
-    return new Promise<ExecutionWaitResult>((resolve, reject) => {
-      let settled = false;
-      let timer: unknown;
-      let timerCreated = false;
-      const waiters = this.#executionWaiters.get(execution.id) ?? new Set<ExecutionWaiter>();
-      const cleanup = (): void => {
-        if (timerCreated) this.#executionWaitScheduler.clearTimeout(timer);
-        signal?.removeEventListener("abort", onAbort);
-        waiters.delete(waiter);
-        if (waiters.size === 0) this.#executionWaiters.delete(execution.id);
-      };
-      const fail = (error: unknown): void => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(error instanceof Error ? error : new Error(String(error)));
-      };
-      const finish = (): void => {
-        if (settled) return;
-        try {
-          const current = this.#requireExecution(execution.id);
-          settled = true;
-          cleanup();
-          resolve(executionWaitResult(current));
-        } catch (error) {
-          fail(error);
-        }
-      };
-      const onAbort = (): void => fail(executionWaitAbortError());
-      const waiter: ExecutionWaiter = { notify: finish };
-
-      waiters.add(waiter);
-      this.#executionWaiters.set(execution.id, waiters);
-      signal?.addEventListener("abort", onAbort, { once: true });
-      if (signal?.aborted === true) {
-        onAbort();
-        return;
-      }
-      try {
-        timer = this.#executionWaitScheduler.setTimeout(finish, waitMs);
-        timerCreated = true;
-        if (settled) this.#executionWaitScheduler.clearTimeout(timer);
-      } catch (error) {
-        fail(error);
-        return;
-      }
-
-      // Settlement may race the initial snapshot and waiter registration.
-      try {
-        if (isExecutionTerminal(this.#requireExecution(execution.id).status)) finish();
-      } catch (error) {
-        fail(error);
-      }
-    });
-  }
-
-  #notifyExecutionWaiters(executionId: string): void {
-    const waiters = this.#executionWaiters.get(executionId);
-    if (waiters === undefined) return;
-    for (const waiter of [...waiters]) waiter.notify();
+    return this.#executionWaiters.wait(request, signal);
   }
 
   public async queryEvents(
@@ -3552,7 +3589,12 @@ export class RuntimeService {
 
   #recordOutput(sessionId: string, generation: number, data: string): void {
     const current = this.store.getSession(sessionId);
-    if (current === undefined || current.generation !== generation || current.status === "CLOSED") {
+    if (
+      current === undefined ||
+      current.generation !== generation ||
+      current.status === "CLOSED" ||
+      current.status === "BROKEN"
+    ) {
       return;
     }
     const screenVersion = this.store.bumpScreenVersion(sessionId, generation);
@@ -4679,16 +4721,24 @@ export class RuntimeService {
       const failure = new RuntimeError(
         "RUNTIME_UNAVAILABLE",
         "Durable event ingest backlog exceeded its bound",
-        {
-          durabilityScope: "session",
-          maxPendingBytes: MAX_PENDING_DURABLE_BYTES,
-          maxPendingEvents: MAX_PENDING_DURABLE_EVENTS,
-          sessionId,
-        },
+        {},
         true,
       );
-      state.failure = failure;
-      throw failure;
+      const session = this.store.getSession(sessionId);
+      const fence = session === undefined ? undefined : this.#sessionLeases.get(sessionId);
+      const scopedFailure =
+        fence === undefined || session?.generation !== fence.generation
+          ? failure
+          : sessionDurabilityFailure("RUNTIME_UNAVAILABLE", failure.message, fence, {
+              details: {
+                maxPendingBytes: MAX_PENDING_DURABLE_BYTES,
+                maxPendingEvents: MAX_PENDING_DURABLE_EVENTS,
+              },
+              failureRecord: "not_committed",
+              retryable: true,
+            });
+      state.failure = scopedFailure;
+      throw scopedFailure;
     }
     state.pendingEvents += 1;
     state.pendingBytes += pendingBytes;
@@ -4698,7 +4748,12 @@ export class RuntimeService {
         return await work();
       } catch (error) {
         if (error instanceof RuntimeError) {
-          if (error.code === "RUNTIME_UNAVAILABLE") state.failure ??= error;
+          if (
+            error.code === "RUNTIME_UNAVAILABLE" &&
+            !this.#isStaleSessionDurabilityFailure(sessionId, error)
+          ) {
+            state.failure ??= error;
+          }
           if (error.code === "DELIVERY_UNKNOWN") state.failure ??= durabilityError(error);
           throw error;
         }
@@ -4729,9 +4784,8 @@ export class RuntimeService {
         `Timed out draining durable Event ingest for Session ${sessionId}`,
       );
     } catch (error) {
-      state.failure ??= durabilityError(error);
       this.#tripDurability(sessionId, error);
-      throw state.failure;
+      throw durabilityError(error);
     }
     if (state.failure !== undefined) throw state.failure;
   }
@@ -4750,11 +4804,42 @@ export class RuntimeService {
       this.#tripOwnerDurability(durabilityError(error));
       return;
     }
+    const scope = trustedSessionDurabilityFailureScope(error);
+    if (scope !== undefined) {
+      if (scope.sessionId !== sessionId) {
+        this.#tripOwnerDurability(durabilityError(error));
+        return;
+      }
+      if (!this.#isCurrentSessionDurabilityFailure(scope)) return;
+    }
     const state = this.#durableQueue(sessionId);
     state.failure ??= durabilityError(error);
     this.#sessionLeases.delete(sessionId);
     const session = this.store.getSession(sessionId);
     if (session !== undefined) this.#breakLiveSession(session, errorMessage(error));
+  }
+
+  #isStaleSessionDurabilityFailure(sessionId: string, error: unknown): boolean {
+    const scope = trustedSessionDurabilityFailureScope(error);
+    return (
+      scope !== undefined &&
+      scope.sessionId === sessionId &&
+      !this.#isCurrentSessionDurabilityFailure(scope)
+    );
+  }
+
+  #isCurrentSessionDurabilityFailure(
+    scope: Extract<DurabilityFailureScope, { kind: "session" }>,
+  ): boolean {
+    const session = this.store.getSession(scope.sessionId);
+    const lease = this.#sessionLeases.get(scope.sessionId);
+    return (
+      session !== undefined &&
+      session.generation === scope.generation &&
+      lease !== undefined &&
+      lease.generation === scope.generation &&
+      lease.fencingToken === scope.fencingToken
+    );
   }
 
   #tripOwnerDurability(failure: RuntimeError): void {
@@ -4819,7 +4904,7 @@ export class RuntimeService {
     execution.finishedAt ??= this.#timestamp();
     const action = this.store.getAction(execution.actionId);
     if (action?.type === "execute") action.status = "UNKNOWN";
-    const dispatch = this.#dispatchStates.get(execution.id);
+    const dispatch = this.#executionCache.get(execution.id);
     const failure = new RuntimeError(
       "DELIVERY_UNKNOWN",
       "Execution outcome is unknown",
@@ -4828,6 +4913,7 @@ export class RuntimeService {
     );
     dispatch?.started.reject(failure);
     dispatch?.completion.reject(failure);
+    this.#executionWaiters.notify(execution.id);
   }
 
   #queueExecutorLifecycle(event: ShellExecutorLifecycleEvent): void {
@@ -5330,75 +5416,6 @@ function abortError(): Error {
   return error;
 }
 
-function validateExecutionWaitMilliseconds(value: number | undefined): number {
-  const waitMs = value ?? DEFAULT_EXECUTION_WAIT_MILLISECONDS;
-  if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > MAX_EXECUTION_WAIT_MILLISECONDS) {
-    throw new RuntimeError(
-      "INVALID_REQUEST",
-      `Execution wait must be between 0 and ${MAX_EXECUTION_WAIT_MILLISECONDS.toString()} milliseconds`,
-      { waitMs },
-    );
-  }
-  return waitMs;
-}
-
-function executionWaitResult(execution: Execution): ExecutionWaitResult {
-  return {
-    completed: isExecutionTerminal(execution.status),
-    executionId: execution.id,
-    executionState: execution.status,
-  };
-}
-
-function executionWaitAbortError(): Error {
-  const error = new Error("Execution wait aborted");
-  error.name = "AbortError";
-  return error;
-}
-
-function executionObservationText(
-  contentBase64: string,
-  byteLength: number,
-): Readonly<{
-  readonly text?: string;
-  readonly textStatus: "complete" | "unaligned_utf8" | "omitted_for_budget";
-}> {
-  const bytes = Buffer.from(contentBase64, "base64");
-  if (bytes.byteLength !== byteLength) {
-    throw new RuntimeError(
-      "RUNTIME_UNAVAILABLE",
-      "Execution output byte metadata is inconsistent",
-      { component: "execution_observation" },
-      true,
-    );
-  }
-  if (bytes.byteLength > MAX_EXECUTION_OBSERVATION_TEXT_SOURCE_BYTES) {
-    return { textStatus: "omitted_for_budget" };
-  }
-  let decoded: string;
-  try {
-    decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    return { textStatus: "unaligned_utf8" };
-  }
-  const text = [...decoded]
-    .map((character) => {
-      const codePoint = character.codePointAt(0)!;
-      if (character === "\n" || character === "\r" || character === "\t") return character;
-      if (codePoint < 0x20) return String.fromCodePoint(0x2400 + codePoint);
-      if (codePoint === 0x7f) return "␡";
-      if (codePoint >= 0x80 && codePoint <= 0x9f) {
-        return `\\u{${codePoint.toString(16).padStart(4, "0")}}`;
-      }
-      return character;
-    })
-    .join("");
-  if (new TextEncoder().encode(text).byteLength > MAX_EXECUTION_OBSERVATION_TEXT_BYTES) {
-    return { textStatus: "omitted_for_budget" };
-  }
-  return { text, textStatus: "complete" };
-}
-
 function validateCheckpointEnvironmentKeys(keys: readonly string[]): readonly string[] {
   const unique = [...new Set(keys)];
   if (unique.length > MAX_CHECKPOINT_ENVIRONMENT_KEYS) {
@@ -5769,7 +5786,7 @@ function durabilityError(error: unknown): RuntimeError {
     "RUNTIME_UNAVAILABLE",
     "PostgreSQL durable journal is unavailable",
     {
-      durabilityScope: isOwnerDurabilityFailure(error) ? "owner" : "session",
+      durabilityScope: "owner",
       reason: errorMessage(error),
     },
     true,
@@ -5777,30 +5794,19 @@ function durabilityError(error: unknown): RuntimeError {
 }
 
 function isOwnerDurabilityFailure(error: unknown): boolean {
-  if (error instanceof RuntimeError) {
-    if (error.code === "OWNER_LEASE_LOST" || error.code === "SESSION_LEASE_LOST") return true;
-    if (error.code !== "RUNTIME_UNAVAILABLE") return false;
-    return error.details.durabilityScope !== "session";
-  }
-  if (typeof error === "object" && error !== null && "code" in error) {
-    const code = String(error.code);
-    if (code === "57014") return false;
-    if (code.startsWith("08") || OWNER_CONNECTION_ERROR_CODES.has(code)) return true;
-  }
+  const trustedScope = trustedDurabilityFailureScope(error);
+  if (trustedScope?.kind === "session") return false;
+  if (trustedScope?.kind === "owner") return true;
+  if (error instanceof RuntimeError && error.code === "DELIVERY_UNKNOWN") return false;
   return true;
 }
 
-const OWNER_CONNECTION_ERROR_CODES = new Set([
-  "57P01",
-  "57P02",
-  "57P03",
-  "ECONNREFUSED",
-  "ECONNRESET",
-  "EHOSTUNREACH",
-  "ENETUNREACH",
-  "EPIPE",
-  "ETIMEDOUT",
-]);
+function trustedSessionDurabilityFailureScope(
+  error: unknown,
+): Extract<DurabilityFailureScope, { kind: "session" }> | undefined {
+  const scope = trustedDurabilityFailureScope(error);
+  return scope?.kind === "session" ? scope : undefined;
+}
 
 function isDurabilityFatal(error: unknown): boolean {
   return (
@@ -5825,34 +5831,6 @@ function missingSessionLease(
 
 function executionVersion(execution: Execution): Readonly<{ id: string; version: number }> {
   return { id: execution.id, version: execution.version };
-}
-
-function runtimeRetentionLimits(
-  configured: Partial<RuntimeRetentionLimits> | undefined,
-): RuntimeRetentionLimits {
-  const limits = { ...DEFAULT_RUNTIME_RETENTION_LIMITS, ...configured };
-  for (const [name, value] of Object.entries(limits)) {
-    requirePositiveInteger(value, `retention.${name}`);
-  }
-  if (
-    limits.memoryOnlyControlReserveEntries >= limits.memoryOnlyActionEntries ||
-    limits.memoryOnlyControlReserveBytes >= limits.memoryOnlyActionBytes
-  ) {
-    throw new RuntimeError(
-      "INVALID_REQUEST",
-      "Memory-only Control reserve must be smaller than total Action capacity",
-    );
-  }
-  return limits;
-}
-
-function requirePositiveInteger(value: number, name: string): number {
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new RuntimeError("INVALID_REQUEST", `${name} must be a positive integer`, {
-      [name]: value,
-    });
-  }
-  return value;
 }
 
 function deferred<T>(): Deferred<T> {

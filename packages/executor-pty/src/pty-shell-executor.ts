@@ -110,6 +110,7 @@ export class PtyShellExecutor implements ShellExecutor {
   readonly #dispatchCommandFile: string;
   readonly #dispatchTokenFile: string;
   readonly #decoder = new ControlFrameDecoder();
+  readonly #controlScratch = Buffer.allocUnsafe(16 * 1024);
   readonly #events: ControlEvent[] = [];
   readonly #waiters = new Set<ControlWaiter>();
   readonly #pty: IPty;
@@ -412,7 +413,8 @@ export class PtyShellExecutor implements ShellExecutor {
   }
 
   #pollControl(): void {
-    const buffer = Buffer.allocUnsafe(16 * 1024);
+    // StringDecoder consumes/copies bytes synchronously; no mutable slice escapes this poll.
+    const buffer = this.#controlScratch;
     try {
       for (;;) {
         const bytesRead = readSync(this.#controlFd, buffer, 0, buffer.length, null);

@@ -210,3 +210,46 @@ function createWorkspace(): string {
   workspaces.push(root);
   return root;
 }
+
+describe("global pending Approval observation", () => {
+  it("pages without duplicates, enforces immutable Human identity and omits expiry without mutation", async () => {
+    let now = new Date("2026-09-06T01:00:00Z");
+    const runtime = createTestRuntime({ now: () => new Date(now) });
+    const session = await runtime.createSession({ shell: "zsh", workspaceRoot: createWorkspace() });
+    try {
+      for (let index = 0; index < 3; index++)
+        await runtime.requestExecuteApproval({
+          actor: agentActor,
+          sessionId: session.id,
+          sessionGeneration: session.generation,
+          command: `echo ${index}`,
+          actionIdempotencyKey: `pending-${index}`,
+          requestIdempotencyKey: `request-pending-${index}`,
+          reason: "pending-page fixture",
+          ttlMilliseconds: 30_000,
+        });
+      const first = runtime.listPendingApprovals({ actor: humanActor, limit: 1 });
+      const second = runtime.listPendingApprovals({
+        actor: humanActor,
+        limit: 2,
+        cursor: first.nextCursor!,
+      });
+      expect(new Set([...first.items, ...second.items].map((approval) => approval.id)).size).toBe(
+        3,
+      );
+      expect(second.nextCursor).toBeNull();
+      expect(() => runtime.listPendingApprovals({ actor: agentActor })).toThrowError(
+        expect.objectContaining({ code: "POLICY_DENIED" }),
+      );
+      expect(() =>
+        runtime.listPendingApprovals({ actor: { ...humanActor, principal: "forged" } }),
+      ).toThrowError(expect.objectContaining({ code: "ACTOR_IDENTITY_CONFLICT" }));
+      const before = await runtime.queryEvents(session.id, session.generation);
+      now = new Date(now.getTime() + 30_001);
+      expect(runtime.listPendingApprovals({ actor: humanActor }).items).toEqual([]);
+      expect(await runtime.queryEvents(session.id, session.generation)).toEqual(before);
+    } finally {
+      await runtime.closeSession(session.id, session.generation);
+    }
+  });
+});

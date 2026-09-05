@@ -943,16 +943,15 @@ textarea {
 }
 
 .submission-intent {
-  position: fixed;
-  z-index: 8;
-  pointer-events: none;
-  right: 1rem;
-  top: 5.5rem;
+  position: relative;
+  margin: 0.5rem;
+  max-height: 25vh;
+  overflow: auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 0.8rem;
-  width: min(48rem, calc(100vw - 2rem));
+  width: calc(100% - 1rem);
   padding: 0.8rem;
   border: 1px solid #0369a1;
   border-radius: 10px;
@@ -1022,4 +1021,38 @@ textarea {
 
 .error-banner small {
   color: #fda4af;
+}
+
+.terminal-history {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  padding: 16px;
+  background: var(--surface, #141a23);
+  color: var(--text, #e7ebf2);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.terminal-history header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.terminal-history p {
+  margin: 0;
+}
+.terminal-history pre {
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+  white-space: pre;
+  user-select: text;
+}
+.history-toggle {
+  position: absolute;
+  right: 8px;
+  top: 4px;
+  z-index: 2;
+  opacity: 0.8;
 }

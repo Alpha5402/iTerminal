@@ -1,10 +1,12 @@
 # D：故障范围、凭据与共享入口
 
+当前状态：本轮卡已按约定范围验收；具体等级与未做事项见 [最终对账](final-reconciliation.md)。下文保留原验收条件。
+
 先读 [共同约束](README.md)。此阶段不能通过放松 fencing 或绕过授权来获得“更可用”的表象。
 
 ## D01
 
-- [ ] 缩小可确定的单 session 失败范围。依赖 A01。建议 Sol。
+- [x] 缩小可确定的单 session 失败范围。依赖 A01。建议 Sol。
 
 **先读：** `apps/runtime-daemon/src/postgres-recovery-supervisor.ts`；RuntimeService 的 `reportDurabilityUnavailable`、owner failure/trip、`isOwnerDurabilityFailure`；ADR 0015、0034、0037、0042 与现有 postgres-outage tests。
 
@@ -18,7 +20,7 @@
 
 ## D02
 
-- [ ] 发现结果允许局部不可用。依赖 A05。建议 Sol。
+- [x] 发现结果允许局部不可用。依赖 A05。建议 Sol。
 
 **先读：** `apps/runtime-router/src/server.ts` 的 listSessions；`packages/persistence-postgres/src/postgres-runtime-owner-registry.ts` 的 owner/session 查询；`runtime-router.test.ts`。
 
@@ -32,7 +34,7 @@
 
 ## D03
 
-- [ ] Console 与 MCP 都支持动态 credential provider。依赖无。建议 Sol。
+- [x] Console 与 MCP 都支持动态 credential provider。依赖无。建议 Sol。
 
 **先读：** `apps/mcp/src/credential-file.ts`、main、tests；`apps/console/src/main.ts`/server；RPC client grant 传递；ADR 0063、0055、0056。
 
@@ -46,7 +48,7 @@ provider 输出需要绑定相同 principal/actor/scope；不能借文件内容�
 
 ## D04
 
-- [ ] supervisor 自动续期本地凭据。依赖 D03。建议 Sol。
+- [x] supervisor 自动续期本地凭据。依赖 D03。建议 Sol。
 
 **先读：** `apps/local-stack/src/credentials.ts`、server/processes/main、RPC issuer；ADR 0059、0063。
 
@@ -60,7 +62,7 @@ provider 输出需要绑定相同 principal/actor/scope；不能借文件内容�
 
 ## D05
 
-- [ ] 每个配置的 Agent 有明确身份。依赖 D04。建议 Luna。
+- [x] 每个配置的 Agent 有明确身份。依赖 D04。建议 Luna。
 
 **先读：** local-stack MCP bootstrap、`apps/mcp/src/main.ts` actor 配置、capability profiles、授权矩阵。
 
@@ -74,7 +76,7 @@ provider 输出需要绑定相同 principal/actor/scope；不能借文件内容�
 
 ## D06
 
-- [ ] CLI 默认连接共享 daemon。依赖 A05、B03。建议 Sol。
+- [x] CLI 默认连接共享 daemon。依赖 A05、B03。建议 Sol。
 
 **先读：** `apps/cli/src/main.ts` 的 MemoryRuntime 初始化与 requestChain；`packages/runtime-rpc/src/index.ts` UnixRuntimeClient；MCP main 的 socket/grant/actor 配置；CLI 现有文档。
 
@@ -88,7 +90,7 @@ provider 输出需要绑定相同 principal/actor/scope；不能借文件内容�
 
 ## D07
 
-- [ ] 提供全局待审批视图。依赖 A05、D02。建议 Sol。
+- [x] 提供全局待审批视图。依赖 A05、D02。建议 Sol。
 
 **先读：** Console `pendingApprovals`/pendingCount/current-session effect；Application approval query/decide；ADR 0049、0056。
 

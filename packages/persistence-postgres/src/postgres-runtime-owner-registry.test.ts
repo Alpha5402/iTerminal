@@ -26,6 +26,17 @@ describeDatabase("M9.1 PostgreSQL Runtime owner registry", () => {
 
   beforeEach(async () => {
     await pool.query("TRUNCATE sessions, actors, outbox, runtime_workers RESTART IDENTITY CASCADE");
+    await resetCreationPolicy();
+  });
+
+  afterEach(async () => {
+    for (const registry of registries.splice(0)) await registry.close().catch(() => undefined);
+    // This singleton table is not cleared by TRUNCATE sessions CASCADE.
+    // Capacity tests must not leave max_requests=1 for the next test file.
+    await resetCreationPolicy();
+  });
+
+  async function resetCreationPolicy(): Promise<void> {
     await pool.query(
       `UPDATE session_creation_policies
           SET retention_milliseconds = 86400000,
@@ -34,11 +45,7 @@ describeDatabase("M9.1 PostgreSQL Runtime owner registry", () => {
               updated_at = now()
         WHERE scope = 'default'`,
     );
-  });
-
-  afterEach(async () => {
-    for (const registry of registries.splice(0)) await registry.close().catch(() => undefined);
-  });
+  }
 
   afterAll(async () => pool.end());
 

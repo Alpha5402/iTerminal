@@ -9,13 +9,18 @@ export const RUNTIME_FEATURES = Object.freeze([
   "action.execute.v1",
   "action.input.v1",
   "action.lookup.v1",
+  "approval.pending.list.v1",
   "artifact.read.v1",
+  "console.observe.v1",
   "execution.observe.v1",
   "execution.output.read.v1",
   "execution.wait.v2",
   "history.lookup.v1",
   "runtime.capabilities.v1",
   "runtime.owner-capabilities.v1",
+  "screen.frame.v1",
+  "screen.history.v1",
+  "session.list.v2",
 ] as const);
 
 export const runtimeFeatureSchema = z

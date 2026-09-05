@@ -271,6 +271,26 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
   );
 
   server.registerTool(
+    "session_list_page",
+    {
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      title: "Discover terminal Sessions",
+      description:
+        "Bounded Session discovery. Shows partial owner outages and historical availability; follow nextCursor for another page.",
+      inputSchema: z.strictObject({
+        cursor: z.string().max(256).optional(),
+        limit: z.number().int().min(1).max(200).default(50),
+      }),
+    },
+    async (input) =>
+      call(() => {
+        if (gateway.listSessionsV2 === undefined)
+          throw new RuntimeError("INVALID_REQUEST", "Paged Session discovery is unavailable");
+        return gateway.listSessionsV2(input);
+      }),
+  );
+
+  server.registerTool(
     "session_list",
     {
       annotations: { readOnlyHint: true, openWorldHint: false },

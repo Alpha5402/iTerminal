@@ -1,3 +1,4 @@
+import { pendingCursor, parsePendingCursor } from "@iterminal/application";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
@@ -55,6 +56,13 @@ import type {
   SessionForkResult,
   ShellCheckpointView,
   TerminalScreenCellsResult,
+  TerminalConsoleFrame,
+  ConsoleObservation,
+  TerminalHistoryPage,
+  SessionDiscoveryPage,
+  SessionDiscoveryRequest,
+  PendingApprovalsRequest,
+  PendingApprovalsPage,
   TerminalScreenDiffResult,
   TerminalScreenRegionResult,
   TerminalScreenSearchResult,
@@ -119,6 +127,7 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
       ...(options.buildId === undefined ? {} : { buildId: options.buildId }),
       features: [
         "action.lookup.v1",
+        "approval.pending.list.v1",
         "artifact.read.v1",
         "execution.observe.v1",
         "execution.output.read.v1",
@@ -126,6 +135,7 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
         "history.lookup.v1",
         "runtime.capabilities.v1",
         "runtime.owner-capabilities.v1",
+        "session.list.v2",
       ],
     });
   }
@@ -381,11 +391,138 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
     };
   }
 
-  public async getSession(sessionId: string): Promise<Session> {
+  public async getSession(sessionId: string, signal?: AbortSignal): Promise<Session> {
     const routed = await this.#withSessionRoute(sessionId, "session.get", (client) =>
-      client.getSession(sessionId),
+      client.getSession(sessionId, signal),
     );
     return expectSessionOwner(routed.result, routed.owner, "session.get");
+  }
+
+  public async listPendingApprovals(
+    request: PendingApprovalsRequest,
+    signal?: AbortSignal,
+  ): Promise<PendingApprovalsPage> {
+    signal?.throwIfAborted();
+    if (request.actor.type !== "human" || !request.actor.capabilities.includes("approval.decide"))
+      throw new RuntimeError("POLICY_DENIED", "Only authorized Humans may read the Approval inbox");
+    if (this.routes.listSessionCandidates === undefined)
+      throw new RuntimeError("INVALID_REQUEST", "Registry does not support bounded discovery");
+    const after = parsePendingCursor(request.cursor);
+    const limit = request.limit ?? 50;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200)
+      throw new RuntimeError("INVALID_REQUEST", "Invalid pending Approval limit");
+    const candidates = await this.#routeDatabase("approval.pending.list", () =>
+      this.routes.listSessionCandidates!({
+        cursor: request.sessionId ?? after?.[0],
+        includeCursor: true,
+        limit: request.sessionId ? 1 : 50,
+      }),
+    );
+    const items: Approval[] = [];
+    const unavailable = new Set<string>();
+    let scannedSession: string | undefined;
+    for (const { session, route } of candidates.items) {
+      signal?.throwIfAborted();
+      scannedSession = session.id;
+      if (request.sessionId && request.sessionId !== session.id) continue;
+      if (session.status === "BROKEN" || session.status === "CLOSED") continue;
+      if (!route.liveOwner || unavailable.has(session.ownerId)) {
+        unavailable.add(session.ownerId);
+        continue;
+      }
+      try {
+        const page = await discoveryDeadline(
+          (probeSignal) =>
+            this.#forward(route.liveOwner!, "approval.pending.list", (client) => {
+              if (!client.listPendingApprovals)
+                throw new RuntimeError(
+                  "INVALID_REQUEST",
+                  "Owner does not support pending Approvals",
+                );
+              return client.listPendingApprovals(
+                { ...request, sessionId: session.id, limit: limit - items.length },
+                probeSignal,
+              );
+            }),
+          signal,
+        );
+        items.push(...page.items);
+        const last = items.at(-1);
+        if (last && (page.nextCursor || items.length === limit))
+          return {
+            items,
+            partial: unavailable.size > 0,
+            unavailableOwners: [...unavailable],
+            nextCursor: pendingCursor(last.sessionId, last.id),
+          };
+      } catch {
+        signal?.throwIfAborted();
+        unavailable.add(session.ownerId);
+      }
+    }
+    return {
+      items,
+      partial: unavailable.size > 0,
+      unavailableOwners: [...unavailable],
+      nextCursor:
+        !request.sessionId && candidates.nextCursor && scannedSession
+          ? pendingCursor(scannedSession, "~")
+          : null,
+    };
+  }
+
+  public async listSessionsV2(
+    request: SessionDiscoveryRequest = {},
+  ): Promise<SessionDiscoveryPage> {
+    if (this.routes.listSessionCandidates === undefined)
+      throw new RuntimeError("INVALID_REQUEST", "Registry does not support bounded discovery");
+    const page = await this.#routeDatabase("session.list.v2", () =>
+      this.routes.listSessionCandidates!(request),
+    );
+    const items: SessionDiscoveryPage["items"][number][] = new Array<
+      SessionDiscoveryPage["items"][number]
+    >(page.items.length);
+    const unavailable = new Set<string>();
+    let offset = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(4, page.items.length) }, async () => {
+        while (offset < page.items.length) {
+          const index = offset++;
+          const candidate = page.items[index]!;
+          const { session, route } = candidate;
+          let item: SessionDiscoveryPage["items"][number] = {
+            session,
+            durableStatus: session.status,
+            liveAvailability: "unavailable",
+          };
+          if (session.status === "BROKEN" || session.status === "CLOSED")
+            item = { ...item, liveAvailability: "historical" };
+          else if (route.liveOwner && !unavailable.has(session.ownerId)) {
+            try {
+              const live = await discoveryDeadline((signal) =>
+                this.#forward(route.liveOwner!, "session.get", (client) =>
+                  client.getSession(session.id, signal),
+                ),
+              );
+              if (live.ownerId !== session.ownerId || live.generation !== session.generation)
+                item = { ...item, liveAvailability: "conflict" };
+              else item = { ...item, session: live, liveAvailability: "available" };
+            } catch {
+              /* Explicit unavailable item retains only durable facts. */
+            }
+          }
+          if (item.liveAvailability === "unavailable" || item.liveAvailability === "conflict")
+            unavailable.add(session.ownerId);
+          items[index] = item;
+        }
+      }),
+    );
+    return {
+      items,
+      nextCursor: page.nextCursor,
+      partial: unavailable.size > 0,
+      unavailableOwners: [...unavailable].sort(),
+    };
   }
 
   public async listSessions(): Promise<readonly Session[]> {
@@ -439,6 +576,39 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
     return this.#withSession(sessionId, "terminal.state.get", (client) =>
       client.getTerminalState(sessionId, generation),
     );
+  }
+
+  public getScreenHistory(request: {
+    sessionId: string;
+    generation: number;
+    cursor?: string | undefined;
+    limit?: number | undefined;
+  }): Promise<TerminalHistoryPage> {
+    return this.#withSession(request.sessionId, "screen.history", (client) => {
+      if (client.getScreenHistory === undefined)
+        throw new RuntimeError("INVALID_REQUEST", "Screen history is unavailable");
+      return client.getScreenHistory(request);
+    });
+  }
+
+  public observeConsole(request: {
+    sessionId: string;
+    generation: number;
+    afterScreenVersion?: number | undefined;
+  }): Promise<ConsoleObservation> {
+    return this.#withSession(request.sessionId, "console.observe", (client) => {
+      if (!client.observeConsole)
+        throw new RuntimeError("INVALID_REQUEST", "Owner does not support Console observation");
+      return client.observeConsole(request);
+    });
+  }
+
+  public getConsoleFrame(sessionId: string, generation: number): Promise<TerminalConsoleFrame> {
+    return this.#withSession(sessionId, "screen.frame", (client) => {
+      if (client.getConsoleFrame === undefined)
+        throw new RuntimeError("INVALID_REQUEST", "Canonical Console cells are unavailable");
+      return client.getConsoleFrame(sessionId, generation);
+    });
   }
 
   public getScreenCells(request: ScreenCellsRequest): Promise<TerminalScreenCellsResult> {
@@ -588,9 +758,10 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
     generation: number,
     after = 0,
     limit = 100,
+    signal?: AbortSignal,
   ): Promise<EventPage> {
     return this.#withSession(sessionId, "events.query", (client) =>
-      client.queryEvents(sessionId, generation, after, limit),
+      client.queryEvents(sessionId, generation, after, limit, signal),
     );
   }
 
@@ -856,4 +1027,38 @@ function routeDetails(
     ownerId: owner.ownerId,
     ownerInstanceId: owner.instanceId,
   };
+}
+
+async function discoveryDeadline<T>(
+  read: (signal: AbortSignal) => Promise<T>,
+  parent?: AbortSignal,
+): Promise<T> {
+  parent?.throwIfAborted();
+  const abort = new AbortController();
+  let cancel!: () => void;
+  const cancelled = new Promise<never>((_, reject) => {
+    cancel = () => {
+      abort.abort();
+      const reason: unknown = parent?.reason;
+      reject(reason instanceof Error ? reason : new Error("Discovery cancelled"));
+    };
+    parent?.addEventListener("abort", cancel, { once: true });
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      cancelled,
+      read(abort.signal),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          abort.abort();
+          reject(new RuntimeError("OWNER_ROUTE_UNAVAILABLE", "Discovery owner read timed out"));
+        }, 2_000);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    parent?.removeEventListener("abort", cancel);
+  }
 }

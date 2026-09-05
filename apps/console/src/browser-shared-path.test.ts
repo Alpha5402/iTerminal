@@ -1200,7 +1200,9 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     await waitUntilRunning(mcp, python.execution.id);
     await waitForPageText(page, ".status-strip", "RUNNING");
     const pythonModeBar = page.getByTestId("input-mode-bar");
-    expect(await pythonModeBar.textContent()).toContain(`Execution ${python.execution.id}`);
+    await expect
+      .poll(() => pythonModeBar.textContent())
+      .toContain(`Execution ${python.execution.id}`);
     expect(
       await page.getByRole("button", { name: "Line input" }).getAttribute("aria-pressed"),
     ).toBe("true");

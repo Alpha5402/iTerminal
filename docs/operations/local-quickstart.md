@@ -30,31 +30,55 @@ loopback Console, and writes a private MCP configuration. Read the final
 In the Console, use **Connect MCP** in the right inspector to copy the complete `mcpServers` JSON
 directly. The UI does not expose the private config path.
 
-The default state root is `.iterminal/local`. Its credential directory and files are mode `0700`
-and `0600` on POSIX. `mcp.json` contains a bearer grant and is credential material: do not print,
-commit, upload, or share it. A fresh Console grant and 24-hour MCP grant are issued at each startup;
-restart the stack to rotate an expired local grant. The Runtime verification secret and managed
-database password are generated locally and retained across normal restarts.
+The default state root is `.iterminal/local`. Credential directories/files are mode `0700`/`0600`
+on POSIX. `mcp.json` is a same-host bootstrap that references `credentials/mcp-local.json` through
+`ITERM_MCP_CONFIG_FILE`; the bearer grant stays in that private credential file. The copied JSON
+contains machine-local paths, so it is not a portable remote connection profile.
 
-### Avoid stale copied MCP grants
+The supervisor renews the same Actor and operation scope before expiry (five minutes early for
+normal 24-hour grants, 20% early for short TTLs) and atomically replaces the private files. Existing
+Console/MCP processes read the current grant per request; renewal does not restart the Runtime or
+PTY. The signing secret and managed database password remain stable across normal restarts.
 
-MCP tool discovery only proves the stdio bridge started; it does not prove Runtime authorization.
-A client configured with a copied `ITERM_RPC_GRANT` keeps that value until its MCP process is
-reconfigured and restarted. Restarting only the local stack does not update the client's copy.
+### Renewal failures and legacy inline grants
 
-For a same-host client, an explicit alternative is to replace **only** `ITERM_RPC_GRANT` in its MCP
-environment with `ITERM_MCP_CONFIG_FILE`, set to the absolute path of this stack's private
-`.iterminal/local/mcp.json`. Keep the same command, arguments, Actor fields, and Runtime socket.
-Do not set both credential variables. The file must be a same-user private regular file (`0600`),
-and its socket/Actor must match the client configuration. The bridge never executes commands from
-that JSON file or reads the Runtime signing key.
+Keep the supervisor running. Renewal failures use bounded retry backoff; expired grants reject
+requests until valid credentials are installed. `expired` and `stopped` renewal diagnostics include
+only expiry metadata, never token values. Wall-clock deadlines are rechecked at most every 30
+seconds; Runtime signature/expiry validation remains authoritative. Stopping the supervisor is not
+an invitation to recreate or replay an uncertain Action.
 
-Restart the client's iTerminal MCP process once after this configuration change. In Codex, use
-Settings → MCP servers → iterminal → Restart. Subsequent operator replacement of the file is read
-on the next RPC request, without restarting the PTY. This **does not renew grants**: expiry still
-requires a valid operator-issued replacement. No denied or uncertain operation is automatically
-retried. Missing/malformed/insecure files and declared-expired grants produce bounded local-source
-diagnostics; Runtime signature/audience/operation failures remain uniform `POLICY_DENIED` errors.
+An older MCP profile containing `ITERM_RPC_GRANT` is still static. Replace it with the current
+stack-generated bootstrap and restart that MCP bridge once. Do not set both inline and file
+credentials. The private file must be a same-user regular file and retain the configured socket and
+Actor identity. The bridge neither executes JSON commands nor receives the signing key. Missing,
+malformed, insecure, mismatched or expired files produce bounded errors; no denied or uncertain
+write is automatically retried.
+
+### Distinct local Agents
+
+Set `ITERM_AGENT_NAME=alpha` and optionally `ITERM_ADDITIONAL_AGENT_NAMES=beta,gamma` before
+`pnpm local`. Names are 1–48 ASCII letters, digits, underscores or hyphens, beginning with a letter
+or digit. Named profiles are `mcp-alpha.json`, `mcp-beta.json`, etc.; each references its own private
+credential file. The default `local` profile retains `agent-local`. A configured name binds a stable
+Actor across renewal and MCP bridge restart. Different identities do not provide Session ACLs or
+strong isolation between processes running as the same OS user; [the ACL proposal](../adr/0081-opt-in-session-authorization-design.md)
+is design only.
+
+### Shared JSONL CLI
+
+`pnpm cli` defaults to an authenticated daemon client. Configure `ITERM_RUNTIME_SOCKET`, an
+operator-issued `ITERM_RPC_GRANT`, and matching `ITERM_ACTOR_ID`, `ITERM_ACTOR_PRINCIPAL`, and
+`ITERM_ACTOR_CLIENT` in its environment. The current CLI supports inline grants only; it does not
+read the MCP credential file or automatically renew its inline grant. Never paste a grant into a
+committed script or shell history. `pnpm cli -- --standalone` explicitly selects the isolated
+in-memory development runtime.
+
+Send one JSON object per line, for example `{"requestId":"list-1","op":"list"}`. Responses include
+the same request ID. `wait` takes `executionId` and bounded `waitMs`; it does not block a subsequent
+`control` request. EOF cancels this client's waits and leaves shared Sessions alive. Only an explicit
+`close` request closes a Session. Missing service, invalid grants and incompatible protocol versions
+produce errors instead of silently creating another Runtime.
 
 Verify with a read-only `session_list` or `execution_get`. `ECONNREFUSED` means the configured
 Runtime endpoint is not listening, independently of grant validity. After Runtime loss, an old

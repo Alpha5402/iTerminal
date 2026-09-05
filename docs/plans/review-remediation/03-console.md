@@ -1,10 +1,12 @@
 # C：Console 真实操作体验
 
+当前状态：本轮卡已按约定范围验收；具体等级与未做事项见 [最终对账](final-reconciliation.md)。下文保留原验收条件。
+
 先读 [共同约束](README.md)。这里的截图与浏览器测试必须来自实际页面；只通过组件单测不能声称用户流程完成。
 
 ## C01
 
-- [ ] 保留提交意图并提供 UNKNOWN 核对。依赖 A04、A06。建议 Sol。
+- [x] 保留提交意图并提供 UNKNOWN 核对。依赖 A04、A06。建议 Sol。
 
 **先读：** `apps/console/src/web.tsx` 的 READY submit、foreground submit、草稿更新和 pending；`command-history.ts`；ADR 0066。
 
@@ -20,7 +22,7 @@ Enter 在一个未决意图上不能创建新 key；网络错误进入 uncertain
 
 ## C02
 
-- [ ] 将输入模式放在主操作区。依赖 C01。建议 Sol。
+- [x] 将输入模式放在主操作区。依赖 C01。建议 Sol。
 
 **先读：** `web.tsx` 的 foregroundLineVisible、rawTUI、onData/键盘处理；`input-context.ts`、lineInput 校验；ADR 0065、0066。
 
@@ -34,7 +36,7 @@ Enter 在一个未决意图上不能创建新 key；网络错误进入 uncertain
 
 ## C03
 
-- [ ] 不确定输入状态给出准确解释和已有操作。依赖 C02。建议 Luna。
+- [x] 不确定输入状态给出准确解释和已有操作。依赖 C02。建议 Luna。
 
 **先读：** `packages/application/src/input-context.ts` 的 unknownReason，runtime 对 Control/Secret 标记，Console 错误呈现。
 
@@ -50,7 +52,7 @@ Enter 在一个未决意图上不能创建新 key；网络错误进入 uncertain
 
 ## C04
 
-- [ ] Console 使用 canonical cell 样式。依赖 A05。建议 Sol。
+- [x] Console 使用 canonical cell 样式。依赖 A05。建议 Sol。
 
 **先读：** ADR 0022；`packages/terminal-screen/src/index.ts` 的 cells/snapshot/version；`web.tsx` 的 xterm 初始化和 `renderScreen`；ADR 0062、0064。
 
@@ -64,7 +66,7 @@ Enter 在一个未决意图上不能创建新 key；网络错误进入 uncertain
 
 ## C05
 
-- [ ] 提供有限且真实的滚动历史。依赖 C04。建议 Sol。
+- [x] 提供有限且真实的滚动历史。依赖 C04。建议 Sol。
 
 **先读：** headless scrollback、screen history、copy helpers、Console selection。当前 xterm scrollback=0 与定期清屏不能直接当作历史来源。
 
@@ -78,7 +80,7 @@ Console 将“跟随底部”和“浏览历史”分开：滚动离开底部后
 
 ## C06
 
-- [ ] 简化主界面并修正布局。依赖无。建议 Luna。
+- [x] 简化主界面并修正布局。依赖无。建议 Luna。
 
 **先读：** `apps/console/src/web.tsx`、`styles.css`、session-tabs/terminal-fit、Session create 路由。先实际打开独立测试 Console 截图再调整。
 

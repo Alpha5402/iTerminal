@@ -15,6 +15,7 @@ const baselineToolNames = new Set([
   "session_checkpoint",
   "session_fork",
   "session_list",
+  "session_list_page",
   "session_close",
   "approval_request",
   "approval_get",

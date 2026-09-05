@@ -1,10 +1,12 @@
 # B：Agent 观察接口与资源边界
 
+当前状态：本轮卡已按约定范围验收；具体等级与未做事项见 [最终对账](final-reconciliation.md)。下文保留原验收条件。
+
 先读 [共同约束](README.md)。先把输出变得可读、可续读，再清理内部缓存；不要反过来。
 
 ## B01
 
-- [ ] 开放有界 Artifact 读取。依赖 A05。建议 Sol。
+- [x] 开放有界 Artifact 读取。依赖 A05。建议 Sol。
 
 **先读：** `packages/persistence-postgres/src/postgres-observation-repository.ts` 的 `appendOutput`、`readArtifact`；`postgres-runtime-durability.ts` 的输出事件映射；Application observation ports；ADR 0050、0051。
 
@@ -18,7 +20,7 @@
 
 ## B02
 
-- [ ] 增加执行输出的连续游标。依赖 B01。建议 Sol。
+- [x] 增加执行输出的连续游标。依赖 B01。建议 Sol。
 
 **先读：** Application execution/output 查询，byte ring，events cursor，PG output artifact 模型。新增契约不能假定所有输出永久保留。
 
@@ -32,7 +34,7 @@
 
 ## B03
 
-- [ ] 有界、可取消的观察等待。依赖 A05。建议 Sol。
+- [x] 有界、可取消的观察等待。依赖 A05。建议 Sol。
 
 **先读：** `packages/runtime-rpc/src/index.ts` 的 WAIT_REQUEST_TIMEOUT、wait dispatch 与 abort；MCP `execution_wait`；Application execution completion promises。
 
@@ -46,7 +48,7 @@
 
 ## B04
 
-- [ ] 给 Agent 提供紧凑观察视图。依赖 A06、B02、B03。建议 Sol。
+- [x] 给 Agent 提供紧凑观察视图。依赖 A06、B02、B03。建议 Sol。
 
 **先读：** MCP `call`/结果包装、Execute/Execution 工具、domain Action/Execution。不要把内部完整记录定义为新的公开结果。
 
@@ -60,7 +62,7 @@
 
 ## B05
 
-- [ ] 压缩 MCP 公共说明。依赖无。建议 Luna。
+- [x] 压缩 MCP 公共说明。依赖无。建议 Luna。
 
 **先读：** `apps/mcp/src/server.ts` 的 instructions、24 个工具描述、现有 MCP tests。
 
@@ -74,7 +76,7 @@
 
 ## B06
 
-- [ ] 建立历史事实持久查询和过期边界。依赖 A06、B02。建议 Sol。
+- [x] 建立历史事实持久查询和过期边界。依赖 A06、B02。建议 Sol。
 
 **先读：** `packages/runtime-memory/src/memory-runtime-store.ts`、Application getExecution/getAction/idempotency lookup、PG facts retention；ADR 0058、0039。
 
@@ -88,7 +90,7 @@
 
 ## B07
 
-- [ ] 有界内存和完成态清理。依赖 B03、B06。建议 Sol。
+- [x] 有界内存和完成态清理。依赖 B03、B06。建议 Sol。
 
 **先读：** MemoryRuntimeStore 的 actions/executions/events/idempotency；RuntimeService 的 completions、started、dispatchStates 等 Map；现有 session close/drain 路径。
 

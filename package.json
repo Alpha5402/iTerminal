@@ -74,7 +74,9 @@
     "test:m10:secret": "vitest run --maxWorkers=1 packages/executor-pty/src/sensitive-output-sanitizer.test.ts packages/application/src/secret-input.test.ts apps/runtime-daemon/src/secret-input-durable.test.ts packages/runtime-rpc/src/index.test.ts apps/console/src/server.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm verify:docs && pnpm build",
-    "verify:docs": "node scripts/check-verification.mjs"
+    "verify:docs": "node scripts/check-verification.mjs",
+    "verify:integration": "node scripts/verify-integration.mjs",
+    "verify:shared-path": "pnpm build:console && node scripts/verify-integration.mjs --shared-path"
   },
   "devDependencies": {
     "@iterminal/application": "workspace:*",

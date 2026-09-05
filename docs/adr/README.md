@@ -128,3 +128,10 @@ Statuses:
 Changing an Accepted decision requires a new ADR or an explicit amendment with consequences and migration steps.
 
 [adr-0058]: ./0058-bounded-normalized-fact-retention-and-database-capacity-signal.md
+
+- [0077: Trusted durability failure scope](0077-trusted-durability-failure-scope.md)
+- [0078: Shared CLI and renewable local identity](0078-shared-cli-and-renewable-local-identity.md)
+- [0079: Canonical Console observation](0079-canonical-console-observation.md)
+- [0080: Partial discovery and approval inbox](0080-partial-discovery-and-approval-inbox.md)
+
+See also [ADR-0081](./0081-opt-in-session-authorization-design.md): draft opt-in Session ACL design; no ACL implementation.

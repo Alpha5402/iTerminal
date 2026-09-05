@@ -126,15 +126,20 @@ describeDatabase("M8.3 Input/Control crash uncertainty", () => {
       if (interactionType === "input") {
         await expect(
           replacementClient.sendInput({ ...request, data: "input-once\n" }),
-        ).rejects.toMatchObject({ code: "SESSION_BROKEN" });
+        ).resolves.toMatchObject({ status: "UNKNOWN", idempotencyKey });
       } else {
         await expect(
           replacementClient.sendControl({
             ...request,
             delivery: { control: "CTRL_C", mode: "TTY_CONTROL" },
           }),
-        ).rejects.toMatchObject({ code: "SESSION_BROKEN" });
+        ).resolves.toMatchObject({ status: "UNKNOWN", idempotencyKey });
       }
+      // Same-key recovery returns the durable uncertain fact and never writes again.
+      expect(await interactionState(idempotencyKey)).toMatchObject({
+        action_status: "UNKNOWN",
+        write_attempts: "1",
+      });
       await delay(250);
       const contents = await readFile(fixture.sideEffect, "utf8").catch(() => "");
       const expectedLine = interactionType === "input" ? "input-once" : "control-once";

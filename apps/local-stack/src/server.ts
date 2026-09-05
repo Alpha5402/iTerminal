@@ -6,12 +6,16 @@ import type { PostgresConnectionTarget } from "@iterminal/persistence-postgres";
 import { startRuntimeDaemon, type RuntimeDaemonHandle } from "@iterminal/runtime-daemon";
 import { UnixRuntimeClient } from "@iterminal/runtime-rpc";
 
+import { consoleFileAuthorization } from "../../console/src/credential-file.js";
+import { startCredentialRenewal, type CredentialRenewalStatus } from "./credential-renewal.js";
+
 import { prepareLocalCredentials } from "./credentials.js";
 
 export interface LocalStackHandle {
   readonly consoleUrl: string;
   readonly mcpConfigPath: string;
   readonly runtimeSocketPath: string;
+  credentialStatus(): CredentialRenewalStatus;
   close(): Promise<void>;
 }
 
@@ -28,6 +32,9 @@ export class LocalStackCloseError extends Error {
 }
 
 export interface StartLocalStackOptions {
+  readonly agentName?: string;
+  readonly additionalAgentNames?: readonly string[];
+  readonly grantTtlSeconds?: number;
   readonly agentExecuteApproval?: "optional" | "required";
   readonly consoleHost?: string;
   readonly consolePort?: number;
@@ -48,10 +55,38 @@ export async function startLocalStack(options: StartLocalStackOptions): Promise<
     if (!isAbsolute(path)) throw new Error(`${name} must be absolute`);
   }
   await access(join(options.staticRoot, "index.html"));
-  const credentials = await prepareLocalCredentials({
+  const credentialOptions = {
     repositoryRoot: options.repositoryRoot,
     runtimeSocketPath: options.runtimeSocketPath,
     stateRoot: options.stateRoot,
+    ...(options.agentName === undefined ? {} : { agentName: options.agentName }),
+    ...(options.grantTtlSeconds === undefined ? {} : { grantTtlSeconds: options.grantTtlSeconds }),
+  };
+  const credentials = await prepareLocalCredentials(credentialOptions);
+  const additionalNames = [...new Set(options.additionalAgentNames ?? [])].filter(
+    (name) => name !== (options.agentName ?? "local"),
+  );
+  const refreshAdditional = async () => {
+    for (const agentName of additionalNames)
+      await prepareLocalCredentials({ ...credentialOptions, agentName });
+  };
+  await refreshAdditional();
+  const renewal = startCredentialRenewal({
+    expiresAt: credentials.expiresAt,
+    refresh: async () => {
+      await refreshAdditional();
+      return (await prepareLocalCredentials(credentialOptions)).expiresAt;
+    },
+    onStatus: (status) => {
+      if (status.phase === "expired" || status.phase === "stopped")
+        process.stderr.write(
+          `iTerminal credential renewal ${status.phase}; expiry ${new Date(status.expiresAt).toISOString()}\n`,
+        );
+    },
+    onFailure: () =>
+      process.stderr.write(
+        "iTerminal credential renewal failed; existing grants remain valid only until expiry\n",
+      ),
   });
   let daemon: RuntimeDaemonHandle | undefined;
   let consoleServer: HumanConsoleServerHandle | undefined;
@@ -71,7 +106,10 @@ export async function startLocalStack(options: StartLocalStackOptions): Promise<
     await daemon.waitUntilReady();
     consoleServer = await startHumanConsole({
       gateway: new UnixRuntimeClient(options.runtimeSocketPath, {
-        authorization: credentials.consoleGrant,
+        authorizationProvider: consoleFileAuthorization(
+          credentials.consoleCredentialPath,
+          options.runtimeSocketPath,
+        ),
       }),
       host: options.consoleHost ?? "127.0.0.1",
       mcpConfigPath: credentials.mcpConfigPath,
@@ -79,6 +117,7 @@ export async function startLocalStack(options: StartLocalStackOptions): Promise<
       staticRoot: options.staticRoot,
     });
   } catch (error) {
+    await renewal.close();
     await Promise.allSettled([consoleServer?.close(), daemon?.close()]);
     throw error;
   }
@@ -86,9 +125,10 @@ export async function startLocalStack(options: StartLocalStackOptions): Promise<
   return {
     consoleUrl: consoleServer.url,
     mcpConfigPath: credentials.mcpConfigPath,
+    credentialStatus: () => renewal.status(),
     runtimeSocketPath: daemon.socketPath,
     close: () => {
-      closePromise ??= closeLocalStack(consoleServer, daemon);
+      closePromise ??= renewal.close().then(() => closeLocalStack(consoleServer, daemon));
       return closePromise;
     },
   };

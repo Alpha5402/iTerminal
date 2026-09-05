@@ -1,33 +1,99 @@
 import { createInterface } from "node:readline";
+import { RUNTIME_PROTOCOL_VERSION } from "@iterminal/protocol";
 
 import { RuntimeService } from "@iterminal/application";
 import type { Actor, ActorCapability, ControlDelivery, ShellKind } from "@iterminal/domain";
-import { ACTOR_CAPABILITIES, RuntimeError, isCanonicalActorCapabilities } from "@iterminal/domain";
+import {
+  ACTOR_CAPABILITIES,
+  ACTOR_CAPABILITY_PROFILES,
+  RuntimeError,
+  isCanonicalActorCapabilities,
+} from "@iterminal/domain";
 import { PtyShellExecutorFactory } from "@iterminal/executor-pty";
 import { MemoryRuntimeStore } from "@iterminal/runtime-memory";
 
-const runtime = new RuntimeService(new MemoryRuntimeStore(), new PtyShellExecutorFactory());
+import {
+  LocalRuntimeGateway,
+  UnixRuntimeClient,
+  runtimeRpcAuthorizationFromEnvironment,
+  type RuntimeGateway,
+} from "@iterminal/runtime-rpc";
+
+const standalone = process.argv.includes("--standalone");
+const socketPath = process.env.ITERM_RUNTIME_SOCKET;
+const authorization = runtimeRpcAuthorizationFromEnvironment(process.env);
+if (!standalone && (!socketPath || !authorization)) {
+  process.stderr.write(
+    "Shared CLI requires ITERM_RUNTIME_SOCKET and ITERM_RPC_GRANT; --standalone is for isolated development only\n",
+  );
+  process.exit(1);
+}
+const configuredActor: Actor = {
+  capabilities: ACTOR_CAPABILITY_PROFILES.agent,
+  client: process.env.ITERM_ACTOR_CLIENT ?? "mcp-stdio",
+  id: process.env.ITERM_ACTOR_ID ?? "agent-local",
+  principal: process.env.ITERM_ACTOR_PRINCIPAL ?? "local-agent",
+  type: "agent",
+};
+const runtime: RuntimeGateway = standalone
+  ? new LocalRuntimeGateway(
+      new RuntimeService(new MemoryRuntimeStore(), new PtyShellExecutorFactory()),
+    )
+  : new UnixRuntimeClient(socketPath ?? "", { authorization: authorization ?? "" });
+const ready =
+  runtime.getRuntimeCapabilities?.().then((capabilities) => {
+    if (capabilities.protocolVersion !== RUNTIME_PROTOCOL_VERSION)
+      throw new RuntimeError("INVALID_REQUEST", "Shared CLI requires Runtime protocol 1");
+  }) ??
+  Promise.reject(
+    new RuntimeError("INVALID_REQUEST", "Runtime capability handshake is unavailable"),
+  );
+void ready.catch(() => undefined);
+const waitAbort = new AbortController();
+const inFlight = new Set<Promise<void>>();
 const input = createInterface({ input: process.stdin, terminal: false });
-let requestChain = Promise.resolve();
-
-process.stderr.write("iTerminal M1 JSONL CLI ready; one JSON request per line\n");
-
+process.stderr.write(
+  `iTerminal ${standalone ? "standalone" : "shared"} JSONL CLI; responses correlate by requestId\n`,
+);
 input.on("line", (line) => {
-  requestChain = requestChain.then(async () => handleLine(line));
+  if (inFlight.size >= 32) {
+    let id = "unassigned";
+    try {
+      id = requestId(asRecord(JSON.parse(line)));
+    } catch {
+      /* malformed input has no id */
+    }
+    write({
+      ok: false,
+      requestId: id,
+      error: {
+        code: "BACKPRESSURE",
+        message: "Too many outstanding CLI requests",
+        retryable: true,
+      },
+    });
+    return;
+  }
+  const work = handleLine(line);
+  inFlight.add(work);
+  void work.finally(() => inFlight.delete(work));
 });
-
 input.on("close", () => {
-  void requestChain.finally(async () => closeAll());
+  waitAbort.abort();
+  void Promise.allSettled([...inFlight]).then(() => closeAll());
 });
-
 process.on("SIGINT", () => {
+  waitAbort.abort();
   void closeAll().then(() => process.exit(130));
 });
 
 async function handleLine(line: string): Promise<void> {
   let request: Record<string, unknown> = {};
   try {
+    if (Buffer.byteLength(line, "utf8") > 64 * 1024)
+      throw new RuntimeError("INVALID_REQUEST", "CLI request exceeds 64 KiB");
     request = asRecord(JSON.parse(line));
+    await ready;
     const result = await dispatch(request);
     write({ ok: true, requestId: requestId(request), result });
   } catch (error) {
@@ -75,7 +141,15 @@ async function dispatch(request: Record<string, unknown>): Promise<unknown> {
     return { action: started.action, execution: started.execution };
   }
   if (op === "wait") {
-    return runtime.waitExecution(stringField(request, "executionId"));
+    if (runtime.waitExecutionV2 === undefined)
+      throw new RuntimeError("INVALID_REQUEST", "Runtime does not support bounded waits");
+    return runtime.waitExecutionV2(
+      {
+        executionId: stringField(request, "executionId"),
+        waitMs: optionalNumberField(request, "waitMs") ?? 10000,
+      },
+      waitAbort.signal,
+    );
   }
   if (op === "input") {
     const expectedScreenVersion = optionalNumberField(request, "expectedScreenVersion");
@@ -120,7 +194,8 @@ async function dispatch(request: Record<string, unknown>): Promise<unknown> {
 }
 
 async function closeAll(): Promise<void> {
-  for (const session of runtime.listSessions()) {
+  if (!standalone) return;
+  for (const session of await runtime.listSessions()) {
     if (session.status !== "CLOSED") {
       await runtime.closeSession(session.id, session.generation);
     }
@@ -171,6 +246,14 @@ function shellField(record: Record<string, unknown>, key: string): ShellKind {
 }
 
 function actorField(record: Record<string, unknown>): Actor {
+  if (!standalone) {
+    if (record.actor !== undefined)
+      throw new RuntimeError(
+        "INVALID_REQUEST",
+        "Shared CLI Actor comes from configuration, not request body",
+      );
+    return configuredActor;
+  }
   const actor = asRecord(record.actor);
   const type = stringField(actor, "type");
   if (type !== "human" && type !== "agent" && type !== "scheduler" && type !== "system") {

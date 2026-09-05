@@ -143,7 +143,13 @@ describeDatabase("M10.5/M10.6 durable Artifact storage and PTY output coalescing
         code: "RUNTIME_UNAVAILABLE",
         details: {
           component: "artifact_storage",
-          durabilityScope: "session",
+          durabilityFailureScope: {
+            failureRecord: "committed",
+            fencingToken: fence.fencingToken,
+            generation: session.generation,
+            kind: "session",
+            sessionId: session.id,
+          },
           phase: "durable_output_admission",
         },
         retryable: false,

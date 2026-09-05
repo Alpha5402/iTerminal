@@ -18,6 +18,9 @@ import type {
   ShellCheckpoint,
   ShellKind,
   TerminalScreenCellsResult,
+  TerminalConsoleFrame,
+  TerminalHistoryPage,
+  SessionDiscoveryRequest,
   TerminalScreenSnapshot,
   TerminalScreenDiffResult,
   TerminalScreenRegionResult,
@@ -82,6 +85,11 @@ export interface ShellExecutorFactory {
 }
 
 export interface TerminalScreenProjection {
+  history?(input: {
+    cursor?: string | undefined;
+    limit?: number | undefined;
+  }): Promise<TerminalHistoryPage>;
+  consoleFrame?(): Promise<TerminalConsoleFrame>;
   cells(input: {
     readonly columnCount: number;
     readonly rowCount: number;
@@ -602,6 +610,13 @@ export type DurableSessionCreationResult =
   | { readonly kind: "replay"; readonly sessionId: string };
 
 export interface RuntimeOwnerRegistry {
+  listSessionCandidates?(request: SessionDiscoveryRequest & { includeCursor?: boolean }): Promise<{
+    readonly items: readonly {
+      readonly session: Session;
+      readonly route: RuntimeRouteResolution;
+    }[];
+    readonly nextCursor: string | null;
+  }>;
   registerOwner(input: {
     readonly capacityWeight?: number;
     readonly endpoint: string;

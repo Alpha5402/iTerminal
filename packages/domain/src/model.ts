@@ -102,6 +102,29 @@ export interface TerminalScreenSnapshot extends TerminalScreenFrame {
   readonly wrappedRows?: readonly boolean[];
 }
 
+export interface TerminalHistoryPage {
+  readonly sessionId: string;
+  readonly sessionGeneration: number;
+  readonly screenVersion: number;
+  readonly epoch: number;
+  readonly droppedBefore: number;
+  readonly newestLine: number;
+  readonly firstLine: number;
+  readonly gap: boolean;
+  readonly retainedLineLimit: number;
+  readonly nextCursor: string | null;
+  readonly lines: readonly {
+    readonly line: number;
+    readonly text: string;
+    readonly wrapped: boolean;
+  }[];
+}
+
+export interface TerminalConsoleFrame extends TerminalScreenSnapshot {
+  readonly cells: readonly TerminalScreenCell[];
+  readonly format: "cells-v1";
+}
+
 export interface TerminalScreenRegionResult {
   readonly columnCount: number;
   readonly frame: TerminalScreenFrame;
@@ -497,4 +520,42 @@ export interface EventPage {
     readonly source: "memory";
   }>;
   readonly truncated: boolean;
+}
+
+export interface SessionDiscoveryRequest {
+  readonly cursor?: string | undefined;
+  readonly limit?: number | undefined;
+}
+export interface SessionDiscoveryItem {
+  readonly session: Session;
+  readonly durableStatus: SessionStatus | null;
+  readonly liveAvailability: "available" | "unavailable" | "historical" | "conflict";
+}
+export interface SessionDiscoveryPage {
+  readonly items: readonly SessionDiscoveryItem[];
+  readonly unavailableOwners: readonly string[];
+  readonly partial: boolean;
+  readonly nextCursor: string | null;
+}
+
+export interface PendingApprovalsRequest extends SessionDiscoveryRequest {
+  readonly actor: Actor;
+  readonly sessionId?: string | undefined;
+}
+export interface PendingApprovalsPage {
+  readonly items: readonly Approval[];
+  readonly unavailableOwners: readonly string[];
+  readonly partial: boolean;
+  readonly nextCursor: string | null;
+}
+
+export interface ConsoleObservation {
+  readonly observationVersion: 1;
+  readonly atomic: false;
+  readonly session: Session;
+  readonly interaction: InteractionState;
+  readonly screen?: TerminalConsoleFrame;
+  readonly screenVersion: number;
+  readonly generation: number;
+  readonly executionId: string | null;
 }

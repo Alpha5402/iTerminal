@@ -96,9 +96,7 @@ export function startPostgresRecoverySupervisor(options: {
           }
         } catch (error) {
           const diagnostic = operationalErrorMessage(error, "PostgreSQL durability unavailable");
-          options.runtime.reportDurabilityUnavailable(
-            new RuntimeError("RUNTIME_UNAVAILABLE", diagnostic, {}, true),
-          );
+          options.runtime.reportDurabilityUnavailable(error);
           options.updateState({
             attempt: 0,
             endpointIndex: options.durability.databaseEndpointIndex(),

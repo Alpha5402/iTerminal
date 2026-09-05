@@ -1,5 +1,7 @@
 # iTerminal — Human-Agent Shared Terminal Runtime PLAN / TODO
 
+> **审阅整改更新（2026-09-06）**：原 28 项对应的 36 张任务卡已按约定范围验收。当前入口见 [整改计划](docs/plans/review-remediation/README.md)、[逐项对账](docs/plans/review-remediation/final-reconciliation.md) 与 [验证报告](docs/verification/review-remediation/2026-09-06-final-verification.md)。普通门禁 451 passed / 26 optional skipped；必选集成 56 passed、真实 Browser + MCP 共享路径 14 passed，均 0 skipped。F03 仅完成 opt-in Session ACL 设计。推荐运行方式见 [local quickstart](docs/operations/local-quickstart.md)；下方保留原里程碑基线，不能把本轮验收扩展为 repository release L4。
+
 > 状态：Implementation Baseline v6.36 — M10.15 已将 Console 常驻控制栏收敛为默认关闭的上下文侧栏，待审批与 BROKEN Session 自动打开对应视图；M10.14 已闭合 native Shell line-editor dispatch、保留换行的 Shell prompt 原位 READY command line、短 cwd prompt 与 RUNNING password/passphrase 原位 Human-only secret input；Console 使用顶部多 Session 标签页、`+` 默认创建 `/` 下的 zsh，并可直接复制完整 MCP JSON 而不暴露私有配置路径；M10.13 已闭合一条命令 durable local stack 与 Ctrl+C-safe detached Guardian shutdown；M10.12 已闭合 normalized-fact retention/capacity signal；M9.18 已闭合本机 failure/pressure L4 gate；repository release L4 仍待完成
 >
 > 基线日期：2026-08-31

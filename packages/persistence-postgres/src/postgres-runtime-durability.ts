@@ -25,6 +25,7 @@ import type {
   SessionFence,
   SessionLease,
 } from "@iterminal/application";
+import { sessionDurabilityFailure } from "@iterminal/application";
 import type {
   Actor,
   Approval,
@@ -456,7 +457,7 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
           lease.instanceId !== owner.instanceId ||
           lease.epoch !== owner.epoch
         ) {
-          throwSessionLeaseLost(lease);
+          throwSessionLeaseSetLost(owner, leases.length);
         }
       }
       const requested = leases.map((lease) => ({
@@ -513,7 +514,7 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
           leaseMilliseconds,
         ],
       );
-      if (renewed.rows.length !== leases.length) throwSessionLeaseLost(leases[0] as SessionFence);
+      if (renewed.rows.length !== leases.length) throwSessionLeaseSetLost(owner, leases.length);
       const byScope = new Map(
         renewed.rows.map((row) => [
           `${row.session_id}:${row.session_generation.toString()}:${row.fencing_token}`,
@@ -524,7 +525,7 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
         const renewedLease = byScope.get(
           `${lease.sessionId}:${lease.generation.toString()}:${lease.fencingToken}`,
         );
-        if (renewedLease === undefined) throwSessionLeaseLost(lease);
+        if (renewedLease === undefined) throwSessionLeaseSetLost(owner, leases.length);
         return renewedLease;
       });
     });
@@ -1788,15 +1789,18 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
       } catch (error) {
         if (!(error instanceof RuntimeError) || error.code !== "BACKPRESSURE") throw error;
         await this.#breakSessionForArtifactBackpressure(fence, event, error);
-        throw new RuntimeError(
+        throw sessionDurabilityFailure(
           "RUNTIME_UNAVAILABLE",
           "Artifact storage backpressure broke the Session generation",
+          fence,
           {
-            component: "artifact_storage",
-            durabilityScope: "session",
-            phase: "durable_output_admission",
+            details: {
+              component: "artifact_storage",
+              phase: "durable_output_admission",
+            },
+            failureRecord: "committed",
+            retryable: false,
           },
-          false,
         );
       }
       const screenVersion = event.payload.screenVersion;
@@ -2138,6 +2142,20 @@ function assertSessionOwner(session: Session, owner: RuntimeOwnerIdentity): void
       sessionOwnerId: session.ownerId,
     });
   }
+}
+
+function throwSessionLeaseSetLost(owner: RuntimeOwnerIdentity, leaseCount: number): never {
+  throw new RuntimeError(
+    "SESSION_LEASE_LOST",
+    "Runtime could not confirm its complete Session lease renewal set",
+    {
+      leaseCount,
+      ownerEpoch: owner.epoch,
+      ownerId: owner.ownerId,
+      ownerInstanceId: owner.instanceId,
+    },
+    false,
+  );
 }
 
 function assertFenceSession(fence: SessionFence, session: Session): void {

@@ -1,10 +1,12 @@
 # E：通信、性能、结构与门禁
 
+当前状态：本轮卡已按约定范围验收；具体等级与未做事项见 [最终对账](final-reconciliation.md)。下文保留原验收条件。
+
 先读 [共同约束](README.md)。没有基线数据就不宣称性能提升；拆文件不等于改变状态机。
 
 ## E01
 
-- [ ] 让 WS 观察有版本、有界、可降级。依赖 A05、C04。建议 Sol。
+- [x] 让 WS 观察有版本、有界、可降级。依赖 A05、C04。建议 Sol。
 
 **先读：** `apps/console/src/server.ts` 的 screen wait、WS pump、ACK、sync；RuntimeService queryEvents 的 durable flush；screen version；ADR 0020、0052。
 
@@ -20,7 +22,7 @@ ACK 选择一种明确含义：确认客户端已应用 screenVersion，服务�
 
 ## E02
 
-- [ ] Byte ring 改为固定容量循环存储。依赖 B02。建议 Sol。
+- [x] Byte ring 改为固定容量循环存储。依赖 B02。建议 Sol。
 
 **先读：** `packages/executor-pty/src/bounded-byte-ring.ts` 的 append/读取路径及 `bounded-byte-ring.test.ts`；B02 输出 offsets 与现有消费者。
 
@@ -34,7 +36,7 @@ Unicode 语义放在 text 解码层：原始 byte ring 可从多字节中间开�
 
 ## E03
 
-- [ ] 测量 FIFO/投影热点后做局部优化。依赖 E01、E02。建议 Sol。
+- [x] 测量 FIFO/投影热点后做局部优化。依赖 E01、E02。建议 Sol。
 
 **先读：** executor FIFO 轮询和 16 KiB Buffer 分配；screen write/capture；现有控制协议测试。
 
@@ -51,7 +53,7 @@ Unicode 语义放在 text 解码层：原始 byte ring 可从多字节中间开�
 
 ## E04
 
-- [ ] 拆分 Application 内部职责而不改行为。依赖 A02、B07、D01。建议 Sol。
+- [x] 拆分 Application 内部职责而不改行为。依赖 A02、B07、D01。建议 Sol。
 
 **先读：** `packages/application/src/runtime-service.ts`，以已完成卡修改后的代码为准。
 
@@ -65,7 +67,7 @@ Unicode 语义放在 text 解码层：原始 byte ring 可从多字节中间开�
 
 ## E05
 
-- [ ] 拆分 Console 控制器。依赖 C01、C02、C05、C06、D07、E01。建议 Luna。
+- [x] 拆分 Console 控制器。依赖 C01、C02、C05、C06、D07、E01。建议 Luna。
 
 **先读：** 当前 `web.tsx`，已提取的 submission-intent/terminal-renderer，session-tabs 等 helpers。
 
@@ -79,7 +81,7 @@ Unicode 语义放在 text 解码层：原始 byte ring 可从多字节中间开�
 
 ## E06
 
-- [ ] 必选集成测试不允许静默 skip。依赖 A02、B04、C01、C04、D04。建议 Sol。
+- [x] 必选集成测试不允许静默 skip。依赖 A02、B04、C01、C04、D04。建议 Sol。
 
 **先读：** 根 `package.json`、`vitest.config.*`（若存在）、browser-shared-path 的 databaseUrl/browserReady gates、`scripts/check-verification.mjs`、当前 CI 配置。
 

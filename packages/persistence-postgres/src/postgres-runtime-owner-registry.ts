@@ -7,6 +7,7 @@ import type {
   RuntimeRouteResolution,
   SessionCreationClaim,
 } from "@iterminal/application";
+import type { Session, SessionDiscoveryRequest } from "@iterminal/domain";
 import { RuntimeError } from "@iterminal/domain";
 import type { Pool, PoolClient } from "pg";
 
@@ -336,6 +337,41 @@ export class PostgresRuntimeOwnerRegistry implements RuntimeOwnerRegistry {
       );
       return { owner: ownerRouteFromRecord(owner) };
     });
+  }
+
+  public async listSessionCandidates(
+    request: SessionDiscoveryRequest & { includeCursor?: boolean } = {},
+  ) {
+    const limit = request.limit ?? 50;
+    if (
+      !Number.isSafeInteger(limit) ||
+      limit < 1 ||
+      limit > 200 ||
+      (request.cursor?.length ?? 0) > 256
+    )
+      throw new RuntimeError("INVALID_REQUEST", "Invalid Session discovery page");
+    const rows = await this.#pool.query<RouteRow & { session: Session }>(
+      `
+      WITH candidates AS (
+        SELECT * FROM sessions WHERE ($1::text IS NULL OR (id COLLATE "C" > $1 COLLATE "C" OR ($3::boolean AND id = $1))) ORDER BY id COLLATE "C" LIMIT $2
+      )
+      SELECT jsonb_strip_nulls(jsonb_build_object(
+        'id', s.id, 'generation', s.current_generation, 'status', s.status, 'shell', s.shell,
+        'workspaceRoot', s.workspace_root, 'ownerId', s.owner_id, 'createdAt', s.created_at,
+        'actionSequence', s.next_action_sequence, 'eventSequence', generation.next_event_sequence,
+        'screenVersion', s.screen_version, 'activeExecutionId', s.active_execution_id
+      )) AS session, s.owner_id AS target_owner_id, ${ownerColumns("worker", false)}
+      FROM candidates s JOIN session_generations generation ON generation.session_id = s.id AND generation.generation = s.current_generation
+      LEFT JOIN runtime_workers worker ON worker.owner_id = s.owner_id AND worker.status IN ('ACTIVE', 'DRAINING') AND worker.lease_expires_at > now()
+      ORDER BY s.id COLLATE "C"`,
+      [request.cursor ?? null, limit + 1, request.includeCursor ?? false],
+    );
+    return {
+      items: rows.rows
+        .slice(0, limit)
+        .map((row) => ({ session: row.session, route: routeResolution(row) })),
+      nextCursor: rows.rows.length > limit ? rows.rows[limit - 1]!.session.id : null,
+    };
   }
 
   public async listSessionOwnerRoutes(): Promise<readonly RuntimeRouteResolution[]> {

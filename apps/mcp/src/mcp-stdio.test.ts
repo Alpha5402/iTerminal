@@ -70,6 +70,7 @@ describe("M4 stdio MCP bridge", () => {
       "session_fork",
       "session_get",
       "session_list",
+      "session_list_page",
       "terminal_resize",
       "terminal_state",
     ]);
@@ -84,8 +85,13 @@ describe("M4 stdio MCP bridge", () => {
         "action.execute.v1",
         "action.input.v1",
         "action.lookup.v1",
+        "approval.pending.list.v1",
+        "console.observe.v1",
         "execution.wait.v2",
         "runtime.capabilities.v1",
+        "screen.frame.v1",
+        "screen.history.v1",
+        "session.list.v2",
       ],
       protocolVersion: "1",
     });

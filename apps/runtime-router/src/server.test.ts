@@ -14,8 +14,8 @@ import type {
   RuntimeOwnerRecord,
   RuntimeOwnerRegistry,
 } from "@iterminal/application";
-import type { Session } from "@iterminal/domain";
-import { RuntimeError } from "@iterminal/domain";
+import type { Session, PendingApprovalsRequest, PendingApprovalsPage } from "@iterminal/domain";
+import { RuntimeError, ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
 import { UnixRuntimeClient, type RuntimeGateway } from "@iterminal/runtime-rpc";
 import { describe, expect, it } from "vitest";
 
@@ -61,6 +61,7 @@ describe("CentralRuntimeRouterGateway error classification", () => {
       buildId: "router-a05",
       features: [
         "action.lookup.v1",
+        "approval.pending.list.v1",
         "artifact.read.v1",
         "execution.observe.v1",
         "execution.output.read.v1",
@@ -68,6 +69,7 @@ describe("CentralRuntimeRouterGateway error classification", () => {
         "history.lookup.v1",
         "runtime.capabilities.v1",
         "runtime.owner-capabilities.v1",
+        "session.list.v2",
       ],
       protocolVersion: "1",
     });
@@ -720,3 +722,196 @@ const owner: RuntimeOwnerRecord = {
   status: "ACTIVE",
   version: 2,
 };
+
+describe("bounded discovery deadlines", () => {
+  it("caps owner probes at four, cancels timed out requests, and retains a healthy and historical item", async () => {
+    const healthyOwner = { ...owner, ownerId: "healthy", endpoint: "/tmp/healthy.sock" };
+    const sessions = Array.from(
+      { length: 6 },
+      (_, index) =>
+        ({ id: `bad-${index}`, generation: 1, ownerId: owner.ownerId, status: "READY" }) as Session,
+    );
+    const healthy = {
+      id: "healthy",
+      generation: 1,
+      ownerId: healthyOwner.ownerId,
+      status: "READY",
+    } as Session;
+    const historical = {
+      id: "historical",
+      generation: 1,
+      ownerId: "gone",
+      status: "BROKEN",
+    } as Session;
+    let active = 0,
+      maximum = 0,
+      calls = 0;
+    const signals: AbortSignal[] = [];
+    const routes = {
+      ...routeRegistry(owner),
+      listSessionCandidates: () =>
+        Promise.resolve({
+          items: [
+            ...sessions.map((session) => ({
+              session,
+              route: { liveOwner: owner, ownerId: owner.ownerId },
+            })),
+            { session: healthy, route: { liveOwner: healthyOwner, ownerId: healthyOwner.ownerId } },
+            { session: historical, route: { ownerId: "gone" } },
+          ],
+          nextCursor: null,
+        }),
+    };
+    const gateway = new CentralRuntimeRouterGateway(
+      routes,
+      () =>
+        new DiscoveryClient((id, signal) => {
+          if (id === healthy.id) return Promise.resolve(healthy);
+          if (!signal) throw new Error("Missing discovery cancellation signal");
+          calls++;
+          active++;
+          maximum = Math.max(maximum, active);
+          signals.push(signal);
+          return new Promise<Session>((_resolve, reject) =>
+            signal.addEventListener(
+              "abort",
+              () => {
+                active--;
+                reject(new Error("fixture deadline"));
+              },
+              { once: true },
+            ),
+          );
+        }),
+    );
+    const result = await gateway.listSessionsV2();
+    expect(maximum).toBe(4);
+    expect(calls).toBeLessThanOrEqual(4);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
+    expect(result.partial).toBe(true);
+    expect(result.items.find((item) => item.session.id === healthy.id)?.liveAvailability).toBe(
+      "available",
+    );
+    expect(result.items.find((item) => item.session.id === historical.id)?.liveAvailability).toBe(
+      "historical",
+    );
+  });
+
+  it("starts a targeted inbox at that Session and aborts its timed-out owner request", async () => {
+    const target = {
+      id: "session-after-first-page",
+      generation: 1,
+      ownerId: owner.ownerId,
+      status: "READY",
+    } as Session;
+    let signal: AbortSignal | undefined;
+    let query: unknown;
+    const gateway = new CentralRuntimeRouterGateway(
+      {
+        ...routeRegistry(owner),
+        listSessionCandidates: (input) => {
+          query = input;
+          return Promise.resolve({
+            items: [{ session: target, route: { liveOwner: owner, ownerId: owner.ownerId } }],
+            nextCursor: "later-session",
+          });
+        },
+      },
+      () =>
+        new DiscoveryClient(
+          () => Promise.resolve(target),
+          (_request, abort) => {
+            signal = abort;
+            return new Promise<PendingApprovalsPage>((_resolve, reject) =>
+              abort?.addEventListener("abort", () => reject(new Error("fixture deadline")), {
+                once: true,
+              }),
+            );
+          },
+        ),
+    );
+    const result = await gateway.listPendingApprovals({
+      sessionId: target.id,
+      actor: {
+        id: "human-inbox",
+        principal: "human-inbox",
+        client: "fixture",
+        type: "human",
+        capabilities: ACTOR_CAPABILITY_PROFILES.human,
+      },
+    });
+    expect(query).toEqual({ cursor: target.id, includeCursor: true, limit: 1 });
+    expect(signal?.aborted).toBe(true);
+    expect(result).toMatchObject({ partial: true, nextCursor: null, items: [] });
+  });
+  it("cancels a caller's inbox traversal instead of scanning further owners", async () => {
+    const sessions = ["first", "second"].map(
+      (id) => ({ id, generation: 1, ownerId: owner.ownerId, status: "READY" }) as Session,
+    );
+    let childSignal: AbortSignal | undefined;
+    let probes = 0;
+    const gateway = new CentralRuntimeRouterGateway(
+      {
+        ...routeRegistry(owner),
+        listSessionCandidates: () =>
+          Promise.resolve({
+            items: sessions.map((session) => ({
+              session,
+              route: { liveOwner: owner, ownerId: owner.ownerId },
+            })),
+            nextCursor: null,
+          }),
+      },
+      () =>
+        new DiscoveryClient(
+          () => Promise.resolve(sessions[0]!),
+          (_request, signal) => {
+            probes++;
+            childSignal = signal;
+            return new Promise<PendingApprovalsPage>(() => undefined);
+          },
+        ),
+    );
+    const caller = new AbortController();
+    const pending = gateway.listPendingApprovals(
+      {
+        actor: {
+          id: "human",
+          principal: "human",
+          client: "fixture",
+          type: "human",
+          capabilities: ACTOR_CAPABILITY_PROFILES.human,
+        },
+      },
+      caller.signal,
+    );
+    const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    await expect.poll(() => childSignal !== undefined).toBe(true);
+    caller.abort();
+    await rejected;
+    expect(childSignal?.aborted).toBe(true);
+    expect(probes).toBe(1);
+  });
+});
+
+class DiscoveryClient extends UnixRuntimeClient {
+  constructor(
+    private readonly read: (id: string, signal?: AbortSignal) => Promise<Session>,
+    private readonly pending?: (
+      request: PendingApprovalsRequest,
+      signal?: AbortSignal,
+    ) => Promise<PendingApprovalsPage>,
+  ) {
+    super("/unused/discovery.sock");
+  }
+  override getSession(id: string, signal?: AbortSignal): Promise<Session> {
+    return this.read(id, signal);
+  }
+  override listPendingApprovals(
+    request: PendingApprovalsRequest,
+    signal?: AbortSignal,
+  ): Promise<PendingApprovalsPage> {
+    if (!this.pending) throw new Error("Unexpected inbox probe");
+    return this.pending(request, signal);
+  }
+}

@@ -1,10 +1,12 @@
 # F：支持边界、Agent 基准与路线
 
+当前状态：本轮卡已按约定范围验收；具体等级与未做事项见 [最终对账](final-reconciliation.md)。下文保留原验收条件。
+
 先读 [共同约束](README.md)。此阶段包括设计/文档卡，不能把它们的完成误写成相关功能已实现。
 
 ## F01
 
-- [ ] 明确 Shell 支持范围。依赖无。建议 Luna。
+- [x] 明确 Shell 支持范围。依赖无。建议 Luna。
 
 **先读：** executor shell argv/env/ZDOTDIR/history 初始化；ADR 0003、0060、0065、0066；local-quickstart；Console 输入提示。
 
@@ -18,7 +20,7 @@
 
 ## F02
 
-- [ ] 建立 Agent 实际任务基准。依赖 B04、B05、C02、E06。建议 Sol。
+- [x] 建立 Agent 实际任务基准。依赖 B04、B05、C02、E06。建议 Sol。
 
 **产物：** 新增可运行的 MCP benchmark fixture 与 `docs/verification/review-remediation/<日期>-F02.md`，用官方 MCP client 驱动隔离 runtime，不对已有用户会话发命令。
 
@@ -45,7 +47,7 @@
 
 ## F03
 
-- [ ] 交付多 Agent 授权边界设计稿，暂不实施 ACL。依赖 D05。建议 Sol。
+- [x] 交付多 Agent 授权边界设计稿，暂不实施 ACL。依赖 D05。建议 Sol。
 
 **先读：** ADR 0056、domain capability profiles、RPC grants、没有 actor 参数的 session create/close/read 路径、审批 Execute 与后续 Input 的区别。
 
@@ -59,7 +61,7 @@
 
 ## F04
 
-- [ ] 收敛路线并对账所有整改项。依赖 F01、F02、F03。建议 Luna。
+- [x] 收敛路线并对账所有整改项。依赖 F01、F02、F03。建议 Luna。
 
 **先读：** 本索引全部状态、各卡验证记录、`TODO.md` 与 ADR index。只读历史证据，不修改历史通过数。
 

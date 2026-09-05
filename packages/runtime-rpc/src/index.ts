@@ -57,6 +57,13 @@ import type {
   SessionForkResult,
   ShellCheckpointView,
   TerminalScreenCellsResult,
+  TerminalConsoleFrame,
+  ConsoleObservation,
+  TerminalHistoryPage,
+  SessionDiscoveryPage,
+  SessionDiscoveryRequest,
+  PendingApprovalsRequest,
+  PendingApprovalsPage,
   TerminalScreenDiffResult,
   TerminalScreenRegionResult,
   TerminalScreenSearchResult,
@@ -327,6 +334,14 @@ const operationSchemas = {
   }),
   "terminal.state.get": sessionIdentitySchema,
   "screen.cells": screenRectangleSchema,
+  "screen.frame": sessionIdentitySchema,
+  "console.observe": sessionIdentitySchema.extend({
+    afterScreenVersion: z.number().int().nonnegative().optional(),
+  }),
+  "screen.history": sessionIdentitySchema.extend({
+    cursor: z.string().min(1).max(512).optional(),
+    limit: z.number().int().min(1).max(500).default(100),
+  }),
   "screen.diff": sessionIdentitySchema.extend({
     afterVersion: z.number().int().nonnegative(),
   }),
@@ -374,6 +389,16 @@ const operationSchemas = {
   }),
   "session.get": z.strictObject({ sessionId: z.string().min(1).max(256) }),
   "session.list": z.strictObject({}),
+  "approval.pending.list": z.strictObject({
+    actor: actorSchema,
+    sessionId: z.string().min(1).max(256).optional(),
+    cursor: z.string().min(1).max(1024).optional(),
+    limit: z.number().int().min(1).max(200).default(50),
+  }),
+  "session.list.v2": z.strictObject({
+    cursor: z.string().min(1).max(256).optional(),
+    limit: z.number().int().min(1).max(200).default(50),
+  }),
   "runtime.capabilities": runtimeCapabilitiesRequestSchema,
 } as const;
 
@@ -405,10 +430,27 @@ export interface RuntimeGateway {
   createSession(request: CreateSessionRequest): Promise<Session>;
   getSessionCheckpoint(sessionId: string, generation: number): Promise<ShellCheckpointView>;
   forkSession(request: ForkSessionRequest): Promise<SessionForkResult>;
-  getSession(sessionId: string): Promise<Session>;
+  getSession(sessionId: string, signal?: AbortSignal): Promise<Session>;
+  listPendingApprovals?(
+    request: PendingApprovalsRequest,
+    signal?: AbortSignal,
+  ): Promise<PendingApprovalsPage>;
+  listSessionsV2?(request?: SessionDiscoveryRequest): Promise<SessionDiscoveryPage>;
   listSessions(): Promise<readonly Session[]>;
   getScreen(sessionId: string, generation: number): Promise<TerminalScreenSnapshot>;
   getTerminalState(sessionId: string, generation: number): Promise<TerminalStateObservation>;
+  getScreenHistory?(request: {
+    sessionId: string;
+    generation: number;
+    cursor?: string | undefined;
+    limit?: number | undefined;
+  }): Promise<TerminalHistoryPage>;
+  observeConsole?(request: {
+    sessionId: string;
+    generation: number;
+    afterScreenVersion?: number | undefined;
+  }): Promise<ConsoleObservation>;
+  getConsoleFrame?(sessionId: string, generation: number): Promise<TerminalConsoleFrame>;
   getScreenCells(request: ScreenCellsRequest): Promise<TerminalScreenCellsResult>;
   getScreenDiff(request: ScreenDiffRequest): Promise<TerminalScreenDiffResult>;
   getScreenRegion(request: ScreenRegionRequest): Promise<TerminalScreenRegionResult>;
@@ -441,6 +483,7 @@ export interface RuntimeGateway {
     generation: number,
     after?: number,
     limit?: number,
+    signal?: AbortSignal,
   ): Promise<EventPage>;
   closeSession(sessionId: string, generation: number): Promise<Session>;
 }
@@ -463,12 +506,17 @@ export class LocalRuntimeGateway implements RuntimeGateway {
         "action.execute.v1",
         "action.input.v1",
         "action.lookup.v1",
+        "approval.pending.list.v1",
+        "console.observe.v1",
         ...(options.artifactRead === true ? (["artifact.read.v1"] as const) : []),
         ...(options.executionOutputRead === true ? (["execution.observe.v1"] as const) : []),
         ...(options.executionOutputRead === true ? (["execution.output.read.v1"] as const) : []),
         "execution.wait.v2",
         ...(options.durableHistory === true ? (["history.lookup.v1"] as const) : []),
         "runtime.capabilities.v1",
+        "screen.frame.v1",
+        "screen.history.v1",
+        "session.list.v2",
       ],
     });
   }
@@ -534,6 +582,14 @@ export class LocalRuntimeGateway implements RuntimeGateway {
     return Promise.resolve(this.runtime.getSession(sessionId));
   }
 
+  public listPendingApprovals(request: PendingApprovalsRequest): Promise<PendingApprovalsPage> {
+    return Promise.resolve(this.runtime.listPendingApprovals(request));
+  }
+
+  public listSessionsV2(request: SessionDiscoveryRequest = {}): Promise<SessionDiscoveryPage> {
+    return Promise.resolve(this.runtime.listSessionsV2(request));
+  }
+
   public listSessions(): Promise<readonly Session[]> {
     return Promise.resolve(this.runtime.listSessions());
   }
@@ -547,6 +603,27 @@ export class LocalRuntimeGateway implements RuntimeGateway {
     generation: number,
   ): Promise<TerminalStateObservation> {
     return this.runtime.getTerminalState(sessionId, generation);
+  }
+
+  public getScreenHistory(request: {
+    sessionId: string;
+    generation: number;
+    cursor?: string | undefined;
+    limit?: number | undefined;
+  }): Promise<TerminalHistoryPage> {
+    return this.runtime.getScreenHistory(request);
+  }
+
+  public observeConsole(request: {
+    sessionId: string;
+    generation: number;
+    afterScreenVersion?: number | undefined;
+  }): Promise<ConsoleObservation> {
+    return this.runtime.observeConsole(request);
+  }
+
+  public getConsoleFrame(sessionId: string, generation: number): Promise<TerminalConsoleFrame> {
+    return this.runtime.getConsoleFrame(sessionId, generation);
   }
 
   public getScreenCells(request: ScreenCellsRequest): Promise<TerminalScreenCellsResult> {
@@ -946,8 +1023,19 @@ export class UnixRuntimeClient implements RuntimeGateway {
     });
   }
 
-  public getSession(sessionId: string): Promise<Session> {
-    return this.#request("session.get", { sessionId });
+  public getSession(sessionId: string, signal?: AbortSignal): Promise<Session> {
+    return this.#request("session.get", { sessionId }, DEFAULT_REQUEST_TIMEOUT_MS, signal);
+  }
+
+  public listPendingApprovals(
+    request: PendingApprovalsRequest,
+    signal?: AbortSignal,
+  ): Promise<PendingApprovalsPage> {
+    return this.#request("approval.pending.list", request, DEFAULT_REQUEST_TIMEOUT_MS, signal);
+  }
+
+  public listSessionsV2(request: SessionDiscoveryRequest = {}): Promise<SessionDiscoveryPage> {
+    return this.#request("session.list.v2", request);
   }
 
   public listSessions(): Promise<readonly Session[]> {
@@ -963,6 +1051,27 @@ export class UnixRuntimeClient implements RuntimeGateway {
     generation: number,
   ): Promise<TerminalStateObservation> {
     return this.#request("terminal.state.get", { generation, sessionId });
+  }
+
+  public getScreenHistory(request: {
+    sessionId: string;
+    generation: number;
+    cursor?: string | undefined;
+    limit?: number | undefined;
+  }): Promise<TerminalHistoryPage> {
+    return this.#request("screen.history", request);
+  }
+
+  public observeConsole(request: {
+    sessionId: string;
+    generation: number;
+    afterScreenVersion?: number | undefined;
+  }): Promise<ConsoleObservation> {
+    return this.#request("console.observe", request);
+  }
+
+  public getConsoleFrame(sessionId: string, generation: number): Promise<TerminalConsoleFrame> {
+    return this.#request("screen.frame", { generation, sessionId });
   }
 
   public getScreenCells(request: ScreenCellsRequest): Promise<TerminalScreenCellsResult> {
@@ -1158,10 +1267,14 @@ export class UnixRuntimeClient implements RuntimeGateway {
     generation: number,
     after = 0,
     limit = 100,
+    signal?: AbortSignal,
   ): Promise<EventPage> {
-    return this.#request("events.query", { after, generation, limit, sessionId }).then(
-      (result) => eventPageTransportSchema.parse(result) as EventPage,
-    );
+    return this.#request(
+      "events.query",
+      { after, generation, limit, sessionId },
+      DEFAULT_REQUEST_TIMEOUT_MS,
+      signal,
+    ).then((result) => eventPageTransportSchema.parse(result) as EventPage);
   }
 
   public closeSession(sessionId: string, generation: number): Promise<Session> {
@@ -1525,7 +1638,19 @@ async function dispatch(
     }
     case "session.get": {
       const request = operationSchemas[operation].parse(input);
-      return gateway.getSession(request.sessionId);
+      return gateway.getSession(request.sessionId, signal);
+    }
+    case "approval.pending.list": {
+      const request = operationSchemas[operation].parse(input);
+      if (gateway.listPendingApprovals === undefined)
+        throw new RuntimeError("INVALID_REQUEST", "Pending Approval inbox is unavailable");
+      return gateway.listPendingApprovals(request, signal);
+    }
+    case "session.list.v2": {
+      const request = operationSchemas[operation].parse(input);
+      if (gateway.listSessionsV2 === undefined)
+        throw new RuntimeError("INVALID_REQUEST", "Session discovery v2 is unavailable");
+      return gateway.listSessionsV2(request);
     }
     case "session.list":
       return gateway.listSessions();
@@ -1704,6 +1829,7 @@ async function dispatch(
           request.generation,
           request.after,
           request.limit,
+          signal,
         ),
       );
     }
@@ -1714,6 +1840,24 @@ async function dispatch(
     case "terminal.state.get": {
       const request = operationSchemas[operation].parse(input);
       return gateway.getTerminalState(request.sessionId, request.generation);
+    }
+    case "screen.history": {
+      const request = operationSchemas[operation].parse(input);
+      if (gateway.getScreenHistory === undefined)
+        throw new RuntimeError("INVALID_REQUEST", "Screen history is unavailable");
+      return gateway.getScreenHistory(request);
+    }
+    case "console.observe": {
+      const request = operationSchemas[operation].parse(input);
+      if (!gateway.observeConsole)
+        throw new RuntimeError("INVALID_REQUEST", "Console observation is unavailable");
+      return gateway.observeConsole(request);
+    }
+    case "screen.frame": {
+      const request = operationSchemas[operation].parse(input);
+      if (gateway.getConsoleFrame === undefined)
+        throw new RuntimeError("INVALID_REQUEST", "Canonical Console cells are unavailable");
+      return gateway.getConsoleFrame(request.sessionId, request.generation);
     }
     case "screen.cells": {
       const request = operationSchemas[operation].parse(input);

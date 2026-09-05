@@ -56,6 +56,70 @@ describeDatabase("M9.2 central Runtime Router", () => {
 
   afterAll(async () => pool.end());
 
+  it("pages durable candidates before routing and preserves healthy Sessions during an owner outage", async () => {
+    const root = await fixture("partial-discovery");
+    const left = await daemon(root, "owner-discovery-a", "instance-discovery-a", "left.sock");
+    const right = await daemon(root, "owner-discovery-b", "instance-discovery-b", "right.sock");
+    const first = await new UnixRuntimeClient(left.socketPath).createSession({
+      shell: "zsh",
+      workspaceRoot: root,
+    });
+    const second = await new UnixRuntimeClient(right.socketPath).createSession({
+      shell: "zsh",
+      workspaceRoot: root,
+    });
+    const router = await runtimeRouter(root);
+    const client = new UnixRuntimeClient(router.socketPath);
+    const initial = await client.listSessionsV2({ limit: 1 });
+    expect(initial.items).toHaveLength(1);
+    expect(initial.nextCursor).not.toBeNull();
+    const next = await client.listSessionsV2({ cursor: initial.nextCursor!, limit: 1 });
+    expect(new Set([...initial.items, ...next.items].map((item) => item.session.id))).toEqual(
+      new Set([first.id, second.id]),
+    );
+    expect(next.nextCursor).toBeNull();
+    await pool.query("UPDATE runtime_workers SET endpoint = $1 WHERE owner_id = $2", [
+      join(root, "missing.sock"),
+      first.ownerId,
+    ]);
+    const partial = await client.listSessionsV2();
+    expect(partial).toMatchObject({ partial: true, unavailableOwners: [first.ownerId] });
+    expect(partial.items.find((item) => item.session.id === first.id)).toMatchObject({
+      durableStatus: "READY",
+      liveAvailability: "unavailable",
+    });
+    expect(partial.items.find((item) => item.session.id === second.id)).toMatchObject({
+      liveAvailability: "available",
+    });
+    await expect(
+      client.startExecute({
+        actor,
+        command: "true",
+        idempotencyKey: "discovery-offline-write",
+        sessionGeneration: first.generation,
+        sessionId: first.id,
+      }),
+    ).rejects.toMatchObject({ code: "DELIVERY_UNKNOWN" });
+    const pending = await client.requestExecuteApproval({
+      actor,
+      command: "true",
+      actionIdempotencyKey: "inbox-action",
+      requestIdempotencyKey: "inbox-request",
+      sessionGeneration: second.generation,
+      sessionId: second.id,
+      reason: "global inbox",
+    });
+    const inbox = await client.listPendingApprovals({ actor: human });
+    expect(inbox).toMatchObject({
+      partial: true,
+      unavailableOwners: [first.ownerId],
+      items: [expect.objectContaining({ id: pending.id, sessionId: second.id })],
+    });
+    await expect(client.listPendingApprovals({ actor })).rejects.toMatchObject({
+      code: "POLICY_DENIED",
+    });
+  }, 30_000);
+
   it("places new Sessions and routes exact operations across two live owners", async () => {
     const root = await fixture("multi-owner");
     const leftWorkspace = join(root, "left");

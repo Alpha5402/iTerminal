@@ -8,6 +8,8 @@
     "@iterminal/application": "workspace:*",
     "@iterminal/domain": "workspace:*",
     "@iterminal/executor-pty": "workspace:*",
-    "@iterminal/runtime-memory": "workspace:*"
+    "@iterminal/protocol": "workspace:*",
+    "@iterminal/runtime-memory": "workspace:*",
+    "@iterminal/runtime-rpc": "workspace:*"
   }
 }

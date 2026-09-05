@@ -6,7 +6,15 @@ import { resolve } from "node:path";
 
 import fastifyStatic from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
-import type { Actor, EventPage, InteractionState, Session } from "@iterminal/domain";
+import { screenDelta } from "./screen-delta.js";
+import type {
+  TerminalConsoleFrame,
+  TerminalScreenSnapshot,
+  Actor,
+  EventPage,
+  InteractionState,
+  Session,
+} from "@iterminal/domain";
 import {
   ACTOR_CAPABILITY_PROFILES,
   CANONICAL_TERMINAL_COLUMNS,
@@ -38,7 +46,7 @@ const DEFAULT_MAX_CONSOLE_STREAMS = 64;
 const DEFAULT_MAX_CONSOLE_STREAMS_PER_ACTOR = 4;
 const DEFAULT_CONSOLE_REQUEST_RATE_WINDOW_MS = 10_000;
 const STREAM_RESERVATION_TTL_MS = 5_000;
-const MAX_WS_BUFFERED_BYTES = 1024 * 1024;
+const MAX_WS_BUFFERED_BYTES = 8 * 1024 * 1024;
 const STREAM_WAIT_MS = 1_000;
 const STREAM_EVENT_LIMIT = 100;
 
@@ -158,6 +166,7 @@ export interface HumanConsoleServerOptions {
   readonly port?: number;
   readonly resourceLimits?: Partial<HumanConsoleResourceLimits>;
   readonly staticRoot?: string;
+  readonly screenMaxFps?: number;
 }
 
 export interface HumanConsoleResourceLimits {
@@ -185,6 +194,13 @@ export interface HumanConsoleServerHandle {
 export async function createHumanConsoleApp(
   options: HumanConsoleServerOptions,
 ): Promise<FastifyInstance> {
+  if (
+    options.screenMaxFps !== undefined &&
+    (!Number.isFinite(options.screenMaxFps) ||
+      options.screenMaxFps < 1 ||
+      options.screenMaxFps > 60)
+  )
+    throw new RuntimeError("INVALID_REQUEST", "Console screenMaxFps must be between 1 and 60");
   const now = options.now ?? Date.now;
   const expectedHost = normalizeHostname(options.host ?? "127.0.0.1");
   const limits = consoleResourceLimits(options.resourceLimits);
@@ -238,10 +254,9 @@ export async function createHumanConsoleApp(
 
   app.get("/api/bootstrap", async (request, reply) => {
     const actor = actorForRequest(request, reply, actors, now, true, limits.maxActors);
-    const [runtimeCompatibility, sessions] = await Promise.all([
-      runtimeCompatibilityFor(options.gateway),
-      options.gateway.listSessions(),
-    ]);
+    const runtimeCompatibility = await runtimeCompatibilityFor(options.gateway);
+    const discovery = await discoverConsoleSessions(options.gateway, {}, runtimeCompatibility);
+    const sessions = discovery.sessions;
     return success(request, {
       actor,
       canonicalGeometry: {
@@ -263,13 +278,42 @@ export async function createHumanConsoleApp(
             },
           }),
       runtimeCompatibility,
+      discovery: {
+        partial: discovery.partial,
+        nextCursor: discovery.nextCursor,
+        unavailableOwners: discovery.unavailableOwners,
+      },
       sessions,
     });
   });
 
   app.get("/api/sessions", async (request, reply) => {
     actorForRequest(request, reply, actors, now);
-    return success(request, await options.gateway.listSessions());
+    return success(request, (await discoverConsoleSessions(options.gateway)).sessions);
+  });
+
+  app.get("/api/session-discovery", async (request, reply) => {
+    actorForRequest(request, reply, actors, now);
+    const query = z
+      .object({
+        cursor: z.string().max(256).optional(),
+        limit: z.coerce.number().int().min(1).max(200).default(50),
+      })
+      .parse(request.query);
+    return success(request, await discoverConsoleSessions(options.gateway, query));
+  });
+
+  app.get("/api/approvals/pending", async (request, reply) => {
+    const actor = actorForRequest(request, reply, actors, now);
+    const query = z
+      .object({
+        cursor: z.string().max(1024).optional(),
+        limit: z.coerce.number().int().min(1).max(200).default(50),
+      })
+      .parse(request.query);
+    if (!options.gateway.listPendingApprovals)
+      throw new RuntimeError("INVALID_REQUEST", "Pending Approval inbox is unavailable");
+    return success(request, await options.gateway.listPendingApprovals({ actor, ...query }));
   });
 
   app.post("/api/sessions", async (request, reply) => {
@@ -532,6 +576,21 @@ export async function createHumanConsoleApp(
     );
   });
 
+  app.get("/api/sessions/:sessionId/history", async (request, reply) => {
+    actorForRequest(request, reply, actors, now);
+    const { sessionId } = sessionParamsSchema.parse(request.params);
+    const query = z
+      .object({
+        generation: z.coerce.number().int().positive(),
+        cursor: z.string().max(512).optional(),
+        limit: z.coerce.number().int().min(1).max(500).default(100),
+      })
+      .parse(request.query);
+    if (options.gateway.getScreenHistory === undefined)
+      throw new RuntimeError("INVALID_REQUEST", "Screen history is unavailable");
+    return success(request, await options.gateway.getScreenHistory({ sessionId, ...query }));
+  });
+
   app.get("/api/sessions/:sessionId/screen", async (request, reply) => {
     actorForRequest(request, reply, actors, now);
     const { sessionId } = sessionParamsSchema.parse(request.params);
@@ -649,7 +708,14 @@ export async function createHumanConsoleApp(
           openSessionStreams.set(streamKey, remaining);
         }
       });
-      void streamSession(socket, options.gateway, actor, sessionId, query).catch(() => {
+      void streamSession(
+        socket,
+        options.gateway,
+        actor,
+        sessionId,
+        query,
+        options.screenMaxFps,
+      ).catch(() => {
         socket.terminate();
       });
     },
@@ -730,9 +796,14 @@ async function streamSession(
   actor: Actor,
   sessionId: string,
   initial: z.infer<typeof streamQuerySchema>,
+  maxFps = 30,
 ): Promise<void> {
   let cursor = initial.after;
   let closed = false;
+  let lastSent: TerminalConsoleFrame | undefined;
+  let acknowledgedVersion = -1;
+  let sentAt = 0;
+  let pendingFrame: TerminalConsoleFrame | undefined;
   const abort = new AbortController();
   socket.once("close", () => {
     closed = true;
@@ -740,7 +811,9 @@ async function streamSession(
   });
   socket.on("message", (raw) => {
     try {
-      streamAckSchema.parse(JSON.parse(rawDataText(raw)) as unknown);
+      const ack = streamAckSchema.parse(JSON.parse(rawDataText(raw)) as unknown);
+      if (ack.screenVersion === lastSent?.screenVersion && ack.screenVersion > acknowledgedVersion)
+        acknowledgedVersion = ack.screenVersion;
     } catch {
       sendSocket(socket, {
         error: { code: "INVALID_REQUEST", message: "Malformed stream acknowledgement" },
@@ -749,124 +822,228 @@ async function streamSession(
       socket.close(1008, "malformed acknowledgement");
     }
   });
-
+  type PendingEvents = {
+    promise: Promise<void>;
+    page?: EventPage;
+    error?: unknown;
+    startedAt: number;
+    settled: boolean;
+  };
+  let eventRead: PendingEvents | undefined;
+  let eventGap: Readonly<Record<string, unknown>> | undefined;
+  let retryEvents = true;
+  let drainEvents = false;
   try {
-    const first = await readSyncBundle(gateway, sessionId, initial.generation, cursor);
-    cursor = first.cursor;
-    const priorScreenVersion = initial.afterScreenVersion;
-    let screenVersion = first.screen.screenVersion;
-    let drainEvents = first.truncated;
-    sendSocket(socket, {
-      ...first,
-      actor,
-      liveGap:
-        priorScreenVersion === undefined || priorScreenVersion === first.screen.screenVersion
-          ? undefined
-          : {
-              fromScreenVersion: priorScreenVersion,
-              reason: "full_screen_resync",
-              toScreenVersion: first.screen.screenVersion,
-            },
-      type: "sync",
-    });
-
+    const compatibility = await runtimeCompatibilityFor(gateway, sessionId);
+    const capabilities = compatibility.status === "legacy" ? undefined : compatibility.capabilities;
+    if (compatibility.status === "incompatible")
+      throw new RuntimeError("INVALID_REQUEST", "Incompatible Runtime protocol");
+    const composite =
+      capabilities?.features.includes("console.observe.v1") === true &&
+      gateway.observeConsole !== undefined;
+    const styled =
+      capabilities?.features.includes("screen.frame.v1") === true &&
+      gateway.getConsoleFrame !== undefined;
+    let screenVersion: number | undefined;
+    let first = true;
     while (!closed) {
-      const nextScreen = drainEvents
-        ? await gateway.getScreen(sessionId, initial.generation)
-        : (
-            await gateway.waitForScreen(
-              {
-                condition: { afterVersion: screenVersion, type: "version" },
-                generation: initial.generation,
-                sessionId,
-                timeoutMilliseconds: STREAM_WAIT_MS,
-              },
-              abort.signal,
-            )
-          ).snapshot;
+      const iteration = performance.now();
+      let observation: {
+        session: Session;
+        interaction: InteractionState;
+        screen?: TerminalScreenSnapshot;
+        screenVersion: number;
+      };
+      if (composite)
+        observation = await gateway.observeConsole!({
+          sessionId,
+          generation: initial.generation,
+          ...(screenVersion === undefined ? {} : { afterScreenVersion: screenVersion }),
+        });
+      else {
+        const [session, interaction, screen] = await Promise.all([
+          gateway.getSession(sessionId),
+          gateway.getInteractionState(sessionId, initial.generation),
+          styled
+            ? gateway.getConsoleFrame!(sessionId, initial.generation)
+            : gateway.getScreen(sessionId, initial.generation),
+        ]);
+        observation = { session, interaction, screen, screenVersion: screen.screenVersion };
+      }
       if (closed) return;
-      const events = await gateway.queryEvents(
-        sessionId,
-        initial.generation,
-        cursor,
-        STREAM_EVENT_LIMIT,
-      );
-      cursor = eventCursor(events, cursor);
-      const interaction = await gateway.getInteractionState(sessionId, initial.generation);
-      const session = await gateway.getSession(sessionId);
-      screenVersion = nextScreen.screenVersion;
-      drainEvents = events.truncated;
+      if (
+        !eventRead &&
+        (retryEvents || drainEvents || observation.session.eventSequence > cursor)
+      ) {
+        const state: PendingEvents = {
+          promise: Promise.resolve(),
+          startedAt: Date.now(),
+          settled: false,
+        };
+        state.promise = gateway
+          .queryEvents(sessionId, initial.generation, cursor, STREAM_EVENT_LIMIT, abort.signal)
+          .then(
+            (page) => {
+              state.page = page;
+            },
+            (error: unknown) => {
+              state.error = error;
+            },
+          )
+          .finally(() => {
+            state.settled = true;
+          });
+        eventRead = state;
+        retryEvents = false;
+      }
+      if (eventRead && !eventRead.settled)
+        await Promise.race([
+          eventRead.promise,
+          new Promise<void>((resolve) => setTimeout(resolve, 25)),
+        ]);
+      let events: EventPage["events"] = [];
+      let partial = eventRead !== undefined && !eventRead.settled;
+      let persistenceLagMilliseconds = partial && eventRead ? Date.now() - eventRead.startedAt : 0;
+      if (eventRead?.settled) {
+        if (eventRead.page) {
+          events = eventRead.page.events;
+          cursor = eventCursor(eventRead.page, cursor);
+          drainEvents = eventRead.page.truncated;
+          eventGap = eventRead.page.retention?.gap
+            ? { reason: "retention_gap", ...eventRead.page.retention }
+            : eventGap;
+        } else {
+          partial = true;
+          persistenceLagMilliseconds = Date.now() - eventRead.startedAt;
+          retryEvents = true;
+          if (
+            eventRead.error instanceof RuntimeError &&
+            eventRead.error.code === "RESYNC_REQUIRED"
+          ) {
+            eventGap = { fromCursor: cursor, reason: "retention_gap" };
+            cursor = 0;
+          }
+        }
+        eventRead = undefined;
+      }
+      screenVersion = observation.screenVersion;
+      let screen = observation.screen;
+      const observedFrame =
+        screen && "format" in screen && screen.format === "cells-v1"
+          ? (screen as TerminalConsoleFrame)
+          : undefined;
+      if (observedFrame) pendingFrame = observedFrame;
+      const awaitingAck = lastSent !== undefined && acknowledgedVersion !== lastSent.screenVersion;
+      if (awaitingAck && Date.now() - sentAt >= 5000) {
+        sendSocket(socket, { type: "resync_required", reason: "screen_ack_timeout" });
+        socket.close(1013, "screen acknowledgement timed out");
+        return;
+      }
+      const frame = awaitingAck ? undefined : pendingFrame;
+      if (styled) screen = frame;
+      const delta =
+        frame && lastSent && acknowledgedVersion === lastSent.screenVersion
+          ? screenDelta(lastSent, frame)
+          : undefined;
+      // Use a delta only when it is smaller than the bounded full frame.
+      const useDelta = delta && JSON.stringify(delta).length < JSON.stringify(frame).length;
       sendSocket(socket, {
+        observationVersion: 1,
+        atomic: false,
+        generation: initial.generation,
+        executionId: observation.session.activeExecutionId ?? null,
+        screenVersion,
+        durableEventCursor: cursor,
+        partial,
+        persistenceLagMilliseconds,
         cursor,
-        events: events.events,
-        interaction,
-        screen: nextScreen,
-        session,
-        truncated: events.truncated,
-        type: "update",
+        events,
+        interaction: observation.interaction,
+        session: observation.session,
+        ...(useDelta ? { screenDelta: delta } : screen ? { screen } : {}),
+        ...(eventGap ? { eventGap } : {}),
+        ...(first
+          ? {
+              actor,
+              liveGap:
+                initial.afterScreenVersion !== undefined &&
+                initial.afterScreenVersion !== screenVersion
+                  ? {
+                      reason: "full_screen_resync",
+                      fromScreenVersion: initial.afterScreenVersion,
+                      toScreenVersion: screenVersion,
+                    }
+                  : undefined,
+            }
+          : {}),
+        truncated: drainEvents,
+        type: first ? "sync" : "update",
       });
-      if (drainEvents) continue;
-      if (session.status === "BROKEN" || session.status === "CLOSED") {
+      if (frame) {
+        lastSent = frame;
+        sentAt = Date.now();
+        pendingFrame = undefined;
+      }
+      eventGap = undefined;
+      first = false;
+      if (observation.session.status === "BROKEN" || observation.session.status === "CLOSED") {
         socket.close(1000, "session ended");
         return;
       }
+      const remaining = Math.max(0, 1000 / maxFps - (performance.now() - iteration));
+      if (remaining > 0) await new Promise<void>((resolve) => setTimeout(resolve, remaining));
+      if (!drainEvents && !closed)
+        await gateway.waitForScreen(
+          {
+            condition: { afterVersion: screenVersion, type: "version" },
+            generation: initial.generation,
+            sessionId,
+            timeoutMilliseconds: STREAM_WAIT_MS,
+          },
+          abort.signal,
+        );
     }
   } catch (error) {
     if (closed || abort.signal.aborted) return;
     const envelope = errorEnvelope(error, `ws_${randomUUID()}`);
     const resync = envelope.error.code === "RESYNC_REQUIRED";
-    sendSocket(socket, {
-      error: envelope.error,
-      type: resync ? "resync_required" : "error",
-    });
+    sendSocket(socket, { error: envelope.error, type: resync ? "resync_required" : "error" });
     socket.close(resync ? 1012 : 1011, resync ? "resync required" : "stream failed");
   }
 }
 
-async function readSyncBundle(
+async function discoverConsoleSessions(
   gateway: RuntimeGateway,
-  sessionId: string,
-  generation: number,
-  after: number,
-): Promise<{
-  readonly cursor: number;
-  readonly eventGap?: Readonly<Record<string, unknown>>;
-  readonly events: EventPage["events"];
-  readonly interaction: InteractionState;
-  readonly screen: Awaited<ReturnType<RuntimeGateway["getScreen"]>>;
-  readonly session: Session;
-  readonly truncated: boolean;
-}> {
-  const [session, interaction, screen] = await Promise.all([
-    gateway.getSession(sessionId),
-    gateway.getInteractionState(sessionId, generation),
-    gateway.getScreen(sessionId, generation),
-  ]);
-  let events: EventPage;
-  let eventCursorBase = after;
-  let eventGap: Readonly<Record<string, unknown>> | undefined;
-  try {
-    events = await gateway.queryEvents(sessionId, generation, after, STREAM_EVENT_LIMIT);
-  } catch (error) {
-    if (!(error instanceof RuntimeError) || error.code !== "RESYNC_REQUIRED") throw error;
-    eventGap = { fromCursor: after, reason: error.message, ...error.details };
-    eventCursorBase = 0;
-    events = await gateway.queryEvents(sessionId, generation, 0, STREAM_EVENT_LIMIT);
+  request: { cursor?: string | undefined; limit?: number | undefined } = {},
+  knownCompatibility?: RuntimeCompatibility,
+) {
+  const compatibility = knownCompatibility ?? (await runtimeCompatibilityFor(gateway));
+  const capabilities = compatibility.status === "legacy" ? undefined : compatibility.capabilities;
+  if (gateway.listSessionsV2 && capabilities?.features.includes("session.list.v2")) {
+    const page = await gateway.listSessionsV2(request);
+    return {
+      ...page,
+      sessions: page.items
+        .map((item) => ({
+          ...item.session,
+          liveAvailability: item.liveAvailability,
+          durableStatus: item.durableStatus,
+        }))
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)),
+    };
   }
   return {
-    cursor: eventCursor(events, eventCursorBase),
-    ...(eventGap === undefined ? {} : { eventGap }),
-    events: events.events,
-    interaction,
-    screen,
-    session,
-    truncated: events.truncated,
+    sessions: await gateway.listSessions(),
+    partial: false,
+    unavailableOwners: [] as readonly string[],
+    nextCursor: null,
   };
 }
 
 function sendSocket(socket: WebSocket, value: unknown): void {
   if (socket.readyState !== socket.OPEN) return;
-  if (socket.bufferedAmount > MAX_WS_BUFFERED_BYTES) {
+  const encoded = JSON.stringify(value);
+  if (socket.bufferedAmount + Buffer.byteLength(encoded) > MAX_WS_BUFFERED_BYTES) {
     socket.send(
       JSON.stringify({
         reason: "slow_consumer",
@@ -876,7 +1053,7 @@ function sendSocket(socket: WebSocket, value: unknown): void {
     socket.close(1013, "slow consumer");
     return;
   }
-  socket.send(JSON.stringify(value));
+  socket.send(encoded);
 }
 
 function eventCursor(page: EventPage, previous: number): number {
@@ -1482,10 +1659,13 @@ function allowedNextActions(code: string): readonly string[] {
   }
 }
 
-async function runtimeCompatibilityFor(gateway: RuntimeGateway): Promise<RuntimeCompatibility> {
+async function runtimeCompatibilityFor(
+  gateway: RuntimeGateway,
+  sessionId?: string,
+): Promise<RuntimeCompatibility> {
   if (gateway.getRuntimeCapabilities === undefined) return { status: "legacy" };
   try {
-    const capabilities = await gateway.getRuntimeCapabilities({});
+    const capabilities = await gateway.getRuntimeCapabilities(sessionId ? { sessionId } : {});
     return {
       capabilities,
       status:

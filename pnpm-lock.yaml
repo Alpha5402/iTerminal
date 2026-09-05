@@ -74,9 +74,15 @@ importers:
       '@iterminal/executor-pty':
         specifier: workspace:*
         version: link:../../packages/executor-pty
+      '@iterminal/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
       '@iterminal/runtime-memory':
         specifier: workspace:*
         version: link:../../packages/runtime-memory
+      '@iterminal/runtime-rpc':
+        specifier: workspace:*
+        version: link:../../packages/runtime-rpc
 
   apps/console:
     dependencies:

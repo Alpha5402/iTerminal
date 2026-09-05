@@ -23,6 +23,7 @@
     "apps/**/*.tsx",
     "eslint.config.js",
     "packages/**/*.ts",
-    "spikes/**/*.ts"
+    "spikes/**/*.ts",
+    "scripts/**/*.ts"
   ]
 }

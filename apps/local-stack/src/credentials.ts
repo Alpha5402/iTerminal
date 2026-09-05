@@ -30,6 +30,9 @@ const MCP_OPERATIONS = [
   "interaction.get",
   "runtime.capabilities",
   "screen.cells",
+  "screen.frame",
+  "console.observe",
+  "screen.history",
   "screen.diff",
   "screen.get",
   "screen.region",
@@ -41,6 +44,7 @@ const MCP_OPERATIONS = [
   "session.fork",
   "session.get",
   "session.list",
+  "session.list.v2",
   "terminal.resize",
   "terminal.state.get",
 ] as const satisfies readonly RuntimeOperation[];
@@ -48,6 +52,7 @@ const MCP_OPERATIONS = [
 const CONSOLE_OPERATIONS = [
   "action.lookup",
   "approval.decide",
+  "approval.pending.list",
   "approval.get",
   "approval.list",
   "control.send",
@@ -63,6 +68,9 @@ const CONSOLE_OPERATIONS = [
   "interaction.policy.set",
   "runtime.capabilities",
   "screen.cells",
+  "screen.frame",
+  "console.observe",
+  "screen.history",
   "screen.diff",
   "screen.get",
   "screen.region",
@@ -77,12 +85,15 @@ const CONSOLE_OPERATIONS = [
   "session.fork",
   "session.get",
   "session.list",
+  "session.list.v2",
   "terminal.resize",
   "terminal.state.get",
 ] as const satisfies readonly RuntimeOperation[];
 
 export interface PreparedLocalCredentials {
   readonly consoleGrant: string;
+  readonly consoleCredentialPath: string;
+  readonly expiresAt: number;
   readonly mcpConfigPath: string;
   readonly rpcAudience: string;
   readonly rpcSecret: Uint8Array;
@@ -102,7 +113,14 @@ export async function prepareLocalCredentials(options: {
   readonly repositoryRoot: string;
   readonly runtimeSocketPath: string;
   readonly stateRoot: string;
+  readonly agentName?: string;
+  readonly grantTtlSeconds?: number;
 }): Promise<PreparedLocalCredentials> {
+  const name = options.agentName ?? "local";
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}$/.test(name))
+    throw new Error("Agent name must be 1–48 letters, digits, underscores or hyphens");
+  const ttl = options.grantTtlSeconds ?? LOCAL_GRANT_TTL_SECONDS;
+  const issuedAt = new Date();
   await ensurePrivateDirectory(options.stateRoot);
   const credentialsRoot = join(options.stateRoot, "credentials");
   await ensurePrivateDirectory(credentialsRoot);
@@ -123,9 +141,10 @@ export async function prepareLocalCredentials(options: {
       "--operations",
       CONSOLE_OPERATIONS.join(","),
       "--ttl-seconds",
-      LOCAL_GRANT_TTL_SECONDS.toString(),
+      ttl.toString(),
     ],
     { ITERM_RPC_AUTH_SECRET: secretValue },
+    issuedAt,
   ).token;
   const mcpGrant = issueRuntimeRpcGrant(
     [
@@ -134,19 +153,26 @@ export async function prepareLocalCredentials(options: {
       "--client",
       "mcp-stdio",
       "--id",
-      "agent-local",
+      `agent-${name}`,
       "--principal",
-      "local-agent",
+      name === "local" ? "local-agent" : `local-agent:${name}`,
       "--operations",
       MCP_OPERATIONS.join(","),
       "--ttl-seconds",
-      LOCAL_GRANT_TTL_SECONDS.toString(),
+      ttl.toString(),
     ],
     { ITERM_RPC_AUTH_SECRET: secretValue },
+    issuedAt,
   ).token;
-  const mcpConfigPath = join(options.stateRoot, "mcp.json");
+  const mcpConfigPath = join(options.stateRoot, name === "local" ? "mcp.json" : `mcp-${name}.json`);
+  const mcpCredentialPath = join(credentialsRoot, `mcp-${name}.json`);
+  const consoleCredentialPath = join(credentialsRoot, "console.json");
   await writePrivateFile(
-    mcpConfigPath,
+    consoleCredentialPath,
+    JSON.stringify({ runtimeRpc: { grant: consoleGrant, socketPath: options.runtimeSocketPath } }),
+  );
+  await writePrivateFile(
+    mcpCredentialPath,
     `${JSON.stringify(
       {
         mcpServers: {
@@ -155,8 +181,8 @@ export async function prepareLocalCredentials(options: {
             command: join(options.repositoryRoot, "node_modules/.bin/tsx"),
             env: {
               ITERM_ACTOR_CLIENT: "mcp-stdio",
-              ITERM_ACTOR_ID: "agent-local",
-              ITERM_ACTOR_PRINCIPAL: "local-agent",
+              ITERM_ACTOR_ID: `agent-${name}`,
+              ITERM_ACTOR_PRINCIPAL: name === "local" ? "local-agent" : `local-agent:${name}`,
               ITERM_RPC_GRANT: mcpGrant,
               ITERM_RUNTIME_SOCKET: options.runtimeSocketPath,
             },
@@ -167,12 +193,20 @@ export async function prepareLocalCredentials(options: {
       2,
     )}\n`,
   );
+  const configuration = JSON.parse(await readFile(mcpCredentialPath, "utf8")) as {
+    mcpServers: { iterminal: { env: Record<string, string> } };
+  };
+  delete configuration.mcpServers.iterminal.env.ITERM_RPC_GRANT;
+  configuration.mcpServers.iterminal.env.ITERM_MCP_CONFIG_FILE = mcpCredentialPath;
+  await writePrivateFile(mcpConfigPath, `${JSON.stringify(configuration, null, 2)}\n`);
   const prepared = {
     mcpConfigPath,
     rpcAudience: DEFAULT_RUNTIME_RPC_AUDIENCE,
   } as PreparedLocalCredentials;
   Object.defineProperties(prepared, {
     consoleGrant: { enumerable: false, value: consoleGrant },
+    consoleCredentialPath: { enumerable: false, value: consoleCredentialPath },
+    expiresAt: { enumerable: false, value: (Math.floor(issuedAt.getTime() / 1000) + ttl) * 1000 },
     rpcSecret: { enumerable: false, value: rpcSecret },
   });
   return prepared;
