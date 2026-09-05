@@ -12,6 +12,8 @@ import type {
   ArtifactReadResult,
   ExecutionOutputReadRequest,
   ExecutionOutputReadResult,
+  ExecutionWaitRequest,
+  ExecutionWaitResult,
   ControlRequest,
   BeginSecretInputRequest,
   CreateSessionRequest,
@@ -73,6 +75,8 @@ import {
   artifactReadTransportRequestSchema,
   executionOutputReadResultSchema,
   executionOutputReadTransportRequestSchema,
+  executionWaitV2ResultSchema,
+  executionWaitV2TransportRequestSchema,
   defineRuntimeCapabilities,
   executeTransportRequestSchema,
   inputTransportRequestSchema,
@@ -114,6 +118,7 @@ const DEFAULT_MAX_RPC_CONNECTIONS = 256;
 const DEFAULT_RPC_REQUEST_READ_TIMEOUT_MS = 5_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const WAIT_REQUEST_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+const WAIT_V2_TRANSPORT_SETTLEMENT_MS = 5_000;
 const runtimeErrorCodes = new Set<RuntimeError["code"]>([
   "SESSION_NOT_FOUND",
   "SESSION_NOT_READY",
@@ -254,6 +259,7 @@ const operationSchemas = {
     actor: actorSchema,
   }),
   "execution.wait": z.strictObject({ executionId: z.string().min(1).max(256) }),
+  "execution.wait.v2": executionWaitV2TransportRequestSchema,
   "input.send": inputTransportRequestSchema.extend({
     actor: actorSchema,
   }),
@@ -396,6 +402,10 @@ export interface RuntimeGateway {
   dispatchExecution(executionId: string): Promise<StartedExecutionView>;
   getExecution(executionId: string): Promise<Execution>;
   waitExecution(executionId: string): Promise<Execution>;
+  waitExecutionV2?(
+    request: ExecutionWaitRequest,
+    signal?: AbortSignal,
+  ): Promise<ExecutionWaitResult>;
   sendInput(request: InputRequest): Promise<InputAction>;
   beginSecretInput(request: BeginSecretInputRequest): Promise<SecretInputAction>;
   getSensitiveInput(request: GetSensitiveInputRequest): Promise<SensitiveInput | undefined>;
@@ -435,6 +445,7 @@ export class LocalRuntimeGateway implements RuntimeGateway {
         "action.lookup.v1",
         ...(options.artifactRead === true ? (["artifact.read.v1"] as const) : []),
         ...(options.executionOutputRead === true ? (["execution.output.read.v1"] as const) : []),
+        "execution.wait.v2",
         "runtime.capabilities.v1",
       ],
     });
@@ -544,6 +555,13 @@ export class LocalRuntimeGateway implements RuntimeGateway {
 
   public waitExecution(executionId: string): Promise<Execution> {
     return this.runtime.waitExecution(executionId);
+  }
+
+  public waitExecutionV2(
+    request: ExecutionWaitRequest,
+    signal?: AbortSignal,
+  ): Promise<ExecutionWaitResult> {
+    return this.runtime.waitExecutionV2(request, signal);
   }
 
   public sendInput(request: InputRequest): Promise<InputAction> {
@@ -932,6 +950,21 @@ export class UnixRuntimeClient implements RuntimeGateway {
 
   public waitExecution(executionId: string): Promise<Execution> {
     return this.#request("execution.wait", { executionId }, WAIT_REQUEST_TIMEOUT_MS);
+  }
+
+  public async waitExecutionV2(
+    request: ExecutionWaitRequest,
+    signal?: AbortSignal,
+  ): Promise<ExecutionWaitResult> {
+    const parsed = executionWaitV2TransportRequestSchema.parse(request);
+    return executionWaitV2ResultSchema.parse(
+      await this.#request(
+        "execution.wait.v2",
+        parsed,
+        parsed.waitMs + WAIT_V2_TRANSPORT_SETTLEMENT_MS,
+        signal,
+      ),
+    );
   }
 
   public sendInput(request: InputRequest): Promise<InputAction> {
@@ -1439,6 +1472,16 @@ async function dispatch(
     case "execution.wait": {
       const request = operationSchemas[operation].parse(input);
       return gateway.waitExecution(request.executionId);
+    }
+    case "execution.wait.v2": {
+      const request = operationSchemas[operation].parse(input);
+      if (gateway.waitExecutionV2 === undefined) {
+        throw new RuntimeError(
+          "INVALID_REQUEST",
+          "Bounded Execution wait is not supported by this service",
+        );
+      }
+      return executionWaitV2ResultSchema.parse(await gateway.waitExecutionV2(request, signal));
     }
     case "input.send": {
       const request = operationSchemas[operation].parse(input);

@@ -11,6 +11,7 @@ import {
   artifactReadTransportRequestSchema,
   executeTransportRequestSchema,
   executionOutputReadTransportRequestSchema,
+  executionWaitV2TransportRequestSchema,
   inputTransportRequestSchema,
   runtimeCapabilitiesRequestSchema,
 } from "@iterminal/protocol";
@@ -372,11 +373,32 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
     {
       annotations: { readOnlyHint: true, openWorldHint: false },
       description:
-        "Wait until an Execution becomes COMPLETED, INTERRUPTED, FAILED, or UNKNOWN. This does not replay or alter it.",
+        "Legacy wait until an Execution becomes terminal. Prefer execution_wait_v2 for a bounded, cancellable observation. This does not replay or alter it.",
       inputSchema: z.strictObject({ executionId }),
       title: "Wait for terminal Execution",
     },
     async ({ executionId: id }) => call(() => gateway.waitExecution(id)),
+  );
+
+  server.registerTool(
+    "execution_wait_v2",
+    {
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      description:
+        "Wait at most waitMs for an exact Execution to become terminal. Defaults to 10 seconds; 0 returns an immediate snapshot; maximum is 30 seconds. Timeout returns completed=false with the current state. completed=true means terminal, not successful. Cancellation stops only this observation and never sends terminal input or control.",
+      inputSchema: executionWaitV2TransportRequestSchema,
+      title: "Wait bounded time for terminal Execution",
+    },
+    async (input, extra) =>
+      call(() => {
+        if (gateway.waitExecutionV2 === undefined) {
+          throw new RuntimeError(
+            "INVALID_REQUEST",
+            "Connected Runtime does not support bounded Execution wait",
+          );
+        }
+        return gateway.waitExecutionV2(input, extra.mcpReq.signal);
+      }),
   );
 
   server.registerTool(

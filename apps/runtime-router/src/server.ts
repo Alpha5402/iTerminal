@@ -10,6 +10,8 @@ import {
   type ArtifactReadResult,
   type ExecutionOutputReadRequest,
   type ExecutionOutputReadResult,
+  type ExecutionWaitRequest,
+  type ExecutionWaitResult,
   type ControlRequest,
   type BeginSecretInputRequest,
   type CreateSessionRequest,
@@ -115,6 +117,7 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
         "action.lookup.v1",
         "artifact.read.v1",
         "execution.output.read.v1",
+        "execution.wait.v2",
         "runtime.capabilities.v1",
         "runtime.owner-capabilities.v1",
       ],
@@ -420,6 +423,21 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
     return this.#withExecution(executionId, "execution.wait", (client) =>
       client.waitExecution(executionId),
     );
+  }
+
+  public waitExecutionV2(
+    request: ExecutionWaitRequest,
+    signal?: AbortSignal,
+  ): Promise<ExecutionWaitResult> {
+    return this.#withExecution(request.executionId, "execution.wait.v2", (client) => {
+      if (client.waitExecutionV2 === undefined) {
+        throw new RuntimeError(
+          "INVALID_REQUEST",
+          "Target Runtime owner does not support bounded Execution wait",
+        );
+      }
+      return client.waitExecutionV2(request, signal);
+    });
   }
 
   public sendInput(request: InputRequest): Promise<InputAction> {

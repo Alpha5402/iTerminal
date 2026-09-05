@@ -52,6 +52,7 @@ describe("M4 stdio MCP bridge", () => {
       "execution_get",
       "execution_output_read",
       "execution_wait",
+      "execution_wait_v2",
       "input",
       "interaction_get",
       "runtime_capabilities",
@@ -81,6 +82,7 @@ describe("M4 stdio MCP bridge", () => {
         "action.execute.v1",
         "action.input.v1",
         "action.lookup.v1",
+        "execution.wait.v2",
         "runtime.capabilities.v1",
       ],
       protocolVersion: "1",
@@ -411,6 +413,94 @@ describe("M4 stdio MCP bridge", () => {
     });
   }, 40_000);
 
+  it("bounds and cancels a real PTY wait without interrupting the Execution", async () => {
+    const client = await connectClient("b03-bounded-wait-client");
+    const session = await callTool<SessionResult>(client, "session_create", {
+      idempotencyKey: "b03-session-create",
+      shell: "zsh",
+      workspaceRoot,
+    });
+    const short = await callTool<StartedResult>(client, "execute", {
+      command: "sleep 0.1",
+      generation: session.generation,
+      idempotencyKey: "b03-default-wait",
+      sessionId: session.id,
+    });
+    await expect(
+      callTool<ExecutionWaitV2Result>(client, "execution_wait_v2", {
+        executionId: short.execution.id,
+      }),
+    ).resolves.toEqual({
+      completed: true,
+      executionId: short.execution.id,
+      executionState: "COMPLETED",
+    });
+
+    const started = await callTool<StartedResult>(client, "execute", {
+      command:
+        "i=0; while [ $i -lt 20 ]; do printf 'b03-%02d\\n' $i; i=$((i+1)); sleep 0.05; done; sleep 2",
+      generation: session.generation,
+      idempotencyKey: "b03-running-output",
+      sessionId: session.id,
+    });
+    await waitUntilRunning(client, started.execution.id);
+
+    await expect(
+      callTool<ExecutionWaitV2Result>(client, "execution_wait_v2", {
+        executionId: started.execution.id,
+        waitMs: 0,
+      }),
+    ).resolves.toEqual({
+      completed: false,
+      executionId: started.execution.id,
+      executionState: "RUNNING",
+    });
+    await expect(
+      callTool<ExecutionWaitV2Result>(client, "execution_wait_v2", {
+        executionId: started.execution.id,
+        waitMs: 100,
+      }),
+    ).resolves.toEqual({
+      completed: false,
+      executionId: started.execution.id,
+      executionState: "RUNNING",
+    });
+
+    const controller = new AbortController();
+    const cancelled = client.callTool(
+      {
+        arguments: { executionId: started.execution.id, waitMs: 30_000 },
+        name: "execution_wait_v2",
+      },
+      { signal: controller.signal, timeout: 35_000 },
+    );
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+    const cancellation = cancelled.catch((error: unknown) => error);
+    controller.abort();
+    const cancellationError: unknown = await cancellation;
+    expect(cancellationError).toBeInstanceOf(Error);
+    if (!(cancellationError instanceof Error)) throw new Error("Expected MCP cancellation error");
+    expect(cancellationError.message).toContain("AbortError");
+
+    await expect(
+      callTool<ExecutionResult>(client, "execution_get", { executionId: started.execution.id }),
+    ).resolves.toMatchObject({ status: "RUNNING" });
+    await expect(
+      callTool<ExecutionWaitV2Result>(client, "execution_wait_v2", {
+        executionId: started.execution.id,
+        waitMs: 30_000,
+      }),
+    ).resolves.toEqual({
+      completed: true,
+      executionId: started.execution.id,
+      executionState: "COMPLETED",
+    });
+    await callTool(client, "session_close", {
+      generation: session.generation,
+      sessionId: session.id,
+    });
+  }, 20_000);
+
   it("marks UTF-8 boundary splits instead of replacing or dropping text", () => {
     const completeBytes = Buffer.from("中文🙂", "utf8");
     const complete = artifactMcpView({
@@ -531,6 +621,12 @@ type SessionResult = {
 type StartedResult = {
   readonly action: { readonly id: string };
   readonly execution: { readonly id: string };
+};
+
+type ExecutionWaitV2Result = {
+  readonly completed: boolean;
+  readonly executionId: string;
+  readonly executionState: string;
 };
 
 type ActionLookupResult = {

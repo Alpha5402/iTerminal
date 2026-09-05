@@ -163,6 +163,8 @@ export const MAX_ARTIFACT_READ_BYTES = 64 * 1024;
 export const DEFAULT_EXECUTION_OUTPUT_READ_BYTES = 8 * 1024;
 export const MAX_EXECUTION_OUTPUT_READ_BYTES = 64 * 1024;
 export const MAX_EXECUTION_OUTPUT_RESPONSE_BYTES = 96 * 1024;
+export const DEFAULT_EXECUTION_WAIT_MILLISECONDS = 10_000;
+export const MAX_EXECUTION_WAIT_MILLISECONDS = 30_000;
 
 export interface ArtifactReadRequest {
   readonly artifactId: string;
@@ -244,6 +246,22 @@ export interface ExecutionOutputReadResult {
   }>;
   readonly sessionId: string;
   readonly stream: "pty";
+}
+
+export interface ExecutionWaitRequest {
+  readonly executionId: string;
+  readonly waitMs?: number;
+}
+
+export interface ExecutionWaitResult {
+  readonly completed: boolean;
+  readonly executionId: string;
+  readonly executionState: Execution["status"];
+}
+
+export interface ExecutionWaitScheduler {
+  clearTimeout(handle: unknown): void;
+  setTimeout(callback: () => void, milliseconds: number): unknown;
 }
 
 export interface ActionLookupRequest {
@@ -593,6 +611,7 @@ export interface RuntimeServiceOptions {
   readonly checkpointEnvironmentKeys?: readonly string[];
   readonly durability?: RuntimeDurability;
   readonly executionDispatch?: "external" | "immediate";
+  readonly executionWaitScheduler?: ExecutionWaitScheduler;
   readonly hooks?: Readonly<{
     readonly afterControlWrite?: (action: ControlAction) => void;
     readonly afterExecutionWrite?: (execution: Execution) => void;

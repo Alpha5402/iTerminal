@@ -10,6 +10,7 @@ export const RUNTIME_FEATURES = Object.freeze([
   "action.lookup.v1",
   "artifact.read.v1",
   "execution.output.read.v1",
+  "execution.wait.v2",
   "runtime.capabilities.v1",
   "runtime.owner-capabilities.v1",
 ] as const);
@@ -154,6 +155,27 @@ const executionStatusTransportSchema = z.enum([
   "INTERRUPTED",
   "UNKNOWN",
 ]);
+
+export const executionWaitV2TransportRequestSchema = z.strictObject({
+  executionId: executionIdTransportSchema,
+  waitMs: z.number().int().min(0).max(30_000).default(10_000),
+});
+
+export const executionWaitV2ResultSchema = z
+  .strictObject({
+    completed: z.boolean(),
+    executionId: executionIdTransportSchema,
+    executionState: executionStatusTransportSchema,
+  })
+  .superRefine((result, context) => {
+    const terminal = result.executionState !== "DISPATCHING" && result.executionState !== "RUNNING";
+    if (result.completed !== terminal) {
+      context.addIssue({
+        code: "custom",
+        message: "completed must describe Execution terminality, not success",
+      });
+    }
+  });
 
 const executionOutputCursorSchema = z
   .string()
@@ -343,6 +365,10 @@ export type ExecutionOutputReadTransportRequest = z.output<
   typeof executionOutputReadTransportRequestSchema
 >;
 export type ExecutionOutputReadResult = z.output<typeof executionOutputReadResultSchema>;
+export type ExecutionWaitV2TransportRequest = z.output<
+  typeof executionWaitV2TransportRequestSchema
+>;
+export type ExecutionWaitV2Result = z.output<typeof executionWaitV2ResultSchema>;
 export type RuntimeCapabilitiesRequest = z.output<typeof runtimeCapabilitiesRequestSchema>;
 
 export function defineRuntimeCapabilities(input: {

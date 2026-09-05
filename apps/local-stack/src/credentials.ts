@@ -23,6 +23,7 @@ const MCP_OPERATIONS = [
   "execution.output.read",
   "execution.start",
   "execution.wait",
+  "execution.wait.v2",
   "input.send",
   "interaction.get",
   "runtime.capabilities",
