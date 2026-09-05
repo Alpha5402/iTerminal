@@ -48,7 +48,7 @@
 | [A03](01-correctness.md#a03)         | 修复请求 schema 漂移              | 无                           | Luna | 已验收 |
 | [A04](01-correctness.md#a04)         | HTTP 与 Application 幂等顺序一致  | 无                           | Sol  | 已验收 |
 | [A05](01-correctness.md#a05)         | 协议与运行能力握手                | A03                          | Sol  | 已验收 |
-| [A06](01-correctness.md#a06)         | 按请求身份查询已接受 Action       | A05                          | Sol  | 未开始 |
+| [A06](01-correctness.md#a06)         | 按请求身份查询已接受 Action       | A05                          | Sol  | 进行中 |
 | [B01](02-observation-mcp.md#b01)     | 有权限、有界 Artifact 读取        | A05                          | Sol  | 未开始 |
 | [B02](02-observation-mcp.md#b02)     | 连续输出游标与分页                | B01                          | Sol  | 未开始 |
 | [B03](02-observation-mcp.md#b03)     | 有界、可取消的执行等待            | A05                          | Sol  | 未开始 |
