@@ -305,6 +305,22 @@ function App(): React.JSX.Element {
   const [foregroundDrafts, setForegroundDrafts] = useState<Record<string, LocalDraft>>({});
   const [rawInput, setRawInput] = useState(false);
   const [inputModeNotice, setInputModeNotice] = useState<string>();
+  const [controlOutcome, setControlOutcome] = useState<{
+    readonly executionId: string;
+    readonly generation: number;
+    readonly id: string;
+    readonly sessionId: string;
+    readonly status: string;
+  }>();
+  const [localInputUncertainty, setLocalInputUncertainty] = useState<
+    | {
+        readonly executionId: string;
+        readonly generation: number;
+        readonly reason: "untracked_input" | "delivery";
+        readonly sessionId: string;
+      }
+    | undefined
+  >();
   const rawInputState = useRef(false);
   const rawInputTarget = useRef<RawInputTarget | undefined>(undefined);
   const pendingRawResetTarget = useRef<RawInputTarget | undefined>(undefined);
@@ -353,6 +369,7 @@ function App(): React.JSX.Element {
   const latestSession = useRef<Session | undefined>(undefined);
   const latestInteraction = useRef<InteractionState | undefined>(undefined);
   const latestScreen = useRef<ScreenSnapshot | undefined>(undefined);
+  const controlOutcomeScope = useRef<string | undefined>(undefined);
   const renderedCopyScreen = useRef<ScreenSnapshot | undefined>(undefined);
   const columnSelection = useRef(false);
   const guardReleaseTimer = useRef<number | undefined>(undefined);
@@ -415,6 +432,13 @@ function App(): React.JSX.Element {
     }
     return pending !== undefined;
   }, []);
+
+  useEffect(() => {
+    const scope = session === undefined ? undefined : `${session.id}:${session.generation}`;
+    if (controlOutcomeScope.current !== undefined && controlOutcomeScope.current !== scope)
+      setControlOutcome(undefined);
+    controlOutcomeScope.current = scope;
+  }, [session?.generation, session?.id]);
 
   useEffect(() => {
     if (!isSubmissionIntentPending(submissionIntent)) return;
@@ -1109,6 +1133,12 @@ function App(): React.JSX.Element {
               },
               method: "POST",
             });
+            setLocalInputUncertainty({
+              executionId: batch.target.executionId,
+              generation: batch.target.generation,
+              reason: "untracked_input",
+              sessionId: batch.target.sessionId,
+            });
           } finally {
             if (guardPrepared) scheduleGuardRelease();
           }
@@ -1133,6 +1163,12 @@ function App(): React.JSX.Element {
           targetExecutionId: requiredExecution(currentSession),
         },
         method: "POST",
+      });
+      setLocalInputUncertainty({
+        executionId: requiredExecution(currentSession),
+        generation: currentSession.generation,
+        reason: "untracked_input",
+        sessionId: currentSession.id,
       });
       setSensitiveInput(
         await api<SensitiveInput>(
@@ -1337,9 +1373,14 @@ function App(): React.JSX.Element {
     return current;
   };
 
-  const sendControl = async (control: RawControl, exactTarget?: RawInputTarget): Promise<void> => {
+  const sendControl = async (
+    control: RawControl,
+    exactTarget?: RawInputTarget,
+    requireRawOwnership = true,
+  ): Promise<void> => {
     try {
       if (
+        requireRawOwnership &&
         exactTarget !== undefined &&
         !rawInputBatchCanSend({
           activeTarget: rawInputTargetFromSession(latestSession.current),
@@ -1356,16 +1397,33 @@ function App(): React.JSX.Element {
       }
       const target = exactTarget ?? rawInputTargetFromSession(requiredRunningSession());
       if (target === undefined) throw new Error("No active Execution");
-      await api(`/api/sessions/${encodeURIComponent(target.sessionId)}/control`, {
-        body: {
-          bypassGuard: false,
-          delivery: { control, mode: "TTY_CONTROL" },
-          generation: target.generation,
-          idempotencyKey: crypto.randomUUID(),
-          targetExecutionId: target.executionId,
+      const result = await api<{ readonly id: string; readonly status: string }>(
+        `/api/sessions/${encodeURIComponent(target.sessionId)}/control`,
+        {
+          body: {
+            bypassGuard: false,
+            delivery: { control, mode: "TTY_CONTROL" },
+            generation: target.generation,
+            idempotencyKey: crypto.randomUUID(),
+            targetExecutionId: target.executionId,
+          },
+          method: "POST",
         },
-        method: "POST",
+      );
+      setControlOutcome({
+        executionId: target.executionId,
+        generation: target.generation,
+        id: result.id,
+        sessionId: target.sessionId,
+        status: result.status,
       });
+      setLocalInputUncertainty({
+        executionId: target.executionId,
+        generation: target.generation,
+        reason: "untracked_input",
+        sessionId: target.sessionId,
+      });
+      setInputModeNotice(`Control Action ${result.id} returned ${result.status}.`);
     } catch (reason) {
       setError(normalizeClientError(reason));
     }
@@ -1434,6 +1492,7 @@ function App(): React.JSX.Element {
       };
     });
     if (identity === undefined) return;
+    setControlOutcome(undefined);
     const { idempotencyKey } = identity;
     try {
       const result = await api<{
@@ -1469,6 +1528,21 @@ function App(): React.JSX.Element {
       isSubmissionIntentPending(submissionIntentRef.current)
     )
       return;
+    const localUncertaintyIsCurrent =
+      localInputUncertainty !== undefined &&
+      session?.id === localInputUncertainty.sessionId &&
+      session.generation === localInputUncertainty.generation &&
+      session.activeExecutionId === localInputUncertainty.executionId;
+    const uncertaintyReason =
+      interaction?.inputContext?.state === "unknown"
+        ? interaction.inputContext.unknownReason
+        : localUncertaintyIsCurrent
+          ? localInputUncertainty.reason
+          : undefined;
+    if (uncertaintyReason !== undefined) {
+      setInputModeNotice(describeInputUncertainty(uncertaintyReason));
+      return;
+    }
     const target = session;
     const scope = foregroundScope;
     const draft = editorValue;
@@ -1480,6 +1554,10 @@ function App(): React.JSX.Element {
         `/api/sessions/${encodeURIComponent(target.id)}/interaction?generation=${target.generation}`,
       );
       const context = observed.inputContext;
+      if (context?.state === "unknown") {
+        setInputModeNotice(describeInputUncertainty(context.unknownReason ?? "delivery"));
+        return;
+      }
       if (context === undefined || context.targetExecutionId !== target.activeExecutionId)
         throw new Error(
           "Foreground input context is unavailable; refresh and check the active program",
@@ -1572,6 +1650,13 @@ function App(): React.JSX.Element {
 
   const settleSubmissionFailure = (identity: SubmissionIntentIdentity, reason: unknown): void => {
     const failure = normalizeClientError(reason);
+    if (failure.code === "DELIVERY_UNKNOWN" && identity.executionId !== undefined)
+      setLocalInputUncertainty({
+        executionId: identity.executionId,
+        generation: identity.generation,
+        reason: "delivery",
+        sessionId: identity.sessionId,
+      });
     transitionSubmissionIntent(
       isDefiniteAdmissionRejection(reason)
         ? {
@@ -1882,12 +1967,13 @@ function App(): React.JSX.Element {
 
   const interruptUnknownInput = (): void => {
     const current = latestSession.current;
+    const target = current === undefined ? undefined : rawInputTargetFromSession(current);
     if (
       session === undefined ||
-      activeRawInputTarget === undefined ||
+      target === undefined ||
       current?.id !== session.id ||
       current.generation !== session.generation ||
-      current.activeExecutionId !== activeRawInputTarget.executionId
+      current.activeExecutionId !== target.executionId
     ) {
       setError({
         allowedNextActions: ["refresh_session", "target_current_execution"],
@@ -1899,7 +1985,7 @@ function App(): React.JSX.Element {
       });
       return;
     }
-    void sendControl("CTRL_C");
+    void sendControl("CTRL_C", target, false);
   };
 
   const toggleInspector = (view: InspectorView): void => {
@@ -1975,6 +2061,16 @@ function App(): React.JSX.Element {
     }
     setSelectedId(candidate.id);
   };
+
+  const localUncertaintyIsCurrent =
+    localInputUncertainty !== undefined &&
+    session?.id === localInputUncertainty.sessionId &&
+    session.generation === localInputUncertainty.generation &&
+    session.activeExecutionId === localInputUncertainty.executionId;
+  const controlOutcomeIsCurrent =
+    controlOutcome !== undefined &&
+    session?.id === controlOutcome.sessionId &&
+    session.generation === controlOutcome.generation;
 
   return (
     <main className="app-shell">
@@ -2152,41 +2248,57 @@ function App(): React.JSX.Element {
                   <span>execution {session.activeExecutionId}</span>
                 )}
               </details>
-              {interaction?.inputContext?.state === "unknown" &&
-                interaction.inputContext.unknownReason !== undefined && (
-                  <section
-                    className="input-uncertainty"
-                    aria-label="Input uncertainty"
-                    role="alert"
-                  >
-                    <span>{describeInputUncertainty(interaction.inputContext.unknownReason)}</span>
-                    {interaction.inputContext.unknownReason === "untracked_input" && (
-                      <div className="input-uncertainty-actions">
-                        <button
-                          disabled={
-                            sensitiveInput?.status === "ACTIVE" || session?.status !== "RUNNING"
-                          }
-                          onClick={() => selectInputMode("raw")}
-                          type="button"
-                        >
-                          Raw keys
-                        </button>
-                        <button onClick={() => toggleInspector("session")} type="button">
-                          View current Execution
-                        </button>
-                        <button
-                          disabled={
-                            session?.status !== "RUNNING" || activeRawInputTarget === undefined
-                          }
-                          onClick={interruptUnknownInput}
-                          type="button"
-                        >
-                          Interrupt (Ctrl-C)
-                        </button>
-                      </div>
+              {(interaction?.inputContext?.state === "unknown"
+                ? interaction.inputContext.unknownReason
+                : localUncertaintyIsCurrent
+                  ? localInputUncertainty.reason
+                  : undefined) !== undefined && (
+                <section className="input-uncertainty" aria-label="Input uncertainty" role="alert">
+                  <span>
+                    {describeInputUncertainty(
+                      interaction?.inputContext?.state === "unknown"
+                        ? (interaction.inputContext.unknownReason ?? "delivery")
+                        : localUncertaintyIsCurrent
+                          ? localInputUncertainty.reason
+                          : "delivery",
                     )}
-                  </section>
-                )}
+                  </span>
+                  {(interaction?.inputContext?.state === "unknown"
+                    ? interaction.inputContext.unknownReason
+                    : localUncertaintyIsCurrent
+                      ? localInputUncertainty.reason
+                      : undefined) === "untracked_input" && (
+                    <div className="input-uncertainty-actions">
+                      <button
+                        disabled={
+                          sensitiveInput?.status === "ACTIVE" || session?.status !== "RUNNING"
+                        }
+                        onClick={() => selectInputMode("raw")}
+                        type="button"
+                      >
+                        Raw keys
+                      </button>
+                      <button onClick={() => toggleInspector("session")} type="button">
+                        View current Execution
+                      </button>
+                      <button
+                        disabled={session?.status !== "RUNNING"}
+                        onClick={interruptUnknownInput}
+                        type="button"
+                      >
+                        Interrupt (Ctrl-C)
+                      </button>
+                    </div>
+                  )}
+                </section>
+              )}
+              {controlOutcomeIsCurrent && (
+                <small className="control-outcome" role="status">
+                  Control Action {controlOutcome.id} returned {controlOutcome.status} for Session{" "}
+                  {controlOutcome.sessionId}, generation {controlOutcome.generation}, Execution{" "}
+                  {controlOutcome.executionId}.
+                </small>
+              )}
               {sensitiveInput?.status === "ACTIVE" && (
                 <button
                   aria-label={
