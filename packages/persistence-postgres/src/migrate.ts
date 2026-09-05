@@ -24,6 +24,7 @@ const migrations = [
   { file: "017_artifact_storage_budget.sql", version: 17 },
   { file: "018_bounded_event_retention.sql", version: 18 },
   { file: "019_normalized_fact_retention.sql", version: 19 },
+  { file: "020_durable_history_tombstones.sql", version: 20 },
 ] as const;
 
 export async function migrateDatabase(pool: Pool): Promise<void> {

@@ -8,6 +8,7 @@ const baselineToolNames = new Set([
   "artifact_read",
   "execution_observe",
   "execution_output_read",
+  "history_lookup",
   "runtime_capabilities",
   "session_create",
   "session_get",

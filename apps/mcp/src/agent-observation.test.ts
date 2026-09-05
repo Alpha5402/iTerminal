@@ -332,6 +332,88 @@ describeDatabase("B04 official MCP compact observation with durable PTY output",
     });
     await rpc.closeSession(session.id, session.generation);
   }, 30_000);
+
+  it("reads terminal durable history through official MCP after a daemon restart", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "iterminal-b06-history-")));
+    roots.push(root);
+    const workspaceRoot = join(root, "workspace");
+    await mkdir(workspaceRoot, { recursive: true });
+    const socketPath = join(root, "runtime.sock");
+    daemon = await startRuntimeDaemon({
+      buildId: "b06-history-reader",
+      databaseUrl: databaseUrl ?? "",
+      ownerId: "owner-b06-history",
+      socketPath,
+    });
+    await daemon.waitUntilReady();
+    const first = await connectClient(socketPath, "b06-history-first");
+    clients.push(first);
+    const capabilities = await callTool<RuntimeCapabilities>(first, "runtime_capabilities", {});
+    expect(capabilities.features).toContain("history.lookup.v1");
+    const session = await callTool<SessionView>(first, "session_create", {
+      idempotencyKey: "b06-history-session",
+      shell: "zsh",
+      workspaceRoot,
+    });
+    const started = await callTool<StartedView>(first, "execute", {
+      command: "printf 'B06-DURABLE-HISTORY\\n'",
+      generation: session.generation,
+      idempotencyKey: "b06-history-execute",
+      sessionId: session.id,
+    });
+    const completed = await callTool<ExecutionObservation>(first, "execution_observe", {
+      executionId: started.execution.id,
+      generation: session.generation,
+      sessionId: session.id,
+      waitMs: 10_000,
+    });
+    expect(completed.state).toMatchObject({ completed: true, executionState: "COMPLETED" });
+    expect(
+      await callTool<HistoryView>(first, "history_lookup", {
+        generation: session.generation,
+        sessionId: session.id,
+        target: { executionId: started.execution.id, type: "execution" },
+      }),
+    ).toMatchObject({ kind: "full", source: "live" });
+
+    await first.close();
+    clients.splice(clients.indexOf(first), 1);
+    await daemon.close();
+    daemon = undefined;
+    daemon = await startRuntimeDaemon({
+      buildId: "b06-history-reader-restarted",
+      databaseUrl: databaseUrl ?? "",
+      ownerId: "owner-b06-history",
+      socketPath,
+    });
+    await daemon.waitUntilReady();
+    const second = await connectClient(socketPath, "b06-history-second");
+    clients.push(second);
+    const recovered = await callTool<HistoryView>(second, "history_lookup", {
+      generation: session.generation,
+      sessionId: session.id,
+      target: { executionId: started.execution.id, type: "execution" },
+    });
+    expect(recovered).toMatchObject({
+      fact: { executionId: started.execution.id, executionStatus: "COMPLETED" },
+      kind: "full",
+      source: "durable",
+    });
+    expect(JSON.stringify(recovered)).not.toContain("B06-DURABLE-HISTORY");
+    expect(
+      await callTool<HistoryView>(second, "history_lookup", {
+        generation: session.generation + 1,
+        sessionId: session.id,
+        target: { executionId: started.execution.id, type: "execution" },
+      }),
+    ).toMatchObject({ kind: "not_found" });
+    const listed = await callTool<readonly Readonly<{ id: string; status: string }>[]>(
+      second,
+      "session_list",
+      {},
+    );
+    expect(listed).not.toContainEqual(expect.objectContaining({ id: session.id, status: "READY" }));
+  }, 30_000);
 });
 
 async function connectClient(socketPath: string, name: string): Promise<Client> {
@@ -450,4 +532,10 @@ interface ExecutionObservation {
     readonly executionState: string;
     readonly persistenceLag: "none" | "possible";
   }>;
+}
+
+interface HistoryView {
+  readonly fact?: Readonly<Record<string, unknown>>;
+  readonly kind: "compacted" | "full" | "not_found" | "unavailable";
+  readonly source?: "durable" | "live";
 }

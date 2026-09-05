@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 
 import type {
-  ActionLookupFound,
   ActionLookupRequest,
   ArtifactReadRequest,
   DurableArtifactReadResult,
+  DurableActionReplay,
   DurableApprovalDecision,
   DurableApprovalMutationResult,
   DurableApprovalRequest,
@@ -16,6 +16,10 @@ import type {
   DurableSessionEvent,
   ExecutionOutputReadRequest,
   ExecutionOutputReadResult,
+  HistoryActionFact,
+  HistoryExecutionFact,
+  HistoryLookupRequest,
+  HistoryLookupResult,
   RuntimeOwnerIdentity,
   RuntimeDurability,
   SessionFence,
@@ -52,7 +56,7 @@ import {
   prepareSessionCreationAdmission,
 } from "./session-creation-retention.js";
 import { PostgresRuntimeRepository } from "./postgres-runtime-repository.js";
-import { assertPersistedActorIdentity, persistActor } from "./actors.js";
+import { actorFromRow, assertPersistedActorIdentity, persistActor } from "./actors.js";
 import {
   actionRateLimitPolicy,
   type ActionRateLimitOptions,
@@ -85,6 +89,32 @@ interface SessionCreationIntentRow {
   readonly owner_registry_epoch: string;
   readonly request_hash: string;
   readonly session_id: string | null;
+}
+
+interface ActionHistoryRow {
+  readonly accepted_at: Date;
+  readonly action_id: string;
+  readonly action_sequence: string;
+  readonly action_status: string;
+  readonly action_type: string;
+  readonly actor_id: string;
+  readonly actor_type: string;
+  readonly capabilities: string[];
+  readonly client: string;
+  readonly compacted_at: Date | null;
+  readonly execution_exit_code: number | null;
+  readonly execution_finished_at: Date | null;
+  readonly execution_id: string | null;
+  readonly execution_command: string | null;
+  readonly execution_started_at: Date | null;
+  readonly execution_status: string | null;
+  readonly execution_version: number | null;
+  readonly idempotency_key: string;
+  readonly payload: unknown;
+  readonly principal: string;
+  readonly request_hash: string;
+  readonly session_generation: number;
+  readonly session_id: string;
 }
 
 export class PostgresRuntimeDurability implements RuntimeDurability {
@@ -147,40 +177,105 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
     await Promise.all([this.#pool.end(), this.#observation.close(), this.#admission.close()]);
   }
 
-  public async lookupAction(request: ActionLookupRequest): Promise<ActionLookupFound | undefined> {
+  public async lookupAction(request: ActionLookupRequest) {
+    const history = await this.lookupHistory({
+      actor: request.actor,
+      generation: request.generation,
+      sessionId: request.sessionId,
+      target: { idempotencyKey: request.idempotencyKey, type: "action" },
+    });
+    if (history === undefined || history.kind === "not_found") return undefined;
+    if (history.kind === "unavailable") {
+      throw new RuntimeError(
+        "RUNTIME_UNAVAILABLE",
+        history.message,
+        { reason: history.reason },
+        true,
+      );
+    }
+    if (history.kind === "compacted") {
+      return {
+        expiredAt: history.retention.expiredAt,
+        generation: request.generation,
+        idempotencyKey: request.idempotencyKey,
+        kind: "expired" as const,
+        message:
+          "The accepted Action is outside complete-fact retention; its idempotency key remains reserved",
+        sessionId: request.sessionId,
+      };
+    }
+    const fact = history.fact;
+    if (fact.targetType !== "action") throw invalidHistory("Action history fact is invalid");
+    return {
+      acceptedAt: fact.acceptedAt,
+      actionId: fact.actionId,
+      actionStatus: fact.actionStatus,
+      actionType: fact.actionType,
+      ...(fact.executionId === undefined ? {} : { executionId: fact.executionId }),
+      ...(fact.executionStatus === undefined ? {} : { executionStatus: fact.executionStatus }),
+      generation: request.generation,
+      idempotencyKey: request.idempotencyKey,
+      kind: "found" as const,
+      sessionId: request.sessionId,
+    };
+  }
+
+  public async lookupActionReplay(
+    request: ActionLookupRequest,
+  ): Promise<DurableActionReplay | undefined> {
     const client = await this.#pool.connect();
     try {
       if (!(await assertPersistedActorIdentity(client, request.actor))) return undefined;
-      const result = await client.query<{
-        accepted_at: Date;
-        action_id: string;
-        action_status: ActionLookupFound["actionStatus"];
-        action_type: ActionLookupFound["actionType"];
-        execution_id: string | null;
-        execution_status: Exclude<ActionLookupFound["executionStatus"], undefined> | null;
-      }>(
-        `SELECT action.id AS action_id, action.kind AS action_type,
-                action.status AS action_status, action.accepted_at,
-                execution.id AS execution_id, execution.status AS execution_status
-           FROM actions action
-           LEFT JOIN executions execution ON execution.action_id = action.id
-          WHERE action.session_id = $1 AND action.session_generation = $2
-            AND action.actor_id = $3 AND action.idempotency_key = $4`,
-        [request.sessionId, request.generation, request.actor.id, request.idempotencyKey],
-      );
-      const row = result.rows[0];
-      if (row === undefined) return undefined;
-      return {
-        acceptedAt: row.accepted_at.toISOString(),
-        actionId: row.action_id,
-        actionStatus: row.action_status,
-        actionType: row.action_type,
-        ...(row.execution_id === null ? {} : { executionId: row.execution_id }),
-        ...(row.execution_status === null ? {} : { executionStatus: row.execution_status }),
-        generation: request.generation,
-        idempotencyKey: request.idempotencyKey,
-        kind: "found",
+      const row = await selectHistoryRow(client, {
+        actorId: request.actor.id,
+        generation: null,
         sessionId: request.sessionId,
+        targetId: request.idempotencyKey,
+        targetType: "action",
+      });
+      if (row === undefined) return undefined;
+      if (row.compacted_at !== null) return compactedReplay(row);
+      return fullReplay(row);
+    } finally {
+      client.release();
+    }
+  }
+
+  public async lookupHistory(
+    request: HistoryLookupRequest,
+  ): Promise<HistoryLookupResult | undefined> {
+    const client = await this.#pool.connect();
+    try {
+      if (!(await assertPersistedActorIdentity(client, request.actor))) return undefined;
+      const row = await selectHistoryRow(client, {
+        actorId: request.actor.id,
+        generation: request.generation,
+        sessionId: request.sessionId,
+        targetId:
+          request.target.type === "action"
+            ? request.target.idempotencyKey
+            : request.target.executionId,
+        targetType: request.target.type,
+      });
+      if (row === undefined) return undefined;
+      const fact = historyFact(row, request.target.type);
+      if (row.compacted_at !== null) {
+        return {
+          fact,
+          generation: request.generation,
+          kind: "compacted",
+          retention: { expiredAt: row.compacted_at.toISOString(), state: "expired" },
+          sessionId: request.sessionId,
+          target: request.target,
+        };
+      }
+      return {
+        fact,
+        generation: request.generation,
+        kind: "full",
+        sessionId: request.sessionId,
+        source: "durable",
+        target: request.target,
       };
     } finally {
       client.release();
@@ -1069,6 +1164,7 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
       const replay = await findReplay(
         client,
         action.sessionId,
+        action.sessionGeneration,
         action.actor.id,
         action.idempotencyKey,
       );
@@ -1241,6 +1337,7 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
       const replay = await findReplay(
         client,
         action.sessionId,
+        action.sessionGeneration,
         action.actor.id,
         action.idempotencyKey,
       );
@@ -1423,6 +1520,7 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
       const replay = await findReplay(
         client,
         action.sessionId,
+        action.sessionGeneration,
         action.actor.id,
         action.idempotencyKey,
       );
@@ -2202,6 +2300,7 @@ function assertDurableInteractionAllowed(
 async function findReplay(
   client: PoolClient,
   sessionId: string,
+  sessionGeneration: number,
   actorId: string,
   idempotencyKey: string,
 ): Promise<
@@ -2218,20 +2317,446 @@ async function findReplay(
     execution_id: string | null;
     id: string;
     request_hash: string;
+    session_generation: number;
   }>(
-    `SELECT a.id, a.request_hash, a.action_sequence, e.id AS execution_id
+    `SELECT a.id, a.request_hash, a.action_sequence, a.session_generation,
+            e.id AS execution_id
        FROM actions a LEFT JOIN executions e ON e.action_id = a.id
       WHERE a.session_id = $1 AND a.actor_id = $2 AND a.idempotency_key = $3`,
     [sessionId, actorId, idempotencyKey],
   );
   const row = result.rows[0];
-  if (row === undefined) return undefined;
+  if (row === undefined) {
+    const compacted = await client.query<{
+      action_id: string;
+      request_hash: string;
+      session_generation: number;
+    }>(
+      `SELECT action_id, request_hash, session_generation
+         FROM action_history_tombstones
+        WHERE session_id = $1 AND actor_id = $2 AND idempotency_key = $3`,
+      [sessionId, actorId, idempotencyKey],
+    );
+    const tombstone = compacted.rows[0];
+    if (tombstone === undefined) return undefined;
+    if (tombstone.session_generation !== sessionGeneration) {
+      throw new RuntimeError(
+        "IDEMPOTENCY_KEY_REUSED",
+        "Action idempotency key belongs to another Session generation",
+        {
+          acceptedGeneration: tombstone.session_generation,
+          actionId: tombstone.action_id,
+          reason: "generation_changed",
+        },
+      );
+    }
+    throw new RuntimeError(
+      "IDEMPOTENCY_KEY_REUSED",
+      "Action idempotency key is outside complete-fact retention",
+      {
+        actionId: tombstone.action_id,
+        reason: "history_expired",
+      },
+    );
+  }
+  if (row.session_generation !== sessionGeneration) {
+    throw new RuntimeError(
+      "IDEMPOTENCY_KEY_REUSED",
+      "Action idempotency key belongs to another Session generation",
+      {
+        acceptedGeneration: row.session_generation,
+        actionId: row.id,
+        reason: "generation_changed",
+      },
+    );
+  }
   return {
     actionId: row.id,
     actionSequence: Number.parseInt(row.action_sequence, 10),
     executionId: row.execution_id ?? "",
     requestHash: row.request_hash,
   };
+}
+
+async function selectHistoryRow(
+  client: PoolClient,
+  input: Readonly<{
+    actorId: string;
+    generation: number | null;
+    sessionId: string;
+    targetId: string;
+    targetType: "action" | "execution";
+  }>,
+): Promise<ActionHistoryRow | undefined> {
+  const result = await client.query<ActionHistoryRow>(
+    `SELECT action.accepted_at, action.id AS action_id,
+            action.action_sequence::text, action.status AS action_status,
+            action.kind AS action_type, actor.id AS actor_id,
+            actor.actor_type, actor.capabilities, actor.client, actor.principal,
+            NULL::timestamptz AS compacted_at,
+            execution.command AS execution_command,
+            execution.exit_code AS execution_exit_code,
+            execution.finished_at AS execution_finished_at,
+            execution.id AS execution_id,
+            execution.started_at AS execution_started_at,
+            execution.status AS execution_status,
+            execution.version AS execution_version,
+            action.idempotency_key, action.payload, action.request_hash,
+            action.session_generation, action.session_id
+       FROM actions action
+       JOIN actors actor ON actor.id = action.actor_id
+       LEFT JOIN executions execution ON execution.action_id = action.id
+      WHERE action.session_id = $1
+        AND ($2::integer IS NULL OR action.session_generation = $2)
+        AND action.actor_id = $3
+        AND (($4 = 'action' AND action.idempotency_key = $5)
+          OR ($4 = 'execution' AND execution.id = $5))
+      UNION ALL
+     SELECT tombstone.accepted_at, tombstone.action_id,
+            '0'::text AS action_sequence, tombstone.action_status,
+            tombstone.action_kind AS action_type, actor.id AS actor_id,
+            actor.actor_type, actor.capabilities, actor.client, actor.principal,
+            tombstone.compacted_at, NULL::text AS execution_command,
+            tombstone.execution_exit_code, tombstone.execution_finished_at,
+            tombstone.execution_id, tombstone.execution_started_at,
+            tombstone.execution_status, NULL::integer AS execution_version,
+            tombstone.idempotency_key, NULL::jsonb AS payload,
+            tombstone.request_hash, tombstone.session_generation,
+            tombstone.session_id
+       FROM action_history_tombstones tombstone
+       JOIN actors actor ON actor.id = tombstone.actor_id
+      WHERE tombstone.session_id = $1
+        AND ($2::integer IS NULL OR tombstone.session_generation = $2)
+        AND tombstone.actor_id = $3
+        AND (($4 = 'action' AND tombstone.idempotency_key = $5)
+          OR ($4 = 'execution' AND tombstone.execution_id = $5))
+      LIMIT 1`,
+    [input.sessionId, input.generation, input.actorId, input.targetType, input.targetId],
+  );
+  return result.rows[0];
+}
+
+function fullReplay(row: ActionHistoryRow): DurableActionReplay {
+  if (row.compacted_at !== null) {
+    throw invalidHistory("A compacted Action cannot be reconstructed as a full replay");
+  }
+  const actor = actorFromRow(row);
+  const payload = historyPayload(row.payload);
+  const base = {
+    acceptedAt: row.accepted_at.toISOString(),
+    actionSequence: safePositiveInteger(row.action_sequence, "Action sequence"),
+    actor,
+    id: row.action_id,
+    idempotencyKey: row.idempotency_key,
+    requestHash: row.request_hash,
+    sessionGeneration: row.session_generation,
+    sessionId: row.session_id,
+  };
+  let action: SessionAction;
+  switch (row.action_type) {
+    case "execute": {
+      const approvalId = optionalString(payload.approvalId);
+      action = {
+        ...base,
+        ...(approvalId === undefined ? {} : { approvalId }),
+        command: requiredString(row.execution_command ?? payload.command, "Execute command"),
+        executionId: requiredString(row.execution_id, "Execution id"),
+        status: executeActionStatus(row.action_status),
+        type: "execute",
+      };
+      break;
+    }
+    case "input": {
+      const expectedScreenVersion = optionalSafeInteger(payload.expectedScreenVersion);
+      action = {
+        ...base,
+        data: requiredString(payload.data, "Input data"),
+        ...(expectedScreenVersion === undefined ? {} : { expectedScreenVersion }),
+        ...(payload.lineInput === undefined
+          ? {}
+          : { lineInput: payload.lineInput as Exclude<InputAction["lineInput"], undefined> }),
+        ...(payload.terminalResponse === undefined
+          ? {}
+          : {
+              terminalResponse: payload.terminalResponse as Exclude<
+                InputAction["terminalResponse"],
+                undefined
+              >,
+            }),
+        status: interactionActionStatus(row.action_status),
+        targetExecutionId: requiredString(payload.targetExecutionId, "Input target Execution id"),
+        type: "input",
+      };
+      break;
+    }
+    case "secret_input": {
+      const expectedScreenVersion = optionalSafeInteger(payload.expectedScreenVersion);
+      action = {
+        ...base,
+        ...(expectedScreenVersion === undefined ? {} : { expectedScreenVersion }),
+        sensitiveInputId: requiredString(payload.sensitiveInputId, "Sensitive input id"),
+        status: interactionActionStatus(row.action_status),
+        targetExecutionId: requiredString(
+          payload.targetExecutionId,
+          "Secret input target Execution id",
+        ),
+        type: "secret_input",
+      };
+      break;
+    }
+    case "control":
+      action = {
+        ...base,
+        bypassGuard: requiredBoolean(payload.bypassGuard, "Control bypassGuard"),
+        delivery: controlDelivery(payload.delivery),
+        status: interactionActionStatus(row.action_status),
+        targetExecutionId: requiredString(payload.targetExecutionId, "Control target Execution id"),
+        type: "control",
+      };
+      break;
+    case "resize":
+      action = {
+        ...base,
+        columns: requiredSafeInteger(payload.columns, "Resize columns"),
+        expectedGeometryVersion: requiredSafeInteger(
+          payload.expectedGeometryVersion,
+          "Resize expected geometry version",
+        ),
+        rows: requiredSafeInteger(payload.rows, "Resize rows"),
+        status: interactionActionStatus(row.action_status),
+        type: "resize",
+      };
+      break;
+    default:
+      throw invalidHistory("Durable Action type is invalid");
+  }
+  const execution = row.execution_id === null ? undefined : executionFromHistoryRow(row, actor);
+  return { action, ...(execution === undefined ? {} : { execution }), kind: "full" };
+}
+
+function compactedReplay(row: ActionHistoryRow): DurableActionReplay {
+  if (row.compacted_at === null) throw invalidHistory("Compacted Action timestamp is missing");
+  return {
+    actionId: row.action_id,
+    actionStatus: actionStatus(row.action_status),
+    actionType: actionType(row.action_type),
+    compactedAt: row.compacted_at.toISOString(),
+    generation: row.session_generation,
+    ...(row.execution_id === null ? {} : { executionId: row.execution_id }),
+    ...(row.execution_status === null
+      ? {}
+      : { executionStatus: executionStatus(row.execution_status) }),
+    kind: "compacted",
+    requestHash: row.request_hash,
+    sessionId: row.session_id,
+  };
+}
+
+function historyFact(
+  row: ActionHistoryRow,
+  targetType: "action" | "execution",
+): HistoryActionFact | HistoryExecutionFact {
+  if (targetType === "action") {
+    return {
+      acceptedAt: row.accepted_at.toISOString(),
+      actionId: row.action_id,
+      actionStatus: actionStatus(row.action_status),
+      actionType: actionType(row.action_type),
+      ...(row.execution_id === null ? {} : { executionId: row.execution_id }),
+      ...(row.execution_status === null
+        ? {}
+        : { executionStatus: executionStatus(row.execution_status) }),
+      targetType: "action",
+    };
+  }
+  if (row.execution_id === null || row.execution_status === null || row.action_type !== "execute") {
+    throw invalidHistory("Execution history is missing its Execute fact");
+  }
+  return {
+    acceptedAt: row.accepted_at.toISOString(),
+    actionId: row.action_id,
+    actionStatus: executeActionStatus(row.action_status),
+    executionId: row.execution_id,
+    executionStatus: executionStatus(row.execution_status),
+    ...(row.execution_finished_at === null
+      ? {}
+      : { finishedAt: row.execution_finished_at.toISOString() }),
+    ...(row.execution_started_at === null
+      ? {}
+      : { startedAt: row.execution_started_at.toISOString() }),
+    ...(row.execution_exit_code === null ? {} : { exitCode: row.execution_exit_code }),
+    targetType: "execution",
+  };
+}
+
+function executionFromHistoryRow(row: ActionHistoryRow, actor: Actor): Execution {
+  if (
+    row.execution_id === null ||
+    row.execution_command === null ||
+    row.execution_status === null ||
+    row.execution_version === null
+  ) {
+    throw invalidHistory("Durable Execution row is incomplete");
+  }
+  return {
+    actionId: row.action_id,
+    actor,
+    command: row.execution_command,
+    createdAt: row.accepted_at.toISOString(),
+    id: row.execution_id,
+    sessionGeneration: row.session_generation,
+    sessionId: row.session_id,
+    status: executionStatus(row.execution_status),
+    version: requiredSafeInteger(row.execution_version, "Execution version"),
+    ...(row.execution_finished_at === null
+      ? {}
+      : { finishedAt: row.execution_finished_at.toISOString() }),
+    ...(row.execution_started_at === null
+      ? {}
+      : { startedAt: row.execution_started_at.toISOString() }),
+    ...(row.execution_exit_code === null ? {} : { exitCode: row.execution_exit_code }),
+  };
+}
+
+function historyPayload(value: unknown): Readonly<Record<string, unknown>> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw invalidHistory("Durable Action payload is invalid");
+  }
+  return value as Readonly<Record<string, unknown>>;
+}
+
+function actionType(value: string): SessionAction["type"] {
+  if (
+    value === "execute" ||
+    value === "input" ||
+    value === "secret_input" ||
+    value === "control" ||
+    value === "resize"
+  ) {
+    return value;
+  }
+  throw invalidHistory("Durable Action type is invalid");
+}
+
+function actionStatus(value: string): SessionAction["status"] {
+  if (
+    value === "ACCEPTED" ||
+    value === "DISPATCHING" ||
+    value === "RUNNING" ||
+    value === "COMPLETED" ||
+    value === "FAILED" ||
+    value === "INTERRUPTED" ||
+    value === "UNKNOWN" ||
+    value === "CANCELLED" ||
+    value === "DELIVERED" ||
+    value === "REJECTED"
+  ) {
+    return value;
+  }
+  throw invalidHistory("Durable Action status is invalid");
+}
+
+function executeActionStatus(value: string): Extract<SessionAction, { type: "execute" }>["status"] {
+  const status = actionStatus(value);
+  if (status === "DELIVERED" || status === "REJECTED") {
+    throw invalidHistory("Durable Execute Action status is invalid");
+  }
+  return status;
+}
+
+function interactionActionStatus(
+  value: string,
+): Extract<SessionAction, { type: "input" }>["status"] {
+  const status = actionStatus(value);
+  if (
+    status !== "ACCEPTED" &&
+    status !== "DELIVERED" &&
+    status !== "REJECTED" &&
+    status !== "UNKNOWN"
+  ) {
+    throw invalidHistory("Durable interaction Action status is invalid");
+  }
+  return status;
+}
+
+function executionStatus(value: string): Execution["status"] {
+  if (
+    value === "DISPATCHING" ||
+    value === "RUNNING" ||
+    value === "COMPLETED" ||
+    value === "FAILED" ||
+    value === "INTERRUPTED" ||
+    value === "UNKNOWN"
+  ) {
+    return value;
+  }
+  throw invalidHistory("Durable Execution status is invalid");
+}
+
+function controlDelivery(value: unknown): ControlAction["delivery"] {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw invalidHistory("Durable Control delivery is invalid");
+  }
+  const record = value as Readonly<Record<string, unknown>>;
+  if (
+    record.mode === "TTY_CONTROL" &&
+    (record.control === "CTRL_C" ||
+      record.control === "CTRL_D" ||
+      record.control === "CTRL_Z" ||
+      record.control === "ESC")
+  ) {
+    return { control: record.control, mode: "TTY_CONTROL" };
+  }
+  if (
+    record.mode === "PROCESS_SIGNAL" &&
+    (record.signal === "SIGINT" ||
+      record.signal === "SIGTERM" ||
+      record.signal === "SIGKILL" ||
+      record.signal === "SIGTSTP" ||
+      record.signal === "SIGCONT")
+  ) {
+    return { mode: "PROCESS_SIGNAL", signal: record.signal };
+  }
+  throw invalidHistory("Durable Control delivery is invalid");
+}
+
+function requiredString(value: unknown, name: string): string {
+  if (typeof value !== "string") throw invalidHistory(`${name} is invalid`);
+  return value;
+}
+
+function optionalString(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw invalidHistory("Optional durable string is invalid");
+  return value;
+}
+
+function requiredBoolean(value: unknown, name: string): boolean {
+  if (typeof value !== "boolean") throw invalidHistory(`${name} is invalid`);
+  return value;
+}
+
+function requiredSafeInteger(value: unknown, name: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    throw invalidHistory(`${name} is invalid`);
+  }
+  return value;
+}
+
+function optionalSafeInteger(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  return requiredSafeInteger(value, "Optional durable integer");
+}
+
+function safePositiveInteger(value: string, name: string): number {
+  if (!/^\d+$/.test(value)) throw invalidHistory(`${name} is invalid`);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw invalidHistory(`${name} is invalid`);
+  return parsed;
+}
+
+function invalidHistory(message: string): RuntimeError {
+  return new RuntimeError("RUNTIME_UNAVAILABLE", message, { component: "durable_history" }, true);
 }
 
 async function expectOne(

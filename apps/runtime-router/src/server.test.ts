@@ -9,6 +9,8 @@ import type {
   ExecutionOutputReadResult,
   ExecutionWaitRequest,
   ExecutionWaitResult,
+  HistoryLookupRequest,
+  HistoryLookupResult,
   RuntimeOwnerRecord,
   RuntimeOwnerRegistry,
 } from "@iterminal/application";
@@ -63,6 +65,7 @@ describe("CentralRuntimeRouterGateway error classification", () => {
         "execution.observe.v1",
         "execution.output.read.v1",
         "execution.wait.v2",
+        "history.lookup.v1",
         "runtime.capabilities.v1",
         "runtime.owner-capabilities.v1",
       ],
@@ -190,6 +193,68 @@ describe("CentralRuntimeRouterGateway error classification", () => {
       () => new LookupClient(() => Promise.reject(new RuntimeError("POLICY_DENIED", "denied"))),
     );
     await expect(denied.lookupAction(request)).rejects.toMatchObject({ code: "POLICY_DENIED" });
+  });
+
+  it("routes durable history to one exact owner and preserves typed route failures", async () => {
+    const request: HistoryLookupRequest = {
+      actor: {
+        capabilities: ["session.execute"],
+        client: "router-test",
+        id: "agent-router",
+        principal: "router-principal",
+        type: "agent",
+      },
+      generation: 7,
+      sessionId: "session-routed",
+      target: { executionId: "execution-routed", type: "execution" },
+    };
+    let calls = 0;
+    const routed = new CentralRuntimeRouterGateway(
+      routeRegistry(owner),
+      () =>
+        new HistoryClient((received) => {
+          calls += 1;
+          expect(received).toEqual(request);
+          return Promise.resolve({
+            fact: {
+              acceptedAt: new Date(0).toISOString(),
+              actionId: "action-routed",
+              actionStatus: "COMPLETED",
+              executionId: "execution-routed",
+              executionStatus: "COMPLETED",
+              targetType: "execution",
+            },
+            generation: received.generation,
+            kind: "full",
+            sessionId: received.sessionId,
+            source: "durable",
+            target: received.target,
+          });
+        }),
+    );
+    await expect(routed.lookupHistory(request)).resolves.toMatchObject({
+      kind: "full",
+      source: "durable",
+    });
+    expect(calls).toBe(1);
+
+    const absent = new CentralRuntimeRouterGateway(
+      { ...routeRegistry(owner), resolveSessionRoute: () => Promise.resolve(undefined) },
+      () => new HistoryClient(() => Promise.reject(new Error("must not dispatch"))),
+    );
+    await expect(absent.lookupHistory(request)).resolves.toMatchObject({ kind: "not_found" });
+
+    const unavailable = new CentralRuntimeRouterGateway(
+      {
+        ...routeRegistry(owner),
+        resolveSessionRoute: () => Promise.resolve({ ownerId: owner.ownerId }),
+      },
+      () => new HistoryClient(() => Promise.reject(new Error("must not dispatch"))),
+    );
+    await expect(unavailable.lookupHistory(request)).resolves.toMatchObject({
+      kind: "unavailable",
+      reason: "owner_route_unavailable",
+    });
   });
 
   it("routes Artifact reads by the claimed Session while preserving non-disclosing misses", async () => {
@@ -519,6 +584,7 @@ class CapabilityClient extends UnixRuntimeClient {
       | "runtime.capabilities.v1"
       | "execution.output.read.v1"
       | "execution.wait.v2"
+      | "history.lookup.v1"
     )[],
   ) {
     super("/unused/capability-owner.sock");
@@ -605,6 +671,18 @@ class LookupClient extends UnixRuntimeClient {
   }
 
   public override lookupAction(request: ActionLookupRequest): Promise<ActionLookupResult> {
+    return this.lookup(request);
+  }
+}
+
+class HistoryClient extends UnixRuntimeClient {
+  public constructor(
+    private readonly lookup: (request: HistoryLookupRequest) => Promise<HistoryLookupResult>,
+  ) {
+    super("/unused/history-lookup-owner.sock");
+  }
+
+  public override lookupHistory(request: HistoryLookupRequest): Promise<HistoryLookupResult> {
     return this.lookup(request);
   }
 }

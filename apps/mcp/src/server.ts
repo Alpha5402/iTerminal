@@ -13,6 +13,7 @@ import {
   executionObserveTransportRequestSchema,
   executionOutputReadTransportRequestSchema,
   executionWaitV2TransportRequestSchema,
+  historyLookupTransportRequestSchema,
   inputTransportRequestSchema,
   runtimeCapabilitiesRequestSchema,
 } from "@iterminal/protocol";
@@ -100,6 +101,29 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
           sessionId: input.sessionId,
         }),
       ),
+  );
+
+  server.registerTool(
+    "history_lookup",
+    {
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      description:
+        "Read one exact Actor-scoped Action or Execution history fact. full is retained metadata, compacted means the complete fact is retention-expired but its idempotency guard remains, not_found is non-disclosing, and unavailable is retryable. This never reconstructs a live PTY.",
+      inputSchema: historyLookupTransportRequestSchema,
+      title: "Look up durable Action or Execution history",
+    },
+    async (input) =>
+      call(() => {
+        if (gateway.lookupHistory === undefined) {
+          throw new RuntimeError("INVALID_REQUEST", "Connected Runtime does not support history");
+        }
+        return gateway.lookupHistory({
+          actor,
+          generation: input.generation,
+          sessionId: input.sessionId,
+          target: input.target,
+        });
+      }),
   );
 
   server.registerTool(

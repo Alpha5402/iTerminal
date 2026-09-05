@@ -25,6 +25,8 @@ import type {
   InputRequest,
   FinishSensitiveInputRequest,
   GetSensitiveInputRequest,
+  HistoryLookupRequest,
+  HistoryLookupResult,
   ForkSessionRequest,
   ListApprovalsRequest,
   RequestExecuteApprovalRequest,
@@ -81,6 +83,8 @@ import {
   executionOutputReadTransportRequestSchema,
   executionWaitV2ResultSchema,
   executionWaitV2TransportRequestSchema,
+  historyLookupResultSchema,
+  historyLookupTransportRequestSchema,
   defineRuntimeCapabilities,
   executeTransportRequestSchema,
   inputTransportRequestSchema,
@@ -265,6 +269,7 @@ const operationSchemas = {
   }),
   "execution.wait": z.strictObject({ executionId: z.string().min(1).max(256) }),
   "execution.wait.v2": executionWaitV2TransportRequestSchema,
+  "history.lookup": historyLookupTransportRequestSchema.extend({ actor: actorSchema }),
   "input.send": inputTransportRequestSchema.extend({
     actor: actorSchema,
   }),
@@ -381,6 +386,7 @@ export interface StartedExecutionView {
 
 export interface RuntimeGateway {
   lookupAction(request: ActionLookupRequest): Promise<ActionLookupResult>;
+  lookupHistory?(request: HistoryLookupRequest): Promise<HistoryLookupResult>;
   readArtifact(request: ArtifactReadRequest): Promise<ArtifactReadResult>;
   observeExecution?(
     request: ExecutionObservationRequest,
@@ -444,6 +450,7 @@ export class LocalRuntimeGateway implements RuntimeGateway {
       readonly artifactRead?: boolean;
       readonly buildId?: string;
       readonly executionOutputRead?: boolean;
+      readonly durableHistory?: boolean;
     }> = {},
   ) {
     this.#capabilities = defineRuntimeCapabilities({
@@ -456,6 +463,7 @@ export class LocalRuntimeGateway implements RuntimeGateway {
         ...(options.executionOutputRead === true ? (["execution.observe.v1"] as const) : []),
         ...(options.executionOutputRead === true ? (["execution.output.read.v1"] as const) : []),
         "execution.wait.v2",
+        ...(options.durableHistory === true ? (["history.lookup.v1"] as const) : []),
         "runtime.capabilities.v1",
       ],
     });
@@ -463,6 +471,10 @@ export class LocalRuntimeGateway implements RuntimeGateway {
 
   public lookupAction(request: ActionLookupRequest): Promise<ActionLookupResult> {
     return this.runtime.lookupAction(request);
+  }
+
+  public lookupHistory(request: HistoryLookupRequest): Promise<HistoryLookupResult> {
+    return this.runtime.lookupHistory(request);
   }
 
   public readArtifact(request: ArtifactReadRequest): Promise<ArtifactReadResult> {
@@ -794,6 +806,17 @@ export class UnixRuntimeClient implements RuntimeGateway {
         generation: request.generation,
         idempotencyKey: request.idempotencyKey,
         sessionId: request.sessionId,
+      }),
+    );
+  }
+
+  public async lookupHistory(request: HistoryLookupRequest): Promise<HistoryLookupResult> {
+    return historyLookupResultSchema.parse(
+      await this.#request("history.lookup", {
+        actor: request.actor,
+        generation: request.generation,
+        sessionId: request.sessionId,
+        target: request.target,
       }),
     );
   }
@@ -1536,6 +1559,13 @@ async function dispatch(
         );
       }
       return executionWaitV2ResultSchema.parse(await gateway.waitExecutionV2(request, signal));
+    }
+    case "history.lookup": {
+      const request = operationSchemas[operation].parse(input);
+      if (gateway.lookupHistory === undefined) {
+        throw new RuntimeError("INVALID_REQUEST", "Durable history lookup is not supported");
+      }
+      return historyLookupResultSchema.parse(await gateway.lookupHistory(request));
     }
     case "input.send": {
       const request = operationSchemas[operation].parse(input);

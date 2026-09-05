@@ -89,6 +89,94 @@ describeDatabase("PostgresRuntimeRepository", () => {
     ).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
   });
 
+  it("rejects tombstoned and cross-generation Execute keys before reserving the Session", async () => {
+    const tombstonedSession = await createSession(repository);
+    const tombstoned = executeRequest(tombstonedSession.id, "agent-tombstoned");
+    await pool.query(
+      `INSERT INTO actors (id, actor_type, principal, client, capabilities)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        tombstoned.actor.id,
+        tombstoned.actor.type,
+        tombstoned.actor.principal,
+        tombstoned.actor.client,
+        tombstoned.actor.capabilities,
+      ],
+    );
+    await pool.query(
+      `INSERT INTO action_history_tombstones
+         (session_id, session_generation, actor_id, idempotency_key, request_hash,
+          action_id, action_kind, action_status, accepted_at, execution_id,
+          execution_status, execution_finished_at, execution_exit_code, compacted_at)
+       VALUES ($1, 1, $2, $3, $4, 'act-expired', 'execute', 'COMPLETED', now(),
+          'exe-expired', 'COMPLETED', now(), 0, now())`,
+      [
+        tombstoned.sessionId,
+        tombstoned.actor.id,
+        tombstoned.idempotencyKey,
+        tombstoned.requestHash,
+      ],
+    );
+    await expect(repository.acceptExecute(tombstoned)).rejects.toMatchObject({
+      code: "IDEMPOTENCY_KEY_REUSED",
+      details: { reason: "history_expired" },
+    });
+    expect(await repository.inspectSession(tombstonedSession.id)).toMatchObject({
+      actionCount: 0,
+      activeExecutionId: null,
+      status: "READY",
+    });
+
+    const crossedSession = await createSession(repository);
+    const generationOne = executeRequest(crossedSession.id, "agent-cross-generation");
+    const accepted = await repository.acceptExecute(generationOne);
+    await pool.query(
+      `UPDATE executions
+          SET status='UNKNOWN', finished_at=now(), unknown_reason='test generation change'
+        WHERE id=$1`,
+      [accepted.executionId],
+    );
+    await pool.query("UPDATE actions SET status='UNKNOWN', updated_at=now() WHERE id=$1", [
+      accepted.actionId,
+    ]);
+    await pool.query(
+      `UPDATE sessions
+          SET current_generation=2, status='READY', active_execution_id=NULL
+        WHERE id=$1`,
+      [crossedSession.id],
+    );
+    await pool.query(
+      `UPDATE session_generations SET status='CLOSED', closed_at=now()
+        WHERE session_id=$1 AND generation=1`,
+      [crossedSession.id],
+    );
+    await pool.query(
+      `INSERT INTO session_generations
+         (session_id, generation, owner_id, integration_version, status,
+          next_event_sequence, started_at)
+       VALUES ($1, 2, $2, 'm2-test-v2', 'READY', 0, now())`,
+      [crossedSession.id, crossedSession.ownerId],
+    );
+    await expect(
+      repository.acceptExecute({
+        ...generationOne,
+        actionId: `act_${randomUUID()}`,
+        eventId: `evt_${randomUUID()}`,
+        executionId: `exe_${randomUUID()}`,
+        generation: 2,
+        outboxId: `out_${randomUUID()}`,
+      }),
+    ).rejects.toMatchObject({
+      code: "IDEMPOTENCY_KEY_REUSED",
+      details: { acceptedGeneration: 1, reason: "generation_changed" },
+    });
+    expect(await repository.inspectSession(crossedSession.id)).toMatchObject({
+      actionCount: 1,
+      activeExecutionId: null,
+      status: "READY",
+    });
+  });
+
   it("keeps durable Actor identity immutable across Sessions", async () => {
     const firstSession = await createSession(repository);
     const secondSession = await createSession(repository);

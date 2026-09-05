@@ -936,15 +936,61 @@ async function findExecuteReplay(
     execution_id: string;
     id: string;
     request_hash: string;
+    session_generation: number;
   }>(
-    `SELECT a.id, a.request_hash, a.action_sequence, e.id AS execution_id
+    `SELECT a.id, a.request_hash, a.action_sequence, a.session_generation,
+            e.id AS execution_id
        FROM actions a
        JOIN executions e ON e.action_id = a.id
       WHERE a.session_id = $1 AND a.actor_id = $2 AND a.idempotency_key = $3`,
     [input.sessionId, input.actor.id, input.idempotencyKey],
   );
   const previous = replay.rows[0];
-  if (previous === undefined) return undefined;
+  if (previous === undefined) {
+    const compacted = await client.query<{
+      action_id: string;
+      request_hash: string;
+      session_generation: number;
+    }>(
+      `SELECT action_id, request_hash, session_generation
+         FROM action_history_tombstones
+        WHERE session_id = $1 AND actor_id = $2 AND idempotency_key = $3`,
+      [input.sessionId, input.actor.id, input.idempotencyKey],
+    );
+    const tombstone = compacted.rows[0];
+    if (tombstone === undefined) return undefined;
+    if (tombstone.session_generation !== input.generation) {
+      throw new RuntimeError(
+        "IDEMPOTENCY_KEY_REUSED",
+        "Execute idempotency key belongs to another Session generation",
+        {
+          acceptedGeneration: tombstone.session_generation,
+          actionId: tombstone.action_id,
+          reason: "generation_changed",
+        },
+      );
+    }
+    throw new RuntimeError(
+      "IDEMPOTENCY_KEY_REUSED",
+      "Execute idempotency key is outside complete-fact retention",
+      {
+        actionId: tombstone.action_id,
+        reason:
+          tombstone.request_hash === input.requestHash ? "history_expired" : "request_changed",
+      },
+    );
+  }
+  if (previous.session_generation !== input.generation) {
+    throw new RuntimeError(
+      "IDEMPOTENCY_KEY_REUSED",
+      "Execute idempotency key belongs to another Session generation",
+      {
+        acceptedGeneration: previous.session_generation,
+        actionId: previous.id,
+        reason: "generation_changed",
+      },
+    );
+  }
   if (previous.request_hash !== input.requestHash) {
     throw new RuntimeError(
       "IDEMPOTENCY_KEY_REUSED",

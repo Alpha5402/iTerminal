@@ -42,6 +42,7 @@ export interface PostgresStorageMaintenanceRepositoryOptions {
 interface RetentionPolicyRow {
   cleanup_batch_size: number;
   cutoff: Date;
+  maintenance_time: Date;
   retention_milliseconds: string;
   updated_at: Date;
 }
@@ -154,6 +155,7 @@ async function lockRetentionPolicy(
 ): Promise<RetentionPolicyRow> {
   const result = await client.query<RetentionPolicyRow>(
     `SELECT retention_milliseconds::text, cleanup_batch_size, updated_at,
+            coalesce($1::timestamptz, now()) AS maintenance_time,
             coalesce($1::timestamptz, now())
               - retention_milliseconds * interval '1 millisecond' AS cutoff
        FROM durable_fact_retention_policies
@@ -253,11 +255,20 @@ async function deleteTerminalActions(
 ): Promise<number> {
   const result = await client.query(
     `WITH candidates AS MATERIALIZED (
-       SELECT action.id
+       SELECT action.id, action.session_id, action.session_generation, action.actor_id,
+              action.idempotency_key, action.request_hash, action.kind, action.status,
+              action.accepted_at, execution.id AS execution_id,
+              execution.status AS execution_status,
+              execution.started_at AS execution_started_at,
+              execution.finished_at AS execution_finished_at,
+              execution.exit_code AS execution_exit_code
          FROM actions action
          JOIN sessions session ON session.id = action.session_id
          LEFT JOIN executions execution ON execution.action_id = action.id
-        WHERE action.status IN ('COMPLETED', 'FAILED', 'INTERRUPTED', 'UNKNOWN')
+        WHERE action.status IN (
+                'COMPLETED', 'FAILED', 'INTERRUPTED', 'UNKNOWN',
+                'DELIVERED', 'REJECTED', 'CANCELLED'
+              )
           AND action.updated_at <= $1
           AND (
             action.session_generation <> session.current_generation
@@ -288,11 +299,30 @@ async function deleteTerminalActions(
         ORDER BY action.updated_at, action.id
         LIMIT $2
         FOR UPDATE OF action SKIP LOCKED
+     ), tombstoned AS (
+       INSERT INTO action_history_tombstones
+         (session_id, session_generation, actor_id, idempotency_key, request_hash,
+          action_id, action_kind, action_status, accepted_at, execution_id,
+          execution_status, execution_started_at, execution_finished_at,
+          execution_exit_code, compacted_at)
+       SELECT candidate.session_id, candidate.session_generation, candidate.actor_id,
+              candidate.idempotency_key, candidate.request_hash, candidate.id,
+              candidate.kind, candidate.status, candidate.accepted_at,
+              candidate.execution_id, candidate.execution_status,
+              candidate.execution_started_at, candidate.execution_finished_at,
+              candidate.execution_exit_code, coalesce($3::timestamptz, now())
+         FROM candidates candidate
+       ON CONFLICT (session_id, actor_id, idempotency_key) DO UPDATE
+         SET compacted_at = action_history_tombstones.compacted_at
+       WHERE action_history_tombstones.action_id = EXCLUDED.action_id
+         AND action_history_tombstones.request_hash = EXCLUDED.request_hash
+       RETURNING action_id
      )
      DELETE FROM actions action
-      USING candidates
-      WHERE action.id = candidates.id`,
-    [policy.cutoff, policy.cleanup_batch_size],
+      USING candidates, tombstoned
+      WHERE action.id = candidates.id
+        AND tombstoned.action_id = candidates.id`,
+    [policy.cutoff, policy.cleanup_batch_size, policy.maintenance_time],
   );
   return result.rowCount ?? 0;
 }

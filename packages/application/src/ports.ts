@@ -342,6 +342,90 @@ export type ActionLookupResult =
         retryable: true;
       }>);
 
+export type DurableActionLookupResult = Extract<ActionLookupResult, { kind: "expired" | "found" }>;
+
+export type HistoryLookupTarget =
+  | Readonly<{ idempotencyKey: string; type: "action" }>
+  | Readonly<{ executionId: string; type: "execution" }>;
+
+export interface HistoryLookupRequest {
+  readonly actor: Actor;
+  readonly generation: number;
+  readonly sessionId: string;
+  readonly target: HistoryLookupTarget;
+}
+
+export type HistoryActionFact = Readonly<{
+  acceptedAt: string;
+  actionId: string;
+  actionStatus: SessionAction["status"];
+  actionType: SessionAction["type"];
+  executionId?: string | undefined;
+  executionStatus?: Execution["status"] | undefined;
+  targetType: "action";
+}>;
+
+export type HistoryExecutionFact = Readonly<{
+  acceptedAt: string;
+  actionId: string;
+  actionStatus: ExecuteAction["status"];
+  executionId: string;
+  executionStatus: Execution["status"];
+  finishedAt?: string | undefined;
+  startedAt?: string | undefined;
+  exitCode?: number | undefined;
+  targetType: "execution";
+}>;
+
+export type HistoryFact = HistoryActionFact | HistoryExecutionFact;
+
+type HistoryLookupIdentity = Readonly<{
+  generation: number;
+  sessionId: string;
+  target: HistoryLookupTarget;
+}>;
+
+export type HistoryLookupResult =
+  | (HistoryLookupIdentity &
+      Readonly<{
+        fact: HistoryFact;
+        kind: "full";
+        source: "durable" | "live";
+      }>)
+  | (HistoryLookupIdentity &
+      Readonly<{
+        fact: HistoryFact;
+        kind: "compacted";
+        retention: Readonly<{ expiredAt: string; state: "expired" }>;
+      }>)
+  | (HistoryLookupIdentity & Readonly<{ kind: "not_found"; message: string }>)
+  | (HistoryLookupIdentity &
+      Readonly<{
+        kind: "unavailable";
+        message: string;
+        reason: "durability_timeout" | "durability_unavailable" | "owner_route_unavailable";
+        retryable: true;
+      }>);
+
+export type DurableActionReplay =
+  | Readonly<{
+      action: SessionAction;
+      execution?: Execution | undefined;
+      kind: "full";
+    }>
+  | Readonly<{
+      actionId: string;
+      actionStatus: SessionAction["status"];
+      actionType: SessionAction["type"];
+      compactedAt: string;
+      generation: number;
+      executionId?: string | undefined;
+      executionStatus?: Execution["status"] | undefined;
+      kind: "compacted";
+      requestHash: string;
+      sessionId: string;
+    }>;
+
 export interface DurableExecuteAdmission {
   readonly action: ExecuteAction;
   readonly execution: Execution;
@@ -494,7 +578,9 @@ export interface RuntimeOwnerRegistry {
 }
 
 export interface RuntimeDurability {
-  lookupAction(request: ActionLookupRequest): Promise<ActionLookupFound | undefined>;
+  lookupAction(request: ActionLookupRequest): Promise<DurableActionLookupResult | undefined>;
+  lookupActionReplay?(request: ActionLookupRequest): Promise<DurableActionReplay | undefined>;
+  lookupHistory?(request: HistoryLookupRequest): Promise<HistoryLookupResult | undefined>;
   readArtifact?(request: ArtifactReadRequest): Promise<DurableArtifactReadResult>;
   readExecutionOutput?(request: ExecutionOutputReadRequest): Promise<ExecutionOutputReadResult>;
   requestApproval(

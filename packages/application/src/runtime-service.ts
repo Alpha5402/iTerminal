@@ -65,6 +65,7 @@ import type {
   ActionLookupFound,
   ActionLookupRequest,
   ActionLookupResult,
+  DurableActionReplay,
   ArtifactReadRequest,
   ArtifactReadResult,
   ExecutionObservationNextAction,
@@ -75,6 +76,9 @@ import type {
   ExecutionWaitRequest,
   ExecutionWaitResult,
   ExecutionWaitScheduler,
+  HistoryFact,
+  HistoryLookupRequest,
+  HistoryLookupResult,
   DurableSessionEvent,
   DurableForkAdmission,
   DurableOwnerRecoveryResult,
@@ -579,6 +583,83 @@ export class RuntimeService {
         reason: "durability_unavailable",
         retryable: true,
       };
+    }
+  }
+
+  public async lookupHistory(request: HistoryLookupRequest): Promise<HistoryLookupResult> {
+    validateSessionId(request.sessionId);
+    validateGeneration(request.generation);
+    this.#validateActorShape(request.actor);
+    if (request.target.type === "action") {
+      validateIdempotencyKey(request.target.idempotencyKey);
+      const action = this.store.getActionByIdempotency(
+        `${request.sessionId}:${request.actor.id}`,
+        request.target.idempotencyKey,
+      );
+      if (
+        action !== undefined &&
+        sameActor(action.actor, request.actor) &&
+        action.sessionGeneration === request.generation
+      ) {
+        return {
+          fact: historyFactFromAction(
+            action,
+            action.type === "execute" ? this.store.getExecution(action.executionId) : undefined,
+            "action",
+          ),
+          generation: request.generation,
+          kind: "full",
+          sessionId: request.sessionId,
+          source: "live",
+          target: request.target,
+        };
+      }
+    } else {
+      validateExecutionId(request.target.executionId);
+      const execution = this.store.getExecution(request.target.executionId);
+      const action = execution === undefined ? undefined : this.store.getAction(execution.actionId);
+      if (
+        execution !== undefined &&
+        action?.type === "execute" &&
+        sameActor(execution.actor, request.actor) &&
+        execution.sessionId === request.sessionId &&
+        execution.sessionGeneration === request.generation
+      ) {
+        return {
+          fact: historyFactFromAction(action, execution, "execution"),
+          generation: request.generation,
+          kind: "full",
+          sessionId: request.sessionId,
+          source: "live",
+          target: request.target,
+        };
+      }
+    }
+
+    const identity = historyLookupIdentity(request);
+    if (this.#durability?.lookupHistory === undefined) {
+      return historyUnavailable(identity, "durability_unavailable");
+    }
+    try {
+      const durable = await this.#durability.lookupHistory(request);
+      if (durable === undefined) return historyNotFound(identity);
+      if (
+        durable.kind === "full" &&
+        (!isTerminalActionStatus(durable.fact.actionStatus) ||
+          (durable.fact.executionStatus !== undefined &&
+            !isTerminalExecutionStatus(durable.fact.executionStatus)))
+      ) {
+        return historyUnavailable(identity, "durability_unavailable");
+      }
+      return durable;
+    } catch (error) {
+      if (error instanceof RuntimeError && error.code === "ACTOR_IDENTITY_CONFLICT") {
+        return historyNotFound(identity);
+      }
+      return historyUnavailable(
+        identity,
+        isDurableQueryTimeout(error) ? "durability_timeout" : "durability_unavailable",
+      );
     }
   }
 
@@ -1661,13 +1742,14 @@ export class RuntimeService {
     await this.#flushDurable(request.sessionId);
     const requestHash = executeRequestHash(request);
     const scope = `${request.sessionId}:${request.actor.id}`;
-    const replay = this.#idempotentActorReplay(
+    const memoryReplay = this.#idempotentActorReplay(
       scope,
       request.idempotencyKey,
       requestHash,
       request.actor,
     );
-    if (replay !== undefined) {
+    if (memoryReplay !== undefined) {
+      const replay = memoryReplay;
       if (replay.type !== "execute") {
         throw new RuntimeError("IDEMPOTENCY_KEY_REUSED", "Idempotency key changed action type");
       }
@@ -1677,6 +1759,29 @@ export class RuntimeService {
         completion: this.#completions.get(execution.id) ?? Promise.resolve(execution),
         execution,
         started: this.#started.get(execution.id) ?? Promise.resolve(),
+      };
+    }
+    const durableReplay = await this.#durableActionReplay(
+      {
+        actor: request.actor,
+        generation: request.sessionGeneration,
+        idempotencyKey: request.idempotencyKey,
+        sessionId: request.sessionId,
+      },
+      requestHash,
+      "execute",
+    );
+    if (durableReplay !== undefined) {
+      if (durableReplay.action.type !== "execute" || durableReplay.execution === undefined) {
+        throw new RuntimeError("RUNTIME_UNAVAILABLE", "Durable Execute replay is incomplete", {
+          actionId: durableReplay.action.id,
+        });
+      }
+      return {
+        action: durableReplay.action,
+        completion: Promise.resolve(durableReplay.execution),
+        execution: durableReplay.execution,
+        started: Promise.resolve(),
       };
     }
 
@@ -2366,12 +2471,34 @@ export class RuntimeService {
       type: "secret_input",
     });
     const scope = `${request.sessionId}:${request.actor.id}`;
-    const replay = this.#idempotentReplay(scope, request.idempotencyKey, requestHash);
-    if (replay !== undefined) {
+    const memoryReplay = this.#idempotentActorReplay(
+      scope,
+      request.idempotencyKey,
+      requestHash,
+      request.actor,
+    );
+    if (memoryReplay !== undefined) {
+      const replay = memoryReplay;
       if (replay.type !== "secret_input") {
         throw new RuntimeError("IDEMPOTENCY_KEY_REUSED", "Idempotency key changed action type");
       }
       return replay;
+    }
+    const durableReplay = await this.#durableActionReplay(
+      {
+        actor: request.actor,
+        generation: request.sessionGeneration,
+        idempotencyKey: request.idempotencyKey,
+        sessionId: request.sessionId,
+      },
+      requestHash,
+      "secret_input",
+    );
+    if (durableReplay !== undefined) {
+      if (durableReplay.action.type !== "secret_input") {
+        throw new RuntimeError("RUNTIME_UNAVAILABLE", "Durable Secret Input replay is invalid");
+      }
+      return durableReplay.action;
     }
     const currentSession = this.#requireGeneration(request.sessionId, request.sessionGeneration);
     const currentSensitiveInput = this.#sensitiveInputs.get(currentSession.id);
@@ -2582,17 +2709,34 @@ export class RuntimeService {
       ...(request.lineInput === undefined ? {} : { lineInput: request.lineInput }),
     });
     const scope = `${request.sessionId}:${request.actor.id}`;
-    const replay = this.#idempotentActorReplay(
+    const memoryReplay = this.#idempotentActorReplay(
       scope,
       request.idempotencyKey,
       requestHash,
       request.actor,
     );
-    if (replay !== undefined) {
+    if (memoryReplay !== undefined) {
+      const replay = memoryReplay;
       if (replay.type !== "input") {
         throw new RuntimeError("IDEMPOTENCY_KEY_REUSED", "Idempotency key changed action type");
       }
       return replay;
+    }
+    const durableReplay = await this.#durableActionReplay(
+      {
+        actor: request.actor,
+        generation: request.sessionGeneration,
+        idempotencyKey: request.idempotencyKey,
+        sessionId: request.sessionId,
+      },
+      requestHash,
+      "input",
+    );
+    if (durableReplay !== undefined) {
+      if (durableReplay.action.type !== "input") {
+        throw new RuntimeError("RUNTIME_UNAVAILABLE", "Durable Input replay is invalid");
+      }
+      return durableReplay.action;
     }
     if (terminalResponse === undefined) {
       this.#assertSensitiveInteraction(
@@ -2770,12 +2914,34 @@ export class RuntimeService {
       rows: request.rows,
     });
     const scope = `${request.sessionId}:${request.actor.id}`;
-    const replay = this.#idempotentReplay(scope, request.idempotencyKey, requestHash);
-    if (replay !== undefined) {
+    const memoryReplay = this.#idempotentActorReplay(
+      scope,
+      request.idempotencyKey,
+      requestHash,
+      request.actor,
+    );
+    if (memoryReplay !== undefined) {
+      const replay = memoryReplay;
       if (replay.type !== "resize") {
         throw new RuntimeError("IDEMPOTENCY_KEY_REUSED", "Idempotency key changed action type");
       }
       return replay;
+    }
+    const durableReplay = await this.#durableActionReplay(
+      {
+        actor: request.actor,
+        generation: request.sessionGeneration,
+        idempotencyKey: request.idempotencyKey,
+        sessionId: request.sessionId,
+      },
+      requestHash,
+      "resize",
+    );
+    if (durableReplay !== undefined) {
+      if (durableReplay.action.type !== "resize") {
+        throw new RuntimeError("RUNTIME_UNAVAILABLE", "Durable Resize replay is invalid");
+      }
+      return durableReplay.action;
     }
     const session = this.#requireGeneration(request.sessionId, request.sessionGeneration);
     if (session.status === "STARTING") {
@@ -2958,17 +3124,34 @@ export class RuntimeService {
       targetExecutionId: request.targetExecutionId,
     });
     const scope = `${request.sessionId}:${request.actor.id}`;
-    const replay = this.#idempotentActorReplay(
+    const memoryReplay = this.#idempotentActorReplay(
       scope,
       request.idempotencyKey,
       requestHash,
       request.actor,
     );
-    if (replay !== undefined) {
+    if (memoryReplay !== undefined) {
+      const replay = memoryReplay;
       if (replay.type !== "control") {
         throw new RuntimeError("IDEMPOTENCY_KEY_REUSED", "Idempotency key changed action type");
       }
       return replay;
+    }
+    const durableReplay = await this.#durableActionReplay(
+      {
+        actor: request.actor,
+        generation: request.sessionGeneration,
+        idempotencyKey: request.idempotencyKey,
+        sessionId: request.sessionId,
+      },
+      requestHash,
+      "control",
+    );
+    if (durableReplay !== undefined) {
+      if (durableReplay.action.type !== "control") {
+        throw new RuntimeError("RUNTIME_UNAVAILABLE", "Durable Control replay is invalid");
+      }
+      return durableReplay.action;
     }
     this.#assertSensitiveInteraction(
       request.sessionId,
@@ -4095,22 +4278,6 @@ export class RuntimeService {
     return execution;
   }
 
-  #idempotentReplay(
-    scope: string,
-    idempotencyKey: string,
-    requestHash: string,
-  ): SessionAction | undefined {
-    const action = this.store.getActionByIdempotency(scope, idempotencyKey);
-    if (action !== undefined && action.requestHash !== requestHash) {
-      throw new RuntimeError(
-        "IDEMPOTENCY_KEY_REUSED",
-        "Idempotency key was already used with a different request",
-        { actionId: action.id },
-      );
-    }
-    return action;
-  }
-
   #idempotentActorReplay(
     scope: string,
     idempotencyKey: string,
@@ -4134,6 +4301,94 @@ export class RuntimeService {
       );
     }
     return action;
+  }
+
+  async #durableActionReplay(
+    request: ActionLookupRequest,
+    requestHash: string,
+    expectedType: SessionAction["type"],
+  ): Promise<Extract<DurableActionReplay, { kind: "full" }> | undefined> {
+    if (this.#durability?.lookupActionReplay === undefined) return undefined;
+    let replay: DurableActionReplay | undefined;
+    try {
+      replay = await this.#durability.lookupActionReplay(request);
+    } catch (error) {
+      if (error instanceof RuntimeError) throw error;
+      throw durabilityError(error);
+    }
+    if (replay === undefined) return undefined;
+    if (replay.kind === "compacted") {
+      if (replay.sessionId !== request.sessionId) return undefined;
+      if (replay.generation !== request.generation) {
+        throw new RuntimeError(
+          "IDEMPOTENCY_KEY_REUSED",
+          "Idempotency key belongs to another Session generation",
+          {
+            actionId: replay.actionId,
+            acceptedGeneration: replay.generation,
+            reason: "generation_changed",
+          },
+        );
+      }
+      if (replay.actionType !== expectedType || replay.requestHash !== requestHash) {
+        throw new RuntimeError(
+          "IDEMPOTENCY_KEY_REUSED",
+          "Idempotency key belongs to a different retained request",
+          { actionId: replay.actionId, reason: "request_changed" },
+        );
+      }
+      throw new RuntimeError(
+        "IDEMPOTENCY_KEY_REUSED",
+        "The original Action is outside complete-fact retention and cannot be replayed",
+        { actionId: replay.actionId, reason: "history_expired" },
+      );
+    }
+    if (!sameActor(replay.action.actor, request.actor)) {
+      throw new RuntimeError(
+        "ACTOR_IDENTITY_CONFLICT",
+        "Idempotent replay Actor does not match the accepted immutable identity",
+        { actorId: request.actor.id },
+      );
+    }
+    if (replay.action.sessionId !== request.sessionId) return undefined;
+    if (replay.action.sessionGeneration !== request.generation) {
+      throw new RuntimeError(
+        "IDEMPOTENCY_KEY_REUSED",
+        "Idempotency key belongs to another Session generation",
+        {
+          actionId: replay.action.id,
+          acceptedGeneration: replay.action.sessionGeneration,
+          reason: "generation_changed",
+        },
+      );
+    }
+    if (replay.action.type !== expectedType || replay.action.requestHash !== requestHash) {
+      throw new RuntimeError(
+        "IDEMPOTENCY_KEY_REUSED",
+        "Idempotency key was already used with a different request",
+        { actionId: replay.action.id, reason: "request_changed" },
+      );
+    }
+    if (!isTerminalActionStatus(replay.action.status)) {
+      throw new RuntimeError(
+        "RUNTIME_UNAVAILABLE",
+        "The durable Action is active but its exact live owner state is unavailable",
+        { actionId: replay.action.id, reason: "live_owner_required" },
+        true,
+      );
+    }
+    if (
+      replay.action.type === "execute" &&
+      (replay.execution === undefined || !isTerminalExecutionStatus(replay.execution.status))
+    ) {
+      throw new RuntimeError(
+        "RUNTIME_UNAVAILABLE",
+        "The durable Execution is active but its exact live owner state is unavailable",
+        { actionId: replay.action.id, reason: "live_owner_required" },
+        true,
+      );
+    }
+    return replay;
   }
 
   #event(
@@ -4670,6 +4925,92 @@ function projectActionLookup(
     kind: "found",
     sessionId: action.sessionId,
   };
+}
+
+function historyLookupIdentity(request: HistoryLookupRequest): Omit<HistoryLookupRequest, "actor"> {
+  return {
+    generation: request.generation,
+    sessionId: request.sessionId,
+    target: request.target,
+  };
+}
+
+function historyNotFound(identity: Omit<HistoryLookupRequest, "actor">): HistoryLookupResult {
+  return {
+    ...identity,
+    kind: "not_found",
+    message: "No retained historical fact matches the exact Actor and Session scope",
+  };
+}
+
+function historyUnavailable(
+  identity: Omit<HistoryLookupRequest, "actor">,
+  reason: Extract<HistoryLookupResult, { kind: "unavailable" }>["reason"],
+): HistoryLookupResult {
+  return {
+    ...identity,
+    kind: "unavailable",
+    message:
+      reason === "durability_timeout"
+        ? "Durable history lookup timed out"
+        : reason === "owner_route_unavailable"
+          ? "The exact Runtime owner route is temporarily unavailable"
+          : "Durable history lookup is temporarily unavailable",
+    reason,
+    retryable: true,
+  };
+}
+
+function historyFactFromAction(
+  action: SessionAction,
+  execution: Execution | undefined,
+  targetType: "action" | "execution",
+): HistoryFact {
+  if (targetType === "action") {
+    return {
+      acceptedAt: action.acceptedAt,
+      actionId: action.id,
+      actionStatus: action.status,
+      actionType: action.type,
+      ...(action.type === "execute" ? { executionId: action.executionId } : {}),
+      ...(execution === undefined ? {} : { executionStatus: execution.status }),
+      targetType: "action",
+    };
+  }
+  if (action.type !== "execute" || execution === undefined) {
+    throw new RuntimeError("RUNTIME_UNAVAILABLE", "Execution history fact is inconsistent", {
+      actionId: action.id,
+      component: "durable_history",
+    });
+  }
+  return {
+    acceptedAt: action.acceptedAt,
+    actionId: action.id,
+    actionStatus: action.status,
+    executionId: execution.id,
+    executionStatus: execution.status,
+    ...(execution.finishedAt === undefined ? {} : { finishedAt: execution.finishedAt }),
+    ...(execution.startedAt === undefined ? {} : { startedAt: execution.startedAt }),
+    ...(execution.exitCode === undefined ? {} : { exitCode: execution.exitCode }),
+    targetType: "execution",
+  };
+}
+
+function isTerminalExecutionStatus(status: Execution["status"]): boolean {
+  return status !== "DISPATCHING" && status !== "RUNNING";
+}
+
+function isTerminalActionStatus(status: SessionAction["status"]): boolean {
+  return status !== "ACCEPTED" && status !== "DISPATCHING" && status !== "RUNNING";
+}
+
+function isDurableQueryTimeout(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as Readonly<{
+    code?: unknown;
+    details?: Readonly<Record<string, unknown>>;
+  }>;
+  return candidate.code === "57014" || candidate.details?.reason === "durability_timeout";
 }
 
 function cloneInteractionState(state: InteractionState): InteractionState {

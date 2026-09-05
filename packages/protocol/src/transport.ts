@@ -12,6 +12,7 @@ export const RUNTIME_FEATURES = Object.freeze([
   "execution.observe.v1",
   "execution.output.read.v1",
   "execution.wait.v2",
+  "history.lookup.v1",
   "runtime.capabilities.v1",
   "runtime.owner-capabilities.v1",
 ] as const);
@@ -64,6 +65,121 @@ export const actionLookupTransportRequestSchema = z.strictObject({
   idempotencyKey: idempotencyKeyTransportSchema,
   sessionId: sessionIdTransportSchema,
 });
+
+const historyLookupTargetSchema = z.discriminatedUnion("type", [
+  z.strictObject({ idempotencyKey: idempotencyKeyTransportSchema, type: z.literal("action") }),
+  z.strictObject({ executionId: executionIdTransportSchema, type: z.literal("execution") }),
+]);
+
+export const historyLookupTransportRequestSchema = z.strictObject({
+  generation: sessionGenerationTransportSchema,
+  sessionId: sessionIdTransportSchema,
+  target: historyLookupTargetSchema,
+});
+
+const actionStatusTransportSchema = z.enum([
+  "ACCEPTED",
+  "DISPATCHING",
+  "RUNNING",
+  "COMPLETED",
+  "FAILED",
+  "INTERRUPTED",
+  "UNKNOWN",
+  "CANCELLED",
+  "DELIVERED",
+  "REJECTED",
+]);
+
+const historyActionFactSchema = z.strictObject({
+  acceptedAt: z.iso.datetime({ offset: true }),
+  actionId: z.string().min(1).max(256),
+  actionStatus: actionStatusTransportSchema,
+  actionType: z.enum(["execute", "input", "secret_input", "control", "resize"]),
+  executionId: executionIdTransportSchema.optional(),
+  executionStatus: z
+    .enum(["DISPATCHING", "RUNNING", "COMPLETED", "FAILED", "INTERRUPTED", "UNKNOWN"])
+    .optional(),
+  targetType: z.literal("action"),
+});
+
+const historyExecutionFactSchema = z.strictObject({
+  acceptedAt: z.iso.datetime({ offset: true }),
+  actionId: z.string().min(1).max(256),
+  actionStatus: z.enum(["DISPATCHING", "RUNNING", "COMPLETED", "FAILED", "INTERRUPTED", "UNKNOWN"]),
+  executionId: executionIdTransportSchema,
+  executionStatus: z.enum([
+    "DISPATCHING",
+    "RUNNING",
+    "COMPLETED",
+    "FAILED",
+    "INTERRUPTED",
+    "UNKNOWN",
+  ]),
+  exitCode: z.number().int().optional(),
+  finishedAt: z.iso.datetime({ offset: true }).optional(),
+  startedAt: z.iso.datetime({ offset: true }).optional(),
+  targetType: z.literal("execution"),
+});
+
+const historyFactSchema = z.discriminatedUnion("targetType", [
+  historyActionFactSchema,
+  historyExecutionFactSchema,
+]);
+
+const historyLookupIdentitySchema = z.strictObject({
+  generation: sessionGenerationTransportSchema,
+  sessionId: sessionIdTransportSchema,
+  target: historyLookupTargetSchema,
+});
+
+export const historyLookupResultSchema = z
+  .discriminatedUnion("kind", [
+    historyLookupIdentitySchema.extend({
+      fact: historyFactSchema,
+      kind: z.literal("full"),
+      source: z.enum(["durable", "live"]),
+    }),
+    historyLookupIdentitySchema.extend({
+      fact: historyFactSchema,
+      kind: z.literal("compacted"),
+      retention: z.strictObject({
+        expiredAt: z.iso.datetime({ offset: true }),
+        state: z.literal("expired"),
+      }),
+    }),
+    historyLookupIdentitySchema.extend({
+      kind: z.literal("not_found"),
+      message: z.string().min(1).max(512),
+    }),
+    historyLookupIdentitySchema.extend({
+      kind: z.literal("unavailable"),
+      message: z.string().min(1).max(512),
+      reason: z.enum(["durability_timeout", "durability_unavailable", "owner_route_unavailable"]),
+      retryable: z.literal(true),
+    }),
+  ])
+  .superRefine((result, context) => {
+    if (result.kind !== "full" && result.kind !== "compacted") return;
+    if (result.target.type !== result.fact.targetType) {
+      context.addIssue({ code: "custom", message: "History target and fact types must match" });
+      return;
+    }
+    if (
+      result.target.type === "execution" &&
+      result.fact.targetType === "execution" &&
+      result.target.executionId !== result.fact.executionId
+    ) {
+      context.addIssue({ code: "custom", message: "History Execution identity must match" });
+    }
+    if (
+      result.kind === "compacted" &&
+      (result.fact.actionStatus === "ACCEPTED" ||
+        result.fact.actionStatus === "DISPATCHING" ||
+        result.fact.actionStatus === "RUNNING")
+    ) {
+      context.addIssue({ code: "custom", message: "Compacted history must be terminal" });
+    }
+  });
 
 export const artifactReadTransportRequestSchema = z.strictObject({
   artifactId: z.string().min(1).max(256),
@@ -497,6 +613,8 @@ export type ExecuteTransportRequest = z.output<typeof executeTransportRequestSch
 export type InputTransportRequest = z.output<typeof inputTransportRequestSchema>;
 export type ActionLookupTransportRequest = z.output<typeof actionLookupTransportRequestSchema>;
 export type ActionLookupResult = z.output<typeof actionLookupResultSchema>;
+export type HistoryLookupTransportRequest = z.output<typeof historyLookupTransportRequestSchema>;
+export type HistoryLookupResult = z.output<typeof historyLookupResultSchema>;
 export type ArtifactReadTransportRequest = z.output<typeof artifactReadTransportRequestSchema>;
 export type ArtifactReadResult = z.output<typeof artifactReadResultSchema>;
 export type ExecutionOutputReadTransportRequest = z.output<
