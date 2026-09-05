@@ -951,6 +951,71 @@ describe("Runtime RPC signed grants", () => {
     expect(Object.keys(client)).toEqual([]);
   });
 
+  it("pins one provider credential for an in-flight request and refreshes only the next request", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-provider-snapshot-"));
+    const secret = randomBytes(32);
+    const issuedAt = Math.floor(Date.now() / 1_000);
+    let runtimeNow = issuedAt * 1_000;
+    const firstClaims = {
+      ...exactAgentGrant(["session.list"], issuedAt),
+      expiresAt: issuedAt + 60,
+      grantId: "provider-snapshot-first",
+    } satisfies RuntimeRpcGrantClaims;
+    const secondClaims = {
+      ...firstClaims,
+      expiresAt: issuedAt + 120,
+      grantId: "provider-snapshot-second",
+    } satisfies RuntimeRpcGrantClaims;
+    const first = signRuntimeRpcGrant(secret, firstClaims);
+    const second = signRuntimeRpcGrant(secret, secondClaims);
+    let selected = first;
+    let providerCalls = 0;
+    let releaseFirst!: () => void;
+    let markStarted!: () => void;
+    const firstReleased = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const firstStarted = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    let gatewayCalls = 0;
+    const server = await startRuntimeRpcServer({
+      authentication: { audience: "runtime-rpc-test", now: () => new Date(runtimeNow), secret },
+      gateway: {
+        ...stubGateway(),
+        listSessions: async () => {
+          gatewayCalls += 1;
+          if (gatewayCalls === 1) {
+            markStarted();
+            await firstReleased;
+          }
+          return [];
+        },
+      },
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    const client = new UnixRuntimeClient(server.socketPath, {
+      authorizationProvider: () => {
+        providerCalls += 1;
+        return Promise.resolve(selected);
+      },
+    });
+    try {
+      const inFlight = client.listSessions();
+      await firstStarted;
+      selected = second;
+      runtimeNow = (issuedAt + 61) * 1_000;
+      releaseFirst();
+      await expect(inFlight).resolves.toEqual([]);
+      await expect(client.listSessions()).resolves.toEqual([]);
+      expect({ gatewayCalls, providerCalls }).toEqual({ gatewayCalls: 2, providerCalls: 2 });
+    } finally {
+      releaseFirst();
+      await server.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
   it("removes the active bearer from known and unknown RPC failures", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-error-boundary-"));
     const secret = randomBytes(32);

@@ -1,6 +1,16 @@
 import { ACTOR_CAPABILITY_PROFILES, RuntimeError } from "@iterminal/domain";
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,6 +35,7 @@ import {
   startHumanConsole,
   type HumanConsoleServerHandle,
 } from "./server.js";
+import { consoleFileAuthorization, consoleRuntimeAuthorizationOptions } from "./credential-file.js";
 
 const agent: Actor = {
   client: "m5-console-test-agent",
@@ -562,6 +573,174 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
     const restored = await bodyResult<{ readonly actor: Actor }>(restoredResponse);
 
     expect(restored.actor).toEqual(first.actor);
+  });
+
+  it("refreshes a private Console transport grant per request without changing browser or PTY identity", async () => {
+    const fixture = await createFixture(fixtures);
+    const secret = randomBytes(32);
+    const audience = "iterminal-d03-console";
+    const issuedAt = Math.floor(Date.now() / 1_000);
+    let runtimeNow = issuedAt * 1_000;
+    const socketPath = join(fixture.root, "runtime.sock");
+    const credentialPath = join(fixture.root, "console-rpc.json");
+    daemon = await startRuntimeDaemon({
+      rpcAuthentication: { audience, now: () => new Date(runtimeNow), secret },
+      socketPath,
+    });
+    const session = await daemon.runtime.createSession({
+      shell: "zsh",
+      workspaceRoot: fixture.workspace,
+    });
+    const beforeEvents = await daemon.runtime.queryEvents(session.id, session.generation, 0, 100);
+    const beforeReady = beforeEvents.events.find((event) => event.type === "session.shell_ready");
+    const shellPid = beforeReady?.payload.shellPid;
+    expect(shellPid).toEqual(expect.any(Number));
+    const first = consoleGrant(secret, audience, issuedAt, issuedAt + 60, "d03-console-first");
+    await writeConsoleCredential(credentialPath, socketPath, first);
+    const source = consoleFileAuthorization(credentialPath, socketPath);
+    consoleServer = await startHumanConsole({
+      gateway: new UnixRuntimeClient(socketPath, { authorizationProvider: source }),
+      port: 0,
+    });
+
+    const firstResponse = await requestBootstrap(consoleServer);
+    expect(firstResponse.status).toBe(200);
+    const firstWire = await firstResponse.clone().text();
+    const cookie = required(firstResponse.headers.get("set-cookie")).split(";", 1)[0] ?? "";
+    const firstBootstrap = await bodyResult<{
+      readonly actor: Actor;
+      readonly sessions: readonly SessionResult[];
+    }>(firstResponse);
+    expect(firstWire).not.toContain(first);
+    expect(firstWire).not.toContain(credentialPath);
+
+    const second = consoleGrant(secret, audience, issuedAt, issuedAt + 120, "d03-console-second");
+    await writeConsoleCredential(credentialPath, socketPath, second);
+    runtimeNow = (issuedAt + 61) * 1_000;
+    const refreshedResponse = await requestBootstrap(consoleServer, cookie);
+    expect(refreshedResponse.status).toBe(200);
+    const refreshed = await bodyResult<{
+      readonly actor: Actor;
+      readonly sessions: readonly SessionResult[];
+    }>(refreshedResponse);
+    expect(refreshed.actor).toEqual(firstBootstrap.actor);
+    expect(refreshed.sessions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ generation: session.generation, id: session.id }),
+      ]),
+    );
+    expect(daemon.runtime.getSession(session.id)).toMatchObject({
+      generation: session.generation,
+      id: session.id,
+      status: "READY",
+    });
+    const afterEvents = await daemon.runtime.queryEvents(session.id, session.generation, 0, 100);
+    const readyEvents = afterEvents.events.filter((event) => event.type === "session.shell_ready");
+    expect(readyEvents).toHaveLength(1);
+    expect(readyEvents[0]?.payload.shellPid).toBe(shellPid);
+    expect(await source()).toBe(second);
+
+    await chmod(credentialPath, 0o644);
+    const insecure = await requestBootstrap(consoleServer, cookie);
+    expect(insecure.status).toBe(403);
+    expect(await insecure.text()).not.toContain(second);
+    await chmod(credentialPath, 0o600);
+
+    await writeConsoleCredential(credentialPath, socketPath, "private-d03-invalid-token");
+    const invalid = await requestBootstrap(consoleServer, cookie);
+    expect(invalid.status).toBe(403);
+    const invalidBody = await invalid.text();
+    expect(invalidBody).not.toContain("private-d03-invalid-token");
+    expect(invalidBody).not.toContain(credentialPath);
+
+    await writePrivateCredentialText(credentialPath, "{private-d03-malformed-json");
+    const malformed = await requestBootstrap(consoleServer, cookie);
+    expect(malformed.status).toBe(403);
+    const malformedBody = await malformed.text();
+    expect(malformedBody).not.toContain("private-d03-malformed-json");
+    expect(malformedBody).not.toContain(credentialPath);
+
+    await unlink(credentialPath);
+    const unavailable = await requestBootstrap(consoleServer, cookie);
+    expect(unavailable.status).toBe(503);
+    const unavailableBody = await unavailable.text();
+    expect(unavailableBody).toContain("RUNTIME_UNAVAILABLE");
+    expect(unavailableBody).toContain('"retryable":true');
+    expect(unavailableBody).not.toContain(second);
+    expect(unavailableBody).not.toContain(credentialPath);
+
+    const expired = consoleGrant(
+      secret,
+      audience,
+      issuedAt - 120,
+      issuedAt - 60,
+      "d03-console-expired",
+    );
+    await writeConsoleCredential(credentialPath, socketPath, expired);
+    const expiredResponse = await requestBootstrap(consoleServer, cookie);
+    expect(expiredResponse.status).toBe(403);
+    expect(await expiredResponse.text()).not.toContain(expired);
+
+    await writeConsoleCredential(credentialPath, socketPath, second);
+    expect((await requestBootstrap(consoleServer, cookie)).status).toBe(200);
+  }, 30_000);
+
+  it("rejects Console file and inline credentials, relative paths, and scope drift before use", async () => {
+    const fixture = await createFixture(fixtures);
+    const socketPath = join(fixture.root, "runtime.sock");
+    expect(() =>
+      consoleRuntimeAuthorizationOptions(
+        {
+          ITERM_CONSOLE_CREDENTIAL_FILE: join(fixture.root, "console-rpc.json"),
+          ITERM_RPC_GRANT: "inline-private-sentinel",
+        },
+        socketPath,
+      ),
+    ).toThrow("Configure only ITERM_CONSOLE_CREDENTIAL_FILE or ITERM_RPC_GRANT");
+    expect(
+      consoleRuntimeAuthorizationOptions(
+        { ITERM_RPC_GRANT: "inline-private-sentinel" },
+        socketPath,
+      ),
+    ).toEqual({ authorization: "inline-private-sentinel" });
+    const fileOptions = consoleRuntimeAuthorizationOptions(
+      { ITERM_CONSOLE_CREDENTIAL_FILE: join(fixture.root, "console-rpc.json") },
+      socketPath,
+    );
+    expect(typeof fileOptions.authorizationProvider).toBe("function");
+    expect(() => consoleFileAuthorization("relative.json", socketPath)).toThrow("must be absolute");
+
+    const secret = randomBytes(32);
+    const audience = "iterminal-d03-scope";
+    const issuedAt = Math.floor(Date.now() / 1_000);
+    const credentialPath = join(fixture.root, "console-rpc.json");
+    const source = consoleFileAuthorization(credentialPath, socketPath);
+    await writeConsoleCredential(
+      credentialPath,
+      socketPath,
+      consoleGrant(secret, audience, issuedAt, issuedAt + 60, "d03-scope-first"),
+    );
+    await expect(source()).resolves.toBeTypeOf("string");
+    await writeConsoleCredential(
+      credentialPath,
+      socketPath,
+      consoleGrant(secret, audience, issuedAt, issuedAt + 60, "d03-scope-drift", ["session.list"]),
+    );
+    await expect(source()).rejects.toMatchObject({
+      code: "POLICY_DENIED",
+      message: "Console credential replacement changed its authorization scope",
+    });
+    await writeConsoleCredential(
+      credentialPath,
+      socketPath,
+      consoleGrant(secret, audience, issuedAt, issuedAt + 60, "d03-actor-drift", undefined, {
+        principalPrefix: "other-console:",
+      }),
+    );
+    await expect(source()).rejects.toMatchObject({
+      code: "POLICY_DENIED",
+      message: "Console credential grant does not match the fixed Human Console Actor",
+    });
   });
 
   it("looks up a lost Execute response without another PTY write or cross-Actor disclosure", async () => {
@@ -1171,6 +1350,51 @@ async function createFixture(fixtures: string[]): Promise<{
   const workspace = join(root, "workspace");
   await mkdir(workspace, { recursive: true });
   return { root, workspace };
+}
+
+function consoleGrant(
+  secret: Uint8Array,
+  audience: string,
+  issuedAt: number,
+  expiresAt: number,
+  grantId: string,
+  operations: readonly RuntimeRpcGrantClaims["operations"][number][] = [
+    "runtime.capabilities",
+    "session.list",
+  ],
+  actorOverrides: Partial<Extract<RuntimeRpcGrantClaims["actor"], { kind: "paired_prefix" }>> = {},
+): string {
+  return signRuntimeRpcGrant(secret, {
+    actor: {
+      capabilities: ACTOR_CAPABILITY_PROFILES.human,
+      client: "human-console-web",
+      idPrefix: "human_console_",
+      kind: "paired_prefix",
+      principalPrefix: "local-console:",
+      type: "human",
+      ...actorOverrides,
+    },
+    audience,
+    expiresAt,
+    grantId,
+    issuedAt,
+    operations,
+    version: 1,
+  });
+}
+
+async function writeConsoleCredential(
+  path: string,
+  socketPath: string,
+  grant: string,
+): Promise<void> {
+  await writePrivateCredentialText(path, JSON.stringify({ runtimeRpc: { grant, socketPath } }));
+}
+
+async function writePrivateCredentialText(path: string, contents: string): Promise<void> {
+  const next = `${path}.next`;
+  await writeFile(next, contents, { mode: 0o600 });
+  await rename(next, path);
 }
 
 async function request(
