@@ -3,6 +3,8 @@ import type {
   ActionLookupResult,
   ArtifactReadRequest,
   ArtifactReadResult,
+  ExecutionObservationRequest,
+  ExecutionObservationResult,
   ExecutionOutputReadRequest,
   ExecutionOutputReadResult,
   ExecutionWaitRequest,
@@ -41,6 +43,7 @@ describe("CentralRuntimeRouterGateway error classification", () => {
           return new CapabilityClient("owner-a", [
             "action.execute.v1",
             "artifact.read.v1",
+            "execution.observe.v1",
             "execution.output.read.v1",
             "runtime.capabilities.v1",
           ]);
@@ -57,6 +60,7 @@ describe("CentralRuntimeRouterGateway error classification", () => {
       features: [
         "action.lookup.v1",
         "artifact.read.v1",
+        "execution.observe.v1",
         "execution.output.read.v1",
         "execution.wait.v2",
         "runtime.capabilities.v1",
@@ -69,6 +73,7 @@ describe("CentralRuntimeRouterGateway error classification", () => {
       features: [
         "action.execute.v1",
         "artifact.read.v1",
+        "execution.observe.v1",
         "execution.output.read.v1",
         "runtime.capabilities.v1",
       ],
@@ -322,6 +327,76 @@ describe("CentralRuntimeRouterGateway error classification", () => {
     await expect(unavailable.waitExecutionV2(request)).rejects.toBe(backendFailure);
   });
 
+  it("routes one composed observation to the exact Session owner without another wait budget", async () => {
+    const request = {
+      executionId: "execution-observe-routed",
+      generation: 7,
+      sessionId: "session-routed",
+      waitMs: 30_000,
+    };
+    const controller = new AbortController();
+    let calls = 0;
+    const routed = new CentralRuntimeRouterGateway(
+      routeRegistry(owner),
+      () =>
+        new ExecutionObservationClient((received, signal) => {
+          calls += 1;
+          expect(received).toEqual(request);
+          expect(signal).toBe(controller.signal);
+          return Promise.resolve({
+            gap: null,
+            identity: {
+              executionId: received.executionId,
+              generation: received.generation,
+              sessionId: received.sessionId,
+            },
+            nextActions: ["wait_for_completion"],
+            nextCursor: null,
+            output: {
+              byteLength: 0,
+              contentBase64: "",
+              encoding: "base64",
+              hasMore: false,
+              retention: { minimumAvailableSequence: 1, source: "durable" },
+              stream: "pty",
+              text: "",
+              textStatus: "complete",
+            },
+            state: {
+              completed: false,
+              executionState: "RUNNING",
+              persistenceLag: "possible",
+            },
+          });
+        }),
+    );
+
+    await expect(routed.observeExecution(request, controller.signal)).resolves.toMatchObject({
+      state: { completed: false, executionState: "RUNNING" },
+    });
+    expect(calls).toBe(1);
+
+    const absent = new CentralRuntimeRouterGateway(
+      { ...routeRegistry(owner), resolveSessionRoute: () => Promise.resolve(undefined) },
+      () => new ExecutionObservationClient(() => Promise.reject(new Error("must not dispatch"))),
+    );
+    await expect(absent.observeExecution(request)).rejects.toMatchObject({
+      code: "EXECUTION_NOT_FOUND",
+    });
+
+    const backendFailure = new RuntimeError(
+      "RUNTIME_UNAVAILABLE",
+      "Owner observation backend unavailable",
+      { source: "owner-runtime" },
+      true,
+    );
+    const unavailable = new CentralRuntimeRouterGateway(
+      routeRegistry(owner),
+      () => new ExecutionObservationClient(() => Promise.reject(backendFailure)),
+    );
+    await expect(unavailable.observeExecution(request)).rejects.toBe(backendFailure);
+  });
+
   it("forwards bounded-wait abort without retrying or changing the Execution result", async () => {
     const controller = new AbortController();
     let calls = 0;
@@ -440,6 +515,7 @@ class CapabilityClient extends UnixRuntimeClient {
       | "action.execute.v1"
       | "action.input.v1"
       | "artifact.read.v1"
+      | "execution.observe.v1"
       | "runtime.capabilities.v1"
       | "execution.output.read.v1"
       | "execution.wait.v2"
@@ -470,6 +546,24 @@ class ExecutionOutputClient extends UnixRuntimeClient {
     request: ExecutionOutputReadRequest,
   ): Promise<ExecutionOutputReadResult> {
     return this.read(request);
+  }
+}
+
+class ExecutionObservationClient extends UnixRuntimeClient {
+  public constructor(
+    private readonly observe: (
+      request: ExecutionObservationRequest,
+      signal?: AbortSignal,
+    ) => Promise<ExecutionObservationResult>,
+  ) {
+    super("/unused/execution-observation-owner.sock");
+  }
+
+  public override observeExecution(
+    request: ExecutionObservationRequest,
+    signal?: AbortSignal,
+  ): Promise<ExecutionObservationResult> {
+    return this.observe(request, signal);
   }
 }
 

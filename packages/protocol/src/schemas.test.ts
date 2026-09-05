@@ -16,6 +16,8 @@ import {
   artifactReadResultSchema,
   artifactReadTransportRequestSchema,
   defineRuntimeCapabilities,
+  executionObserveResultSchema,
+  executionObserveTransportRequestSchema,
   executionOutputReadResultSchema,
   executionOutputReadTransportRequestSchema,
   executionWaitV2ResultSchema,
@@ -284,6 +286,91 @@ describe("canonical transport schemas", () => {
           retention: { minimumAvailableSequence: 1, source: "durable" },
           sessionId: "session-1",
           stream: "pty",
+          ...invalid,
+        }),
+      ).toThrow();
+    }
+  });
+
+  it("bounds compact Execution observation and derives its terminal hints", () => {
+    expect(
+      executionObserveTransportRequestSchema.parse({
+        executionId: "execution-1",
+        generation: 2,
+        sessionId: "session-1",
+      }),
+    ).toEqual({
+      executionId: "execution-1",
+      generation: 2,
+      sessionId: "session-1",
+      waitMs: 10_000,
+    });
+    expect(() =>
+      executionObserveTransportRequestSchema.parse({
+        executionId: "execution-1",
+        generation: 2,
+        sessionId: "session-1",
+        waitMs: 30_001,
+      }),
+    ).toThrow();
+
+    const bytes = Buffer.alloc(64 * 1024, 0xa5);
+    const maximum = executionObserveResultSchema.parse({
+      gap: null,
+      identity: { executionId: "execution-1", generation: 2, sessionId: "session-1" },
+      nextActions: [],
+      nextCursor: "a".repeat(2_048),
+      output: {
+        byteLength: bytes.length,
+        contentBase64: bytes.toString("base64"),
+        encoding: "base64",
+        hasMore: false,
+        retention: { minimumAvailableSequence: 1, source: "durable" },
+        stream: "pty",
+        textStatus: "omitted_for_budget",
+      },
+      state: {
+        completed: true,
+        executionState: "COMPLETED",
+        persistenceLag: "none",
+      },
+    });
+    expect(new TextEncoder().encode(JSON.stringify(maximum)).byteLength).toBeLessThanOrEqual(
+      96 * 1024,
+    );
+
+    const active = {
+      gap: null,
+      identity: { executionId: "execution-1", generation: 2, sessionId: "session-1" },
+      nextActions: ["wait_for_completion"],
+      nextCursor: null,
+      output: {
+        byteLength: 0,
+        contentBase64: "",
+        encoding: "base64",
+        hasMore: false,
+        retention: { minimumAvailableSequence: 1, source: "durable" },
+        stream: "pty",
+        text: "",
+        textStatus: "complete",
+      },
+      state: {
+        completed: false,
+        executionState: "RUNNING",
+        persistenceLag: "possible",
+      },
+    } as const;
+    expect(executionObserveResultSchema.parse(active)).toEqual(active);
+    for (const invalid of [
+      { nextActions: [] },
+      { state: { ...active.state, completed: true } },
+      { state: { ...active.state, persistenceLag: "none" } },
+      { output: { ...active.output, text: undefined, textStatus: "complete" } },
+      { output: { ...active.output, text: "replacement", textStatus: "unaligned_utf8" } },
+    ]) {
+      expect(() =>
+        executionObserveResultSchema.parse({
+          ...active,
           ...invalid,
         }),
       ).toThrow();

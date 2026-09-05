@@ -8,6 +8,8 @@ import {
   type ActionLookupResult,
   type ArtifactReadRequest,
   type ArtifactReadResult,
+  type ExecutionObservationRequest,
+  type ExecutionObservationResult,
   type ExecutionOutputReadRequest,
   type ExecutionOutputReadResult,
   type ExecutionWaitRequest,
@@ -116,6 +118,7 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
       features: [
         "action.lookup.v1",
         "artifact.read.v1",
+        "execution.observe.v1",
         "execution.output.read.v1",
         "execution.wait.v2",
         "runtime.capabilities.v1",
@@ -201,6 +204,31 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
       return await this.#withSession(request.sessionId, "execution.output.read", (client) =>
         client.readExecutionOutput(request),
       );
+    } catch (error) {
+      if (error instanceof RuntimeError && error.code === "SESSION_NOT_FOUND") {
+        throw new RuntimeError(
+          "EXECUTION_NOT_FOUND",
+          "Execution was not found in the requested scope",
+        );
+      }
+      throw error;
+    }
+  }
+
+  public async observeExecution(
+    request: ExecutionObservationRequest,
+    signal?: AbortSignal,
+  ): Promise<ExecutionObservationResult> {
+    try {
+      return await this.#withSession(request.sessionId, "execution.observe", (client) => {
+        if (client.observeExecution === undefined) {
+          throw new RuntimeError(
+            "INVALID_REQUEST",
+            "Target Runtime owner does not support compact Execution observation",
+          );
+        }
+        return client.observeExecution(request, signal);
+      });
     } catch (error) {
       if (error instanceof RuntimeError && error.code === "SESSION_NOT_FOUND") {
         throw new RuntimeError(

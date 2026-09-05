@@ -10,6 +10,7 @@ import {
   actionLookupTransportRequestSchema,
   artifactReadTransportRequestSchema,
   executeTransportRequestSchema,
+  executionObserveTransportRequestSchema,
   executionOutputReadTransportRequestSchema,
   executionWaitV2TransportRequestSchema,
   inputTransportRequestSchema,
@@ -143,6 +144,37 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
           sessionId: input.sessionId,
         }),
       ),
+  );
+
+  server.registerTool(
+    "execution_observe",
+    {
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      description:
+        "Observe one exact Execution with one bounded wait followed by one immediate durable PTY-output read. Raw base64 is authoritative; readable text visibly escapes terminal controls and is omitted rather than corrupted at UTF-8 or response-budget boundaries. completed means terminal, not successful. UNKNOWN directs only the original Actor and idempotency key to action_lookup.",
+      inputSchema: executionObserveTransportRequestSchema,
+      title: "Observe Execution compactly",
+    },
+    async (input, extra) =>
+      call(() => {
+        if (gateway.observeExecution === undefined) {
+          throw new RuntimeError(
+            "INVALID_REQUEST",
+            "Connected Runtime does not support compact Execution observation",
+          );
+        }
+        return gateway.observeExecution(
+          {
+            ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+            executionId: input.executionId,
+            generation: input.generation,
+            ...(input.maxBytes === undefined ? {} : { maxBytes: input.maxBytes }),
+            sessionId: input.sessionId,
+            waitMs: input.waitMs,
+          },
+          extra.mcpReq.signal,
+        );
+      }),
   );
 
   server.registerTool(

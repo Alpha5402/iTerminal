@@ -102,6 +102,10 @@ See also [ADR-0072](./0072-bounded-cancellable-execution-wait.md): add an indepe
 Execution wait whose timeout and cancellation release observer resources without changing the PTY
 or shared completion.
 
+See also [ADR-0073](./0073-compact-execution-observation.md): compose one bounded wait with one
+immediate durable output read into an exact-scope compact Agent observation without exposing
+internal Action or Execution records.
+
 Statuses:
 
 - Proposed: evidence or owner decision is still required.

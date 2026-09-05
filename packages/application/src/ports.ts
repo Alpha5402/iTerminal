@@ -165,6 +165,9 @@ export const MAX_EXECUTION_OUTPUT_READ_BYTES = 64 * 1024;
 export const MAX_EXECUTION_OUTPUT_RESPONSE_BYTES = 96 * 1024;
 export const DEFAULT_EXECUTION_WAIT_MILLISECONDS = 10_000;
 export const MAX_EXECUTION_WAIT_MILLISECONDS = 30_000;
+export const MAX_EXECUTION_OBSERVATION_TEXT_SOURCE_BYTES = 8 * 1024;
+export const MAX_EXECUTION_OBSERVATION_TEXT_BYTES = 32 * 1024;
+export const MAX_EXECUTION_OBSERVATION_RESPONSE_BYTES = 96 * 1024;
 
 export interface ArtifactReadRequest {
   readonly artifactId: string;
@@ -257,6 +260,42 @@ export interface ExecutionWaitResult {
   readonly completed: boolean;
   readonly executionId: string;
   readonly executionState: Execution["status"];
+}
+
+export interface ExecutionObservationRequest extends ExecutionOutputReadRequest {
+  readonly waitMs?: number;
+}
+
+export type ExecutionObservationNextAction =
+  "continue_output" | "wait_for_completion" | "acknowledge_output_gap" | "lookup_original_action";
+
+export interface ExecutionObservationResult {
+  readonly gap: ExecutionOutputGap | null;
+  readonly identity: Readonly<{
+    readonly executionId: string;
+    readonly generation: number;
+    readonly sessionId: string;
+  }>;
+  readonly nextActions: readonly ExecutionObservationNextAction[];
+  readonly nextCursor: string | null;
+  readonly output: Readonly<{
+    readonly byteLength: number;
+    readonly contentBase64: string;
+    readonly encoding: "base64";
+    readonly hasMore: boolean;
+    readonly retention: Readonly<{
+      readonly minimumAvailableSequence: number;
+      readonly source: "durable";
+    }>;
+    readonly stream: "pty";
+    readonly text?: string | undefined;
+    readonly textStatus: "complete" | "unaligned_utf8" | "omitted_for_budget";
+  }>;
+  readonly state: Readonly<{
+    readonly completed: boolean;
+    readonly executionState: Execution["status"];
+    readonly persistenceLag: "none" | "possible";
+  }>;
 }
 
 export interface ExecutionWaitScheduler {

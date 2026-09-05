@@ -50,6 +50,7 @@ describe("M4 stdio MCP bridge", () => {
       "events_query",
       "execute",
       "execution_get",
+      "execution_observe",
       "execution_output_read",
       "execution_wait",
       "execution_wait_v2",
@@ -89,6 +90,7 @@ describe("M4 stdio MCP bridge", () => {
     });
     expect(capabilities.features).not.toContain("artifact.read.v1");
     expect(capabilities.features).not.toContain("execution.output.read.v1");
+    expect(capabilities.features).not.toContain("execution.observe.v1");
     expect(
       await callTool<ArtifactReadResult>(first, "artifact_read", {
         artifactId: "art-no-durable-reader",
