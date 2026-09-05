@@ -75,7 +75,7 @@
 | [E04](05-engineering.md#e04)         | Application 内部职责拆分          | A02、B07、D01                | Sol  | 未开始 |
 | [E05](05-engineering.md#e05)         | Console 控制器拆分                | C01、C02、C05、C06、D07、E01 | Luna | 未开始 |
 | [E06](05-engineering.md#e06)         | 必须执行的分层测试门禁            | A02、B04、C01、C04、D04      | Sol  | 未开始 |
-| [F01](06-product-and-handoff.md#f01) | Shell 支持边界与兼容场景          | 无                           | Luna | 未开始 |
+| [F01](06-product-and-handoff.md#f01) | Shell 支持边界与兼容场景          | 无                           | Luna | 已验收 |
 | [F02](06-product-and-handoff.md#f02) | Agent 用户任务基准                | B04、B05、C02、E06           | Sol  | 未开始 |
 | [F03](06-product-and-handoff.md#f03) | 多 Agent 授权边界设计稿           | D05                          | Sol  | 未开始 |
 | [F04](06-product-and-handoff.md#f04) | 路线收敛和完成度对账              | F01、F02、F03                | Luna | 未开始 |
