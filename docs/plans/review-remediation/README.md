@@ -56,7 +56,7 @@
 | [B05](02-observation-mcp.md#b05)     | 缩短 MCP 元信息                   | 无                           | Luna | 已验收 |
 | [B06](02-observation-mcp.md#b06)     | 历史查询的持久层回退与过期契约    | A06、B02                     | Sol  | 未开始 |
 | [B07](02-observation-mcp.md#b07)     | 有界内存与完成态资源释放          | B03、B06                     | Sol  | 未开始 |
-| [C01](03-console.md#c01)             | 浏览器提交身份与 UNKNOWN 核对     | A04、A06                     | Sol  | 进行中 |
+| [C01](03-console.md#c01)             | 浏览器提交身份与 UNKNOWN 核对     | A04、A06                     | Sol  | 已验收 |
 | [C02](03-console.md#c02)             | 可见的行输入 / 原始输入模式       | C01                          | Sol  | 未开始 |
 | [C03](03-console.md#c03)             | 输入上下文不确定的可操作解释      | C02                          | Luna | 未开始 |
 | [C04](03-console.md#c04)             | 保留屏幕颜色与单元格属性          | A05                          | Sol  | 未开始 |
