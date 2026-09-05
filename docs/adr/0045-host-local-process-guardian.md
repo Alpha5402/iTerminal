@@ -24,6 +24,10 @@ The Router cannot safely send an unauthenticated remote `kill`, and a database r
 ### Exact process-tree registration
 
 - `PtyShellExecutor` registers a Shell only after its integration handshake succeeds and before the Session becomes READY.
+- An unexpected Shell/Executor lifecycle notification causes the Executor to unregister the exact
+  Shell during local cleanup; Application separately persists the current generation as `BROKEN`.
+  Graceful close detaches the Application binding first, so the resulting child exit cannot create a
+  second broken transition.
 - Registration captures the Shell PID, process start identity, and unique PTY TTY from `ps`; it does not assume `node-pty` makes the Shell an operating-system session leader.
 - Reclamation first revalidates the Shell PID and start identity. Its snapshot is the union of the current PPID descendant tree and every process still attached to the same PTY TTY, covering foreground and background job-control groups. It first sends `SIGSTOP` to the whole snapshot so terminating a child cannot wake a parent script and trigger its next external effect, then sends `SIGTERM`, waits a bounded grace period, and sends `SIGKILL` only to snapshot members whose PID/start identity still match. PPID is deliberately not part of the second check because surviving children may be reparented after TERM.
 - This identity check reduces PID-reuse risk; it does not elevate privileges. The Guardian can terminate only same-user processes permitted by the host kernel.

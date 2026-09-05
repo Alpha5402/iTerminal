@@ -22,6 +22,12 @@ READY   NUL prompt-exit-code NUL cwd NUL
 
 The Runtime owns the pending Action ID; it does not inject the ID into user commands. It associates the first relevant PREEXEC/RESULT/READY sequence after dispatch with that pending Action. RESULT means the dispatch wrapper finished; READY independently proves that the interactive Shell returned to its prompt. If an interrupt prevents RESULT, READY's exit code is the fallback.
 
+The control channel proves command boundaries only while its owning Executor remains live. A fatal
+control parser/read failure or Shell process exit is reported through the Executor lifecycle port;
+Application, not the adapter, decides the generation's `BROKEN` and active Execution `UNKNOWN`
+transition. A process exit observed by node-pty is Shell lifecycle evidence, not a substitute RESULT
+or READY frame and not a command exit code.
+
 The M0 spike uses a private POSIX FIFO to prove physical separation and streaming behavior. The production design should use a close-on-exec control descriptor or equivalent supervisor channel so ordinary child processes do not inherit it. A nonce-authenticated OSC/DCS protocol remains a compatibility fallback, not the default. The comparison is recorded in [the control-channel compatibility matrix](../architecture/shell-integration-control-channel.md).
 
 On macOS bash 3.2, interactive `eval` can print a syntax error and still return zero. Its adapter therefore uses the same `/bin/bash -n -c` as a syntax-only compatibility check before evaluating valid input in the persistent Shell. The checker does not execute valid Actions or carry runtime state.

@@ -20,6 +20,7 @@ import type {
   ShellExecutionResult,
   ShellExecutor,
   ShellExecutorFactory,
+  ShellExecutorLifecycleEvent,
 } from "@iterminal/application";
 import {
   CANONICAL_TERMINAL_COLUMNS,
@@ -99,7 +100,11 @@ export class PtyShellExecutor implements ShellExecutor {
   readonly #processGuardian: ShellProcessGuardian | undefined;
   readonly #sessionOutput = new BoundedByteRing(SESSION_RING_BYTES);
   readonly #sensitiveOutput = new SensitiveOutputSanitizer();
+  readonly #executorId: string;
+  readonly #onLifecycle: (event: ShellExecutorLifecycleEvent) => void;
   readonly #onOutput: (data: string) => void;
+  readonly #sessionGeneration: number;
+  readonly #sessionId: string;
 
   #pending: PendingExecution | undefined;
   #pendingPtyText = "";
@@ -110,14 +115,19 @@ export class PtyShellExecutor implements ShellExecutor {
   #closed = false;
   #fatalError?: Error;
   #guardianRegistered = false;
+  #lifecycleNotified = false;
 
   public readonly shell: ShellKind;
   public readonly shellPid: number;
 
   private constructor(options: CreateExecutorOptions, processGuardian?: ShellProcessGuardian) {
     this.shell = options.shell;
+    this.#executorId = options.executorId;
+    this.#onLifecycle = options.onLifecycle;
     this.#processGuardian = processGuardian;
     this.#onOutput = options.onOutput;
+    this.#sessionGeneration = options.sessionGeneration;
+    this.#sessionId = options.sessionId;
     this.#runtimeDirectory = mkdtempSync(join(tmpdir(), "iterminal-runtime-"));
     this.#controlFifo = join(this.#runtimeDirectory, "control.fifo");
     let controlFd: number | undefined;
@@ -173,6 +183,11 @@ export class PtyShellExecutor implements ShellExecutor {
       if (!this.#closed) {
         this.#fail(
           new Error(`Persistent Shell exited unexpectedly (exit=${exitCode}, signal=${signal})`),
+          {
+            exitCode,
+            reason: "shell_process_exit",
+            ...(signal === undefined ? {} : { signal }),
+          },
         );
       }
     });
@@ -500,7 +515,17 @@ export class PtyShellExecutor implements ShellExecutor {
     });
   }
 
-  #fail(error: Error): void {
+  #fail(
+    error: Error,
+    lifecycle: Readonly<{
+      exitCode?: number;
+      reason: ShellExecutorLifecycleEvent["reason"];
+      signal?: number;
+    }> = { reason: "executor_failure" },
+  ): void {
+    if (this.#fatalError === undefined) {
+      this.#notifyLifecycle(lifecycle);
+    }
     this.#fatalError ??= error;
     if (this.#pending !== undefined) {
       clearTimeout(this.#pending.timer);
@@ -513,6 +538,30 @@ export class PtyShellExecutor implements ShellExecutor {
     }
     this.#waiters.clear();
     queueMicrotask(() => this.close());
+  }
+
+  #notifyLifecycle(
+    lifecycle: Readonly<{
+      exitCode?: number;
+      reason: ShellExecutorLifecycleEvent["reason"];
+      signal?: number;
+    }>,
+  ): void {
+    if (this.#lifecycleNotified || this.#closed) return;
+    this.#lifecycleNotified = true;
+    try {
+      this.#onLifecycle({
+        executorId: this.#executorId,
+        reason: lifecycle.reason,
+        sessionGeneration: this.#sessionGeneration,
+        sessionId: this.#sessionId,
+        type: "exited",
+        ...(lifecycle.exitCode === undefined ? {} : { exitCode: lifecycle.exitCode }),
+        ...(lifecycle.signal === undefined ? {} : { signal: lifecycle.signal }),
+      });
+    } catch {
+      // Lifecycle delivery failure must not keep a failed Shell process alive.
+    }
   }
 }
 

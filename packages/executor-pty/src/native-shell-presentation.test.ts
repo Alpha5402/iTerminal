@@ -25,8 +25,12 @@ describe.each(["bash", "zsh"] as const)("native %s prompt dispatch", (shell: She
     const started: string[] = [];
     const executor = await new PtyShellExecutorFactory().create({
       checkpointEnvironmentKeys: [],
+      executorId: `native-${shell}-executor`,
+      onLifecycle: () => undefined,
       onOutput: (data) => observed.push(data),
       shell,
+      sessionGeneration: 1,
+      sessionId: `native-${shell}-session`,
       workspaceRoot: workspace,
     });
     const command = `printf '${shell.toUpperCase()}_NATIVE_OK\\n'`;
@@ -54,8 +58,12 @@ describe.each(["bash", "zsh"] as const)("native %s prompt dispatch", (shell: She
     fixtures.push(workspace);
     const executor = await new PtyShellExecutorFactory().create({
       checkpointEnvironmentKeys: [],
+      executorId: `multiline-${shell}-executor`,
+      onLifecycle: () => undefined,
       onOutput: () => undefined,
       shell,
+      sessionGeneration: 1,
+      sessionId: `multiline-${shell}-session`,
       workspaceRoot: workspace,
     });
     try {
@@ -79,8 +87,12 @@ describe.each(["bash", "zsh"] as const)("native %s prompt dispatch", (shell: She
     fixtures.push(workspace);
     const executor = await new PtyShellExecutorFactory().create({
       checkpointEnvironmentKeys: [],
+      executorId: `syntax-${shell}-executor`,
+      onLifecycle: () => undefined,
       onOutput: () => undefined,
       shell,
+      sessionGeneration: 1,
+      sessionId: `syntax-${shell}-session`,
       workspaceRoot: workspace,
     });
     try {
