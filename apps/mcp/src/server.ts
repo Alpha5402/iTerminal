@@ -40,23 +40,14 @@ const screenRectangle = z.strictObject({
     .max(MAX_TERMINAL_ROWS - 1),
 });
 
+export const MCP_INSTRUCTIONS =
+  "Use one shared Session and pass its exact generation and target execution to mutations. Execute returns before completion; observe with the operation's read tool. PTY_BUSY means wait or choose another Session. After DELIVERY_UNKNOWN, inspect the idempotency key/events before any retry. PTY output is one merged stream. Input/control must target the current generation/execution and obey policy/Guard. UNKNOWN means side effects are unconfirmed, not safe to replay. Approvals are exact, one-time Human decisions for Agent Execute. Never expose or submit secrets through ordinary observation/input.";
+
 export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServer {
   const server = new McpServer(
     { name: "iterminal", version: "0.7.1" },
     {
-      instructions:
-        "Create or select one shared Session, then pass its exact generation to every operation. " +
-        "execute starts one top-level Shell command and returns immediately; use execution_wait or events_query to observe it. " +
-        "PTY_BUSY means another Execute is active: wait for it, send targeted input/control if appropriate, or use another Session. " +
-        "BACKPRESSURE means no Action was admitted; wait for durable delivery capacity and retry the identical idempotency key. " +
-        "RATE_LIMITED means no Action was admitted; wait for retryAfterMilliseconds and retry the identical idempotency key. " +
-        "APPROVAL_REQUIRED means the exact Agent Execute proposal has no currently APPROVED one-time Approval; use approval_request and wait for a Human decision, then pass approvalId to execute without changing the command, Actor, Session generation, or Action idempotency key. " +
-        "OWNER_ROUTE_UNAVAILABLE means the durable target has no usable owner route or a read could not reach its registered endpoint; never infer that the Session itself is missing. " +
-        "Before interactive input, inspect interaction_get; INPUT_GUARDED is retryable only after the Guard expires or changes, while POLICY_DENIED requires a Human policy decision. " +
-        "Resize is an explicit shared Action: read geometryVersion from screen_get and handle GEOMETRY_CHANGED by re-observing instead of overwriting another Actor's decision. " +
-        "terminal_state is bounded advisory evidence only; never use its heuristic label as readiness, completion, authorization, approval, or permission to send input. " +
-        "session_fork rebuilds a new PTY from an exact checkpoint; inspect session_checkpoint first and explicitly acknowledge stale context when the parent is not READY. It never copies process, REPL, editor, or implicit Shell state. " +
-        "Never retry a mutating call after DELIVERY_UNKNOWN without first inspecting the idempotency key or durable events.",
+      instructions: MCP_INSTRUCTIONS,
     },
   );
 
@@ -93,7 +84,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
     {
       annotations: { readOnlyHint: true, openWorldHint: false },
       description:
-        "Read bounded metadata for the latest exact-generation Shell checkpoint. Environment values are never returned. stale means the parent is not READY and only the last completed boundary is available; a checkpoint never contains process, REPL, editor, descriptor, alias/function, or trap state.",
+        "Read checkpoint metadata for the exact generation; values and process/editor state are omitted. stale means the last completed boundary is used.",
       inputSchema: z.strictObject({ generation, sessionId }),
       title: "Inspect Session checkpoint",
     },
@@ -106,7 +97,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
     {
       annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
       description:
-        "Create a new independent Session/PTY/Shell from an exact versioned checkpoint. The child restores only canonical workspace/cwd, Shell kind, and operator-allowlisted environment; it shares workspace files and does not copy processes, REPL/editor state, job control, aliases, functions, or traps. Read session_checkpoint first. Set allowStale only after explicitly accepting a RUNNING/RESERVED/BROKEN parent's last completed boundary. Retry transport uncertainty only with the identical idempotency key.",
+        "Create a Session from an exact checkpoint. Set allowStale only after accepting the parent's last completed boundary; retry uncertainty with the same idempotencyKey.",
       inputSchema: z.strictObject({
         allowStale: z.boolean().default(false),
         expectedCheckpointVersion: z.number().int().positive(),
@@ -133,7 +124,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
     "session_list",
     {
       annotations: { readOnlyHint: true, openWorldHint: false },
-      description: "List live Sessions known through the configured Runtime daemon or Router.",
+      description: "List live Sessions from the Runtime daemon or Router.",
       inputSchema: z.strictObject({}),
       title: "List terminal Sessions",
     },
@@ -145,7 +136,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
     {
       annotations: { destructiveHint: true, idempotentHint: false, openWorldHint: false },
       description:
-        "Close the exact Session generation and terminate its PTY/process group. Closed live state cannot be resumed.",
+        "Close the exact generation and terminate its PTY/process group; closed state cannot resume.",
       inputSchema: z.strictObject({ generation, sessionId }),
       title: "Close terminal Session",
     },
@@ -158,7 +149,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
     {
       annotations: { destructiveHint: false, idempotentHint: true, openWorldHint: false },
       description:
-        "Request Human approval for one exact future execute Action. The proposal binds Session generation, Agent identity, command, and actionIdempotencyKey. Reuse requestIdempotencyKey only for the identical proposal. This does not execute the command and does not classify command risk heuristically.",
+        "Request Human approval for one exact Agent Execute proposal. Reuse requestIdempotencyKey only for the identical proposal; this does not execute it.",
       inputSchema: z.strictObject({
         actionIdempotencyKey: idempotencyKey,
         command: z
@@ -200,7 +191,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
     {
       annotations: { readOnlyHint: true, openWorldHint: false },
       description:
-        "Read one Approval requested by this exact Agent. APPROVED may be consumed once by the bound execute proposal; EXPIRED, DENIED, and CONSUMED cannot authorize a different Action.",
+        "Read one Approval for this exact Agent; only its bound APPROVED proposal may consume it once.",
       inputSchema: z.strictObject({
         approvalId: z.string().min(1).max(256),
         generation,
@@ -224,7 +215,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
     {
       annotations: { readOnlyHint: true, openWorldHint: false },
       description:
-        "List up to 100 newest Approvals requested by this exact Agent in one Session generation. Other Agents' proposals are not disclosed.",
+        "List this Agent's newest Approvals in one Session generation; other Agents' proposals are hidden.",
       inputSchema: z.strictObject({
         generation,
         sessionId,
@@ -248,10 +239,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
     {
       annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: true },
       description:
-        "Start one top-level command in the Session's persistent Shell and return its Action/Execution immediately. " +
-        "Only one Execute may be active. On PTY_BUSY, inspect activeExecutionId and choose execution_wait, input, or control. " +
-        "On BACKPRESSURE, no Action/reservation exists: wait for Outbox capacity and retry this identical request key. " +
-        "On RATE_LIMITED, no Action/reservation exists: wait for retryAfterMilliseconds and retry this identical request key.",
+        "Start one top-level Shell command; returns Action/Execution immediately. approvalId binds an exact Human-approved proposal. Reuse idempotencyKey only for the identical request.",
       inputSchema: z.strictObject({
         approvalId: z.string().min(1).max(256).optional(),
         command: z.string().max(256 * 1024),
@@ -322,9 +310,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
     {
       annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: true },
       description:
-        "Atomically write one input batch to the exact active foreground Execution. Pass expectedScreenVersion when acting on observed screen state. " +
-        "For an independently chosen command to a known newline-delimited foreground command interface only, use lineInput with expectedInputVersion=inputContext.version and expectedInteractionVersion=interaction_get.version; require inputContext.state=clear and the exact target. This mode requires one printable LF-terminated line and cannot combine with screen CAS. It tolerates background logs and browser-local Human drafts; concurrent submitted writes still use CAS. Never use it for TUI/editor/password/confirmation prompts or to bypass a rejected screen-dependent action. INPUT_CONTEXT_CHANGED requires re-observation; INPUT_CONTEXT_UNSAFE requires inspecting prior raw input or uncertain delivery, not dropping the precondition. There is no input-context reset API; unknown remains unsafe for this Execution. " +
-        "EXECUTION_CHANGED or SCREEN_CHANGED means refresh before deciding again. INPUT_GUARDED means wait for Guard expiry/change and re-observe; POLICY_DENIED requires a Human policy change.",
+        "Write input to the exact foreground Execution. Use expectedScreenVersion for screen-dependent input; use lineInput only for one printable LF-ended line with its two context versions. Do not use lineInput for TUI/editor/password/confirmation. Re-observe changed or guarded targets before retrying.",
       inputSchema: z.strictObject({
         data: z.string().max(64 * 1024),
         expectedScreenVersion: z.number().int().nonnegative().optional(),
