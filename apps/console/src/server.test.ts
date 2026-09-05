@@ -9,6 +9,10 @@ import { startRuntimeDaemon, type RuntimeDaemonHandle } from "@iterminal/runtime
 import { UnixRuntimeClient } from "@iterminal/runtime-rpc";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket, type RawData } from "ws";
+import {
+  approvedExecuteRequestFixture,
+  lineInputRequestFixture,
+} from "../../../packages/protocol/src/fixtures.js";
 
 import {
   createHumanConsoleApp,
@@ -510,15 +514,79 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
     });
     const readyInput = await request(consoleServer, cookie, `/api/sessions/${session.id}/input`, {
       body: {
-        data: "READY_BYPASS\n",
+        data: lineInputRequestFixture.data,
         generation: session.generation,
         idempotencyKey: "m5-ready-bypass",
+        lineInput: lineInputRequestFixture.lineInput,
         targetExecutionId: "exe-none",
       },
       method: "POST",
     });
     expect(readyInput.status).toBe(409);
     expect(await bodyErrorCode(readyInput)).toBe("SESSION_NOT_READY");
+    const forgedActor = await request(
+      consoleServer,
+      cookie,
+      `/api/sessions/${session.id}/execute`,
+      {
+        body: {
+          actor: approvedExecuteRequestFixture.actor,
+          approvalId: approvedExecuteRequestFixture.approvalId,
+          command: "echo forged",
+          generation: session.generation,
+          idempotencyKey: "forged-body-actor",
+        },
+        method: "POST",
+      },
+    );
+    expect(forgedActor.status).toBe(400);
+    const approvalBody = await request(
+      consoleServer,
+      cookie,
+      `/api/sessions/${session.id}/execute`,
+      {
+        body: {
+          approvalId: approvedExecuteRequestFixture.approvalId,
+          command: "echo approval-parser",
+          generation: session.generation,
+          idempotencyKey: "approval-parser",
+        },
+        method: "POST",
+      },
+    );
+    expect(approvalBody.status).not.toBe(400);
+    expect(await bodyErrorCode(approvalBody)).toBe("POLICY_DENIED");
+    const invalidLineInput = await request(
+      consoleServer,
+      cookie,
+      `/api/sessions/${session.id}/input`,
+      {
+        body: {
+          data: lineInputRequestFixture.data,
+          generation: session.generation,
+          idempotencyKey: "invalid-console-line-input",
+          lineInput: { expectedInputVersion: -1, expectedInteractionVersion: 1 },
+          targetExecutionId: "exe-none",
+        },
+        method: "POST",
+      },
+    );
+    expect(invalidLineInput.status).toBe(400);
+    const invalidInputGeneration = await request(
+      consoleServer,
+      cookie,
+      `/api/sessions/${session.id}/input`,
+      {
+        body: {
+          data: lineInputRequestFixture.data,
+          generation: 0,
+          idempotencyKey: "invalid-console-generation",
+          targetExecutionId: "exe-none",
+        },
+        method: "POST",
+      },
+    );
+    expect(invalidInputGeneration.status).toBe(400);
 
     const proposal = await runtime.requestExecuteApproval({
       actionIdempotencyKey: "m10-console-approved-action",
