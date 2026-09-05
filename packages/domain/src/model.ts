@@ -98,6 +98,8 @@ export interface TerminalScreenFrame {
 
 export interface TerminalScreenSnapshot extends TerminalScreenFrame {
   readonly lines: readonly string[];
+  /** True when a viewport row continues the preceding row through a soft wrap. */
+  readonly wrappedRows?: readonly boolean[];
 }
 
 export interface TerminalScreenRegionResult {
@@ -147,6 +149,7 @@ export interface TerminalScreenCellsResult {
 export interface TerminalScreenChangedRow {
   readonly row: number;
   readonly text: string;
+  readonly wrapped?: boolean;
 }
 
 export type TerminalScreenDiffResult =
@@ -273,6 +276,20 @@ export interface InteractionState {
   readonly policy: InputPolicyMode;
   readonly version: number;
   readonly guard?: InteractionGuard;
+  /** Live observation only; not persisted as policy/Guard state. */
+  readonly inputContext?: InputContext;
+}
+
+export interface InputContext {
+  readonly targetExecutionId: string;
+  readonly version: number;
+  readonly state: "clear" | "pending" | "unknown";
+  readonly unknownReason?: "untracked_input" | "delivery";
+}
+
+export interface LineInputPrecondition {
+  readonly expectedInputVersion: number;
+  readonly expectedInteractionVersion: number;
 }
 
 export interface Session {
@@ -383,6 +400,11 @@ export interface InputAction extends ActionBase {
   readonly targetExecutionId: string;
   readonly data: string;
   readonly expectedScreenVersion?: number;
+  readonly lineInput?: LineInputPrecondition;
+  readonly terminalResponse?: {
+    readonly kind: "cursor_position";
+    readonly sourceScreenVersion: number;
+  };
   status: InteractionActionStatus;
 }
 

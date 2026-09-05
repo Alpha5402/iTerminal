@@ -309,7 +309,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
     {
       annotations: { readOnlyHint: true, openWorldHint: false },
       description:
-        "Read the exact Session generation's input policy, version, and active short Human Interaction Guard. Use this before targeted input/control and after INPUT_GUARDED or uncertain Guard changes. This tool cannot mutate Human policy or acquire a Guard.",
+        "Read the exact Session generation's input policy, version, active short Human Guard, and live inputContext (targetExecutionId, version, clear/pending/unknown). Output alone does not change inputContext. A clear context only excludes Runtime-observed pending input; it is not proof of application readiness. This tool cannot mutate Human policy or acquire a Guard.",
       inputSchema: z.strictObject({ generation, sessionId }),
       title: "Get terminal interaction policy",
     },
@@ -323,10 +323,17 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
       annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: true },
       description:
         "Atomically write one input batch to the exact active foreground Execution. Pass expectedScreenVersion when acting on observed screen state. " +
+        "For an independently chosen command to a known newline-delimited foreground command interface only, use lineInput with expectedInputVersion=inputContext.version and expectedInteractionVersion=interaction_get.version; require inputContext.state=clear and the exact target. This mode requires one printable LF-terminated line and cannot combine with screen CAS. It tolerates background logs and browser-local Human drafts; concurrent submitted writes still use CAS. Never use it for TUI/editor/password/confirmation prompts or to bypass a rejected screen-dependent action. INPUT_CONTEXT_CHANGED requires re-observation; INPUT_CONTEXT_UNSAFE requires inspecting prior raw input or uncertain delivery, not dropping the precondition. There is no input-context reset API; unknown remains unsafe for this Execution. " +
         "EXECUTION_CHANGED or SCREEN_CHANGED means refresh before deciding again. INPUT_GUARDED means wait for Guard expiry/change and re-observe; POLICY_DENIED requires a Human policy change.",
       inputSchema: z.strictObject({
         data: z.string().max(64 * 1024),
         expectedScreenVersion: z.number().int().nonnegative().optional(),
+        lineInput: z
+          .strictObject({
+            expectedInputVersion: z.number().int().nonnegative(),
+            expectedInteractionVersion: z.number().int().positive(),
+          })
+          .optional(),
         idempotencyKey,
         generation,
         sessionId,
@@ -339,6 +346,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
         gateway.sendInput({
           actor,
           data: input.data,
+          ...(input.lineInput === undefined ? {} : { lineInput: input.lineInput }),
           idempotencyKey: input.idempotencyKey,
           sessionGeneration: input.generation,
           sessionId: input.sessionId,

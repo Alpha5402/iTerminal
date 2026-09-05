@@ -76,6 +76,12 @@ const inputSchema = identitySchema.extend({
     .min(1)
     .max(64 * 1_024),
   expectedScreenVersion: z.number().int().nonnegative().optional(),
+  lineInput: z
+    .strictObject({
+      expectedInputVersion: z.number().int().nonnegative(),
+      expectedInteractionVersion: z.number().int().positive(),
+    })
+    .optional(),
   idempotencyKey: z.string().min(1).max(256),
   targetExecutionId: z.string().min(1).max(256),
 });
@@ -399,6 +405,7 @@ export async function createHumanConsoleApp(
         await options.gateway.sendInput({
           actor,
           data: body.data,
+          ...(body.lineInput === undefined ? {} : { lineInput: body.lineInput }),
           idempotencyKey: body.idempotencyKey,
           sessionGeneration: body.generation,
           sessionId,
@@ -950,7 +957,7 @@ function actorForRequest(
   if (actors.size >= maxActors) {
     throw new ConsoleHttpError(503, "BACKPRESSURE", "Console Actor capacity is exhausted", true);
   }
-  const id = randomUUID();
+  const id = isConsoleActorCookieId(cookieId) ? cookieId : randomUUID();
   const actor: Actor = {
     capabilities: ACTOR_CAPABILITY_PROFILES.human,
     client: "human-console-web",
@@ -964,6 +971,13 @@ function actorForRequest(
     `${CONSOLE_COOKIE}=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400`,
   );
   return actor;
+}
+
+function isConsoleActorCookieId(value: string | undefined): value is string {
+  return (
+    value !== undefined &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value)
+  );
 }
 
 function knownActorId(
@@ -1427,6 +1441,10 @@ function allowedNextActions(code: string): readonly string[] {
     case "SCREEN_CHANGED":
     case "RESYNC_REQUIRED":
       return ["refresh_screen", "reconnect_stream"];
+    case "INPUT_CONTEXT_CHANGED":
+      return ["observe_interaction", "retry_after_reobserve"];
+    case "INPUT_CONTEXT_UNSAFE":
+      return ["observe_interaction", "inspect_input_delivery", "inspect_raw_input_state"];
     case "GEOMETRY_CHANGED":
       return ["refresh_screen", "retry_after_reobserve"];
     case "CHECKPOINT_CHANGED":

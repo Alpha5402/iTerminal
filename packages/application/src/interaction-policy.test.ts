@@ -49,6 +49,206 @@ const system: Actor = {
 };
 
 describe("M6.5 interaction policy and short Guard", () => {
+  it("admits explicit line input through output churn but retains screen CAS and idempotency", async () => {
+    const fixture = await createRunningFixture();
+    const { runtime, session, executor, executionId } = fixture;
+    const base = {
+      actor: agent,
+      sessionId: session.id,
+      sessionGeneration: session.generation,
+      targetExecutionId: executionId,
+    };
+    try {
+      const observed = await runtime.getInteractionState(session.id, session.generation);
+      const oldScreen = runtime.getSession(session.id).screenVersion;
+      for (let i = 0; i < 100; i++) executor.output(`log ${i}\r\n`);
+      await expect(
+        runtime.sendInput({
+          ...base,
+          data: "status\n",
+          expectedScreenVersion: oldScreen,
+          idempotencyKey: "old-screen",
+        }),
+      ).rejects.toMatchObject({ code: "SCREEN_CHANGED" });
+      const request = {
+        ...base,
+        data: "status\n",
+        lineInput: {
+          expectedInputVersion: observed.inputContext?.version ?? -1,
+          expectedInteractionVersion: observed.version,
+        },
+        idempotencyKey: "line-once",
+      };
+      const sent = await runtime.sendInput(request);
+      expect(sent.status).toBe("DELIVERED");
+      const replay = await runtime.sendInput(request);
+      expect(replay.id).toBe(sent.id);
+      expect(executor.inputs).toEqual(["status\n"]);
+      await expect(
+        runtime.sendInput({
+          ...request,
+          lineInput: { ...request.lineInput, expectedInputVersion: sent.actionSequence },
+        }),
+      ).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
+      await expect(
+        runtime.sendInput({ ...request, idempotencyKey: "stale-new-key" }),
+      ).rejects.toMatchObject({ code: "INPUT_CONTEXT_CHANGED" });
+      const current = await runtime.getInteractionState(session.id, session.generation);
+      expect(current.inputContext).toEqual({
+        targetExecutionId: executionId,
+        version: sent.actionSequence,
+        state: "clear",
+      });
+    } finally {
+      await runtime.closeSession(session.id, session.generation);
+    }
+  });
+
+  it("rejects pending Human input even after Guard expiry and rejects input/Guard version races", async () => {
+    let now = new Date("2026-09-04T00:00:00Z");
+    const { runtime, session, executor, executionId } = await createRunningFixture(() => now);
+    const base = {
+      sessionId: session.id,
+      sessionGeneration: session.generation,
+      targetExecutionId: executionId,
+    };
+    const observe = () => runtime.getInteractionState(session.id, session.generation);
+    const line = async (key: string) => {
+      const state = await observe();
+      return {
+        ...base,
+        actor: agent,
+        data: "status\n",
+        idempotencyKey: key,
+        lineInput: {
+          expectedInputVersion: state.inputContext?.version ?? -1,
+          expectedInteractionVersion: state.version,
+        },
+      };
+    };
+    try {
+      const stale = await line("before-human");
+      const guard = await runtime.acquireInteractionGuard({
+        ...base,
+        actor: human,
+        expectedVersion: 1,
+        reason: "typing",
+        ttlMilliseconds: 50,
+      });
+      await expect(runtime.sendInput(stale)).rejects.toMatchObject({ code: "INPUT_GUARDED" });
+      await runtime.sendInput({
+        ...base,
+        actor: human,
+        data: "unfinished",
+        idempotencyKey: "human-partial",
+      });
+      now = new Date(now.getTime() + 100);
+      const expired = await observe();
+      expect(expired.version).toBe(guard.version + 1);
+      expect(expired.inputContext?.state).toBe("pending");
+      await expect(runtime.sendInput(stale)).rejects.toMatchObject({
+        code: "INPUT_CONTEXT_CHANGED",
+      });
+      await expect(runtime.sendInput(await line("fresh-but-pending"))).rejects.toMatchObject({
+        code: "INPUT_CONTEXT_UNSAFE",
+      });
+      await runtime.sendInput({
+        ...base,
+        actor: human,
+        data: "\r",
+        idempotencyKey: "human-submit",
+      });
+      const beforeAnotherHuman = await line("human-between-read-write");
+      await runtime.sendInput({
+        ...base,
+        actor: otherHuman,
+        data: "another\n",
+        idempotencyKey: "other-human",
+      });
+      await expect(runtime.sendInput(beforeAnotherHuman)).rejects.toMatchObject({
+        code: "INPUT_CONTEXT_CHANGED",
+      });
+      const race = await line("concurrent-line");
+      const results = await Promise.allSettled([
+        runtime.sendInput(race),
+        runtime.sendInput({ ...race, idempotencyKey: "concurrent-line-2" }),
+      ]);
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(executor.inputs).toEqual(["unfinished", "\r", "another\n", "status\n"]);
+      const beforePolicy = await line("before-policy");
+      const policy = await runtime.setInputPolicy({
+        ...base,
+        actor: human,
+        expectedVersion: (await observe()).version,
+        mode: "human_only",
+      });
+      await expect(runtime.sendInput(beforePolicy)).rejects.toMatchObject({
+        code: "POLICY_DENIED",
+      });
+      await runtime.setInputPolicy({
+        ...base,
+        actor: human,
+        expectedVersion: policy.version,
+        mode: "human_guarded",
+      });
+      await expect(runtime.sendInput(beforePolicy)).rejects.toMatchObject({
+        code: "INPUT_CONTEXT_CHANGED",
+      });
+    } finally {
+      await runtime.closeSession(session.id, session.generation);
+    }
+  });
+
+  it("keeps unknown delivery/control context fail-closed and scopes line input to the exact target", async () => {
+    const { runtime, session, executor, executionId } = await createRunningFixture();
+    const base = {
+      sessionId: session.id,
+      sessionGeneration: session.generation,
+      targetExecutionId: executionId,
+      actor: agent,
+    };
+    try {
+      const request = {
+        ...base,
+        data: "status\n",
+        idempotencyKey: "target",
+        lineInput: { expectedInputVersion: 0, expectedInteractionVersion: 1 },
+      };
+      await expect(
+        runtime.sendInput({ ...request, sessionGeneration: session.generation + 1 }),
+      ).rejects.toMatchObject({ code: "SESSION_GENERATION_CHANGED" });
+      await expect(
+        runtime.sendInput({ ...request, targetExecutionId: "wrong" }),
+      ).rejects.toMatchObject({ code: "EXECUTION_CHANGED" });
+      executor.failInput = true;
+      await expect(runtime.sendInput(request)).rejects.toMatchObject({ code: "DELIVERY_UNKNOWN" });
+      const unknown = await runtime.getInteractionState(session.id, session.generation);
+      expect(unknown.inputContext?.state).toBe("unknown");
+      executor.failInput = false;
+      await runtime.sendInput({
+        ...base,
+        actor: human,
+        data: "\r",
+        idempotencyKey: "cannot-clear-unknown",
+      });
+      const current = await runtime.getInteractionState(session.id, session.generation);
+      await expect(
+        runtime.sendInput({
+          ...request,
+          idempotencyKey: "after-unknown",
+          lineInput: {
+            expectedInputVersion: current.inputContext?.version ?? -1,
+            expectedInteractionVersion: current.version,
+          },
+        }),
+      ).rejects.toMatchObject({ code: "INPUT_CONTEXT_UNSAFE" });
+      expect((await runtime.sendInput(request)).status).toBe("UNKNOWN");
+      expect(executor.inputs).toEqual(["status\n", "\r"]);
+    } finally {
+      await runtime.closeSession(session.id, session.generation);
+    }
+  });
+
   it("denies a missing capability before allocating an Action or touching the PTY", async () => {
     const fixture = await createRunningFixture();
     const inputlessAgent: Actor = {
@@ -181,6 +381,7 @@ describe("M6.5 interaction policy and short Guard", () => {
         fixture.session.generation,
       );
       expect(initial).toEqual({
+        inputContext: { targetExecutionId: fixture.executionId, version: 0, state: "clear" },
         policy: "human_guarded",
         sessionGeneration: fixture.session.generation,
         sessionId: fixture.session.id,
@@ -437,7 +638,7 @@ class InteractiveExecutorFactory implements ShellExecutorFactory {
   public executor: InteractiveExecutor | undefined;
 
   public create(options: CreateExecutorOptions): Promise<ShellExecutor> {
-    this.executor = new InteractiveExecutor(options.shell);
+    this.executor = new InteractiveExecutor(options.shell, options.onOutput);
     return Promise.resolve(this.executor);
   }
 }
@@ -447,7 +648,11 @@ class InteractiveExecutor implements ShellExecutor {
   public readonly inputs: string[] = [];
   public readonly controls: ControlDelivery[] = [];
 
-  public constructor(public readonly shell: ShellKind) {}
+  public failInput = false;
+  public constructor(
+    public readonly shell: ShellKind,
+    public readonly output: (data: string) => void,
+  ) {}
 
   public checkpoint(): Readonly<{
     cwd: string;
@@ -463,6 +668,7 @@ class InteractiveExecutor implements ShellExecutor {
 
   public writeInput(data: string): void {
     this.inputs.push(data);
+    if (this.failInput) throw new Error("uncertain write");
   }
 
   public writeSecret(data: string): void {

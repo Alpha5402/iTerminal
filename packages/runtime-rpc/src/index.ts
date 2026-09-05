@@ -101,6 +101,8 @@ const runtimeErrorCodes = new Set<RuntimeError["code"]>([
   "PTY_BUSY",
   "EXECUTION_CHANGED",
   "SCREEN_CHANGED",
+  "INPUT_CONTEXT_CHANGED",
+  "INPUT_CONTEXT_UNSAFE",
   "GEOMETRY_CHANGED",
   "CHECKPOINT_NOT_FOUND",
   "CHECKPOINT_CHANGED",
@@ -235,6 +237,12 @@ const operationSchemas = {
     actor: actorSchema,
     data: z.string().max(64 * 1024),
     expectedScreenVersion: z.number().int().nonnegative().optional(),
+    lineInput: z
+      .strictObject({
+        expectedInputVersion: z.number().int().nonnegative(),
+        expectedInteractionVersion: z.number().int().positive(),
+      })
+      .optional(),
     idempotencyKey: z.string().min(1).max(256),
     targetExecutionId: z.string().min(1).max(256),
   }),
@@ -668,16 +676,24 @@ export async function startRuntimeRpcServer(options: {
 
 export class UnixRuntimeClient implements RuntimeGateway {
   readonly #authorization: string | undefined;
+  readonly #authorizationProvider: (() => Promise<string>) | undefined;
   readonly #socketPath: string;
 
   public constructor(
     socketPath: string,
-    options: Readonly<{ readonly authorization?: string }> = {},
+    options: Readonly<{
+      readonly authorization?: string;
+      readonly authorizationProvider?: () => Promise<string>;
+    }> = {},
   ) {
+    if (options.authorization !== undefined && options.authorizationProvider !== undefined) {
+      throw new RuntimeError("INVALID_REQUEST", "Choose one Runtime RPC credential source");
+    }
     if (options.authorization !== undefined && options.authorization.length === 0) {
       throw new RuntimeError("INVALID_REQUEST", "Runtime RPC authorization cannot be empty");
     }
     this.#authorization = options.authorization;
+    this.#authorizationProvider = options.authorizationProvider;
     this.#socketPath = socketPath;
   }
 
@@ -824,6 +840,7 @@ export class UnixRuntimeClient implements RuntimeGateway {
       idempotencyKey: request.idempotencyKey,
       sessionId: request.sessionId,
       targetExecutionId: request.targetExecutionId,
+      ...(request.lineInput === undefined ? {} : { lineInput: request.lineInput }),
       ...(request.expectedScreenVersion === undefined
         ? {}
         : { expectedScreenVersion: request.expectedScreenVersion }),
@@ -955,14 +972,20 @@ export class UnixRuntimeClient implements RuntimeGateway {
     return this.#request("session.close", { generation, sessionId });
   }
 
-  #request<T>(
+  async #request<T>(
     operation: RuntimeOperation,
     input: unknown,
     timeoutMilliseconds = DEFAULT_REQUEST_TIMEOUT_MS,
     signal?: AbortSignal,
   ): Promise<T> {
     const id = `rpc_${randomUUID()}`;
-    const authorization = this.#authorization ?? currentRuntimeRpcGrantToken();
+    const authorization =
+      this.#authorizationProvider === undefined
+        ? (this.#authorization ?? currentRuntimeRpcGrantToken())
+        : await this.#authorizationProvider();
+    if (this.#authorizationProvider !== undefined && !authorization) {
+      throw new RuntimeError("POLICY_DENIED", "Runtime RPC credential source returned no grant");
+    }
     return new Promise<T>((resolve, reject) => {
       const socket = createConnection(this.#socketPath);
       let buffer = "";
@@ -1279,6 +1302,7 @@ async function dispatch(
         sessionGeneration: request.generation,
         sessionId: request.sessionId,
         targetExecutionId: request.targetExecutionId,
+        ...(request.lineInput === undefined ? {} : { lineInput: request.lineInput }),
         ...(request.expectedScreenVersion === undefined
           ? {}
           : { expectedScreenVersion: request.expectedScreenVersion }),

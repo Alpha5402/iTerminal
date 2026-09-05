@@ -76,7 +76,6 @@ textarea:focus-visible,
 .status-strip,
 .section-title,
 .connection,
-.interactive-controls,
 .error-banner {
   display: flex;
   align-items: center;
@@ -279,36 +278,6 @@ textarea:focus-visible,
   gap: 0.5rem;
 }
 
-.secret-channel {
-  display: grid;
-  gap: 0.45rem;
-  margin-top: 0.75rem;
-  padding: 0.7rem;
-  border: 1px solid #334155;
-  border-radius: 8px;
-  background: #0b1220;
-}
-
-.secret-channel.active {
-  border-color: #f59e0b;
-  color: #fef3c7;
-}
-
-.secret-channel > div {
-  display: flex;
-  gap: 0.5rem;
-}
-
-.secret-channel input {
-  flex: 1;
-  min-width: 12rem;
-}
-
-.secret-channel small,
-.secret-channel span {
-  color: #94a3b8;
-}
-
 .section-title {
   justify-content: space-between;
   gap: 0.6rem;
@@ -433,16 +402,45 @@ textarea {
   scrollbar-width: thin;
 }
 
+.session-tab-item {
+  position: relative;
+  flex: 0 0 10rem;
+  min-width: 0;
+}
+
+.session-tab-close {
+  position: absolute;
+  top: 50%;
+  right: 0.35rem;
+  width: 1.65rem;
+  height: 1.65rem;
+  padding: 0;
+  transform: translateY(-50%);
+  border: 0;
+  border-radius: 0.3rem;
+  color: #94a3b8;
+  background: transparent;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.session-tab-close:hover,
+.session-tab-close:focus-visible {
+  color: #fecdd3;
+  background: #3b1722;
+}
+
 .session-tab {
   position: relative;
   display: grid;
-  grid-template-columns: auto auto;
+  grid-template-columns: auto minmax(0, 1fr);
   grid-template-rows: 1fr 1fr;
-  flex: 0 0 10rem;
+  width: 100%;
+  height: 100%;
   align-items: center;
   gap: 0 0.45rem;
   min-width: 0;
-  padding: 0.45rem 0.8rem;
+  padding: 0.45rem 2.2rem 0.45rem 0.8rem;
   border: 0;
   border-right: 1px solid #172033;
   border-radius: 0;
@@ -525,7 +523,8 @@ textarea {
 .terminal-surface {
   position: relative;
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
+  overflow-anchor: none;
   background: #070a0f;
 }
 
@@ -542,11 +541,29 @@ textarea {
   margin-left: auto;
 }
 
+.sensitive-indicator {
+  min-width: 2.6rem;
+  padding: 0.18rem 0.55rem;
+  border-color: #f59e0b;
+  border-radius: 999px;
+  color: #fef3c7;
+  background: rgb(146 64 14 / 45%);
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  line-height: 1;
+}
+
+.sensitive-indicator:disabled {
+  cursor: default;
+  opacity: 0.8;
+}
+
 .terminal-host {
   height: 100%;
   min-height: 0;
   padding: 0.9rem;
-  overflow: auto;
+  overflow: visible;
   background: #070a0f;
 }
 
@@ -572,15 +589,6 @@ textarea {
 
 .terminal-host .xterm {
   height: 100%;
-}
-
-.mode-panel {
-  max-height: 15rem;
-  min-height: 0;
-  padding: 0.75rem 0.9rem;
-  overflow-y: auto;
-  border-top: 1px solid #172033;
-  background: #080d14;
 }
 
 .terminal-cursor-composer {
@@ -623,12 +631,12 @@ textarea {
   display: block;
   width: 100%;
   min-width: 100%;
-  height: 100%;
+  min-height: 1lh;
   padding: 0;
-  overflow: auto;
+  overflow: hidden;
   border: 0;
   border-radius: 0;
-  background: #070a0f;
+  background: transparent;
   color: #dbeafe;
   caret-color: #67e8f9;
   font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
@@ -636,7 +644,14 @@ textarea {
   line-height: inherit;
   outline: none;
   resize: none;
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.terminal-command-composer {
+  background: transparent;
+  overflow: visible;
 }
 
 .command-editor:focus,
@@ -647,12 +662,6 @@ textarea {
   text-shadow: 0 0 0.8rem rgb(103 232 249 / 18%);
 }
 
-.interactive-controls {
-  flex-wrap: wrap;
-  gap: 0.7rem;
-}
-
-.interactive-controls span,
 .mode-note {
   color: #94a3b8;
   font-size: 0.8rem;

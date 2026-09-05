@@ -7,6 +7,24 @@ import {
 } from "./index.js";
 
 describe("XtermScreenProjection", () => {
+  it("answers split cursor queries at parse-time coordinates, never on snapshot replay", async () => {
+    const screen = createScreen();
+    const replies: unknown[] = [];
+    try {
+      screen.write("\x1b[3;7H\x1b[", 1, (reply) => replies.push(reply));
+      screen.write("6n\x1b[8;12H\x1b[6n\x1b[c\x1b]52;c;?\x07", 2, (reply) => replies.push(reply));
+      await screen.snapshot();
+      expect(replies).toEqual([
+        { kind: "cursor_position", data: "\x1b[3;7R", sourceScreenVersion: 2 },
+        { kind: "cursor_position", data: "\x1b[8;12R", sourceScreenVersion: 2 },
+      ]);
+      await screen.snapshot();
+      await screen.diff(1);
+      expect(replies).toHaveLength(2);
+    } finally {
+      screen.dispose();
+    }
+  });
   it("projects cursor movement, erase, wrapping, and wide Unicode at canonical geometry", async () => {
     const screen = createScreen();
     try {

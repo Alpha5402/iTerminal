@@ -448,6 +448,24 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
     expect((await request(consoleServer, cookie, "/api/sessions")).status).toBe(200);
   });
 
+  it("rehydrates the same Human Actor from its Console cookie after a server restart", async () => {
+    const fixture = await createFixture(fixtures);
+    daemon = await startRuntimeDaemon({ socketPath: join(fixture.root, "runtime.sock") });
+    const gateway = new UnixRuntimeClient(daemon.socketPath);
+    consoleServer = await startHumanConsole({ gateway, port: 0 });
+
+    const firstResponse = await requestBootstrap(consoleServer);
+    const cookie = required(firstResponse.headers.get("set-cookie")).split(";", 1)[0] ?? "";
+    const first = await bodyResult<{ readonly actor: Actor }>(firstResponse);
+
+    await consoleServer.close();
+    consoleServer = await startHumanConsole({ gateway, port: 0 });
+    const restoredResponse = await requestBootstrap(consoleServer, cookie);
+    const restored = await bodyResult<{ readonly actor: Actor }>(restoredResponse);
+
+    expect(restored.actor).toEqual(first.actor);
+  });
+
   it("keeps READY/interactive writes on Runtime Actions and releases a Guard on disconnect", async () => {
     const fixture = await createFixture(fixtures);
     daemon = await startRuntimeDaemon({ socketPath: join(fixture.root, "runtime.sock") });
@@ -812,9 +830,12 @@ async function request(
   });
 }
 
-function requestBootstrap(server: HumanConsoleServerHandle): Promise<Response> {
+function requestBootstrap(server: HumanConsoleServerHandle, cookie?: string): Promise<Response> {
   return fetch(`${server.url}/api/bootstrap`, {
-    headers: { "x-iterminal-request": "console" },
+    headers: {
+      ...(cookie === undefined ? {} : { cookie }),
+      "x-iterminal-request": "console",
+    },
   });
 }
 

@@ -22,6 +22,7 @@ import type {
   TerminalScreenDiffResult,
   TerminalScreenRegionResult,
   TerminalScreenSearchResult,
+  TerminalCursorResponse,
 } from "@iterminal/domain";
 
 export interface ShellExecutionResult {
@@ -92,7 +93,11 @@ export interface TerminalScreenProjection {
     timeoutMilliseconds: number,
     signal?: AbortSignal,
   ): Promise<TerminalScreenSnapshot | undefined>;
-  write(data: string, screenVersion: number): void;
+  write(
+    data: string,
+    screenVersion: number,
+    onResponse?: (response: TerminalCursorResponse) => void,
+  ): void;
 }
 
 export interface TerminalScreenProjectionFactory {

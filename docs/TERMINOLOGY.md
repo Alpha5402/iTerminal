@@ -64,6 +64,16 @@ These terms are protocol contracts. Avoid synonyms in code and public APIs unles
 
 ## TerminalState evidence boundary
 
+`InputContext` is live, exact-Execution input observation, not screen freshness or application
+readiness. It records a version and clear/pending/unknown state. Explicit `lineInput` uses this
+version plus the InteractionState version for independent newline-delimited foreground commands;
+ordinary screen-dependent input keeps screen CAS. See ADR-0065 for conservative limits.
+
+The Console's default Human foreground draft is browser-local, not shared PTY input. Editing
+does not acquire a Guard or change InputContext; Enter submits one complete line using the
+same lineInput contract as an Agent. Explicit raw/TUI mode still forwards keys and uses the
+Human Guard. See ADR-0066. Concurrent editing is independent; submitted writes remain ordered.
+
 `TerminalState` is a read-only observation, not another Runtime state machine. `sessionStatus`, the active Execution, generation, and screen frame are exact live facts; command-family and viewport-marker evidence are bounded signals. Screen content can be spoofed, the submitted top-level command may not be the foreground process, and this version does not observe terminal echo mode.
 
 The classifier may return `shell_ready`, `running`, `editor`, `pager`, `repl`, `password`, `confirm`, or `unknown` together with `high`, `medium`, or `low` confidence, closed-enum evidence, and explicit limitations. Clients must still use authoritative Session/Execution state, exact identifiers and versions, policy/Guard state, and Human decisions before sending input or control.

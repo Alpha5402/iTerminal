@@ -3,6 +3,10 @@
 - Status: Accepted for M10.10
 - Date: 2026-08-31
 
+[ADR-0062](./0062-runtime-terminal-cursor-replies.md) adds a private Runtime-generated cursor
+response exception. Public Input APIs retain the Human/Agent-only matrix below; a System caller
+cannot use it to submit terminal response bytes.
+
 ## Context
 
 ADR-0023 defines generation-scoped Input Policy and Human Interaction Guards. ADR-0047 adds

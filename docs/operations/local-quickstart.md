@@ -36,6 +36,30 @@ commit, upload, or share it. A fresh Console grant and 24-hour MCP grant are iss
 restart the stack to rotate an expired local grant. The Runtime verification secret and managed
 database password are generated locally and retained across normal restarts.
 
+### Avoid stale copied MCP grants
+
+MCP tool discovery only proves the stdio bridge started; it does not prove Runtime authorization.
+A client configured with a copied `ITERM_RPC_GRANT` keeps that value until its MCP process is
+reconfigured and restarted. Restarting only the local stack does not update the client's copy.
+
+For a same-host client, an explicit alternative is to replace **only** `ITERM_RPC_GRANT` in its MCP
+environment with `ITERM_MCP_CONFIG_FILE`, set to the absolute path of this stack's private
+`.iterminal/local/mcp.json`. Keep the same command, arguments, Actor fields, and Runtime socket.
+Do not set both credential variables. The file must be a same-user private regular file (`0600`),
+and its socket/Actor must match the client configuration. The bridge never executes commands from
+that JSON file or reads the Runtime signing key.
+
+Restart the client's iTerminal MCP process once after this configuration change. In Codex, use
+Settings → MCP servers → iterminal → Restart. Subsequent operator replacement of the file is read
+on the next RPC request, without restarting the PTY. This **does not renew grants**: expiry still
+requires a valid operator-issued replacement. No denied or uncertain operation is automatically
+retried. Missing/malformed/insecure files and declared-expired grants produce bounded local-source
+diagnostics; Runtime signature/audience/operation failures remain uniform `POLICY_DENIED` errors.
+
+Verify with a read-only `session_list` or `execution_get`. `ECONNREFUSED` means the configured
+Runtime endpoint is not listening, independently of grant validity. After Runtime loss, an old
+Execution may return `EXECUTION_NOT_FOUND`; a fresh authenticated connection does not restore it.
+
 Press Ctrl+C once to close the Console, drain the Runtime, persist live Sessions as `CLOSED`, close
 the detached Process Guardian, and stop PostgreSQL. Exit status 130 is the normal shell convention
 for an intentional SIGINT. The named database volume is preserved.
@@ -75,7 +99,35 @@ primary-only fail-closed semantics remain in force.
 | `ITERM_AGENT_EXECUTE_APPROVAL`   | `optional`         | `optional` or Human `required` for Agent Execute   |
 | `ITERM_LOCAL_SKIP_CONSOLE_BUILD` | unset              | Set to `1` only when `dist/console-web` is current |
 
-## Deliberate boundary
+## Troubleshooting
+
+### Offline is not BROKEN
+
+A lost browser HTTP/WebSocket connection only changes the Console connection indicator to offline.
+The Runtime keeps its PTY and database heartbeat independently. Restoring that connection resumes
+observation of the same live generation; it does not replay submitted commands.
+
+Losing Runtime/PostgreSQL authority is different. The current local stack also uses database-time
+owner leases (15 seconds by default). A database outage, prolonged scheduling pause, or host sleep
+can invalidate those leases. The Runtime then closes old PTYs and settles ambiguous work as
+`BROKEN/UNKNOWN` before serving new Sessions. A checkpoint rebuild starts a new Shell; it cannot
+resume a game client or other process. Simply restoring Wi-Fi cannot resurrect the old process.
+
+The historical recovery reason `PostgreSQL outage invalidated Runtime owner` is generic: it can
+also follow an expired owner heartbeat, so it is not by itself proof the PostgreSQL server stopped.
+Correlate the fault time with database and host sleep/wake logs. Sleep-preserving single-host
+terminal ownership is not implemented; do not disable fencing or automatically replay old commands
+to disguise that boundary.
+
+### Copying long commands
+
+Updated Runtime snapshots carry soft-wrap metadata. Updated Console copying joins visually wrapped
+rows while preserving actual newlines and empty lines. Both components must be updated; rebuild
+assets, explicitly restart the Runtime when existing work can stop, then reload the page. Old
+already-corrupted history entries are not repaired automatically. Copy from a clean source or edit
+the unintended newlines before submitting again.
+
+## Deployment boundary
 
 This topology uses immediate dispatch in one Runtime. It does not start RabbitMQ, Outbox relay,
 Execution Worker, Router, multi-owner placement, remote bind/TLS, or an OS sandbox. Use the explicit

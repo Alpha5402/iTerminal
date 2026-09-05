@@ -681,7 +681,7 @@ WebSocket 只承载 live event/screen/action transport，不是真相源。重�
 - [x] Human/Agent/System Action 标签与 bounded Timeline。
 - [x] event cursor 重连、screen resync、live/event gap 提示。
 - [x] Approval pending/history、exact command/reason、approve-once/deny 状态与交互（M10.3b）；Human-only secret prompt/显式敏感期/脱敏（M10.4）。
-- [x] Runtime-owned canonical geometry：默认 120×40、显式 ResizeAction、viewer 不自动 fit/抢占 ownership。
+- [x] Runtime-owned canonical geometry：默认 120×40；操作中的前台 Human 窗口通过版本化 ResizeAction 自适应，旁观窗口只同步；不转移 Runtime ownership（ADR-0061）。
 - [x] 基本键盘可达、焦点边界、文本状态与非纯颜色提示。
 
 ---
@@ -1057,14 +1057,25 @@ Exit Gate：已通过 8 Worker 持续 chaos/pressure；每个 generation 最多�
 - [x] M10.11 Shell marker/path hostile-input、HTTP request-rate 与 local RPC resource exhaustion 矩阵：ADR-0057；control frame 累计 1 MiB/safe integer、PTY barrier 64-char exact token、path error 不反射、Console 600 global/120 Actor per 10s、RPC 256 socket/5s frame timeout（L2 real zsh/Unix socket/loopback；不等于 sandbox/distributed quota/hostile soak）。
 - [x] M10.12 terminal normalized-fact retention + database capacity signal：ADR-0058；30-day/1,000-row-per-class policy，Approval → published Outbox → completed Inbox → stale/non-live unreferenced Action-family bounded cleanup；当前代幂等、pending delivery 与引用 pin；`pg_database_size` 10 GiB/80% HEALTHY-WARNING-CRITICAL operator exit signal（L2 real PostgreSQL；不等于 external hard quota/automatic deletion）。
 - [x] M10.13 one-command durable local stack：ADR-0059；`pnpm local` 管理 loopback PostgreSQL/named volume、复用既有 durable Runtime/Console、生成 `0600` least-privilege MCP config，并在 Console 右侧直接复制完整 JSON（不暴露本机配置路径）；official MCP + real zsh + Console HTTP + PostgreSQL，Ctrl+C 后 Session durable `CLOSED`（L2；UI command line/MCP handoff 另有真实 Chrome 回归；不等于 clean-machine/queue/router/release L4）。
+  - [x] MCP 显式文件凭据（ADR-0063）：`ITERM_MCP_CONFIG_FILE` 与静态 grant 互斥；按请求读取有界 private 配置，固定 socket/Actor，保留 Runtime 验签与操作授权；过期/文件错误可辨识，不签发、不自动续期/重放（[验证记录](docs/verification/M10/2026-09-02-mcp-credential-file.md)）。
 - [x] M10.14 native prompt dispatch：ADR-0060；READY multiline textarea 与 RUNNING secret editor 均覆盖 Runtime screen cursor，粘贴保留原始换行，Enter 分别提交整个 command buffer 的单次 ExecuteAction 与 Human-only SecretInputAction，Shift+Enter 可手动换行；zsh ZLE 与 macOS bash 3.2 readline/history recall 将用户原命令装入真实 Shell 行编辑器，prompt 以 `%1~`/`\W` 只显示 cwd basename，私有 command/token 文件 + control FIFO + PTY barrier 保留完成顺序，屏幕不再泄漏 `__it_execute`/execution id（bash/zsh persistent state、多行、syntax error L2；真实 Chrome zsh + official MCP/secret redaction L3；不等于 user rc/plugin compatibility）。
+  - [x] READY 多行草稿布局修正：首行衔接 prompt、后续行向下扩展并按可见宽度软换行，移除 6 行显示上限，终端内部跟随编辑光标滚动；长路径/中文、120 行、底部 prompt 与侧栏收放回归通过，提交原始换行与共享 PTY geometry 不变（[本地 Browser + MCP L3 验证](docs/verification/M10/2026-09-02-multiline-prompt-layout.md)）。
+  - [x] READY ↑/↓ 命令历史：当前 Human、Session、generation 的已观察执行命令按序回填；恢复待提交草稿、连续重复去重、最近 100 条/65,536 字符缓存与刷新恢复；多行/软换行编辑边界、IME、标签切换隔离与零自动执行回归通过（[本地 Browser + MCP L3 验证](docs/verification/M10/2026-09-02-command-history.md)；不读取主机 Shell 历史文件）。
+  - [x] 终端复制软折行（ADR-0064）：保留 canonical wrap metadata、按 cell selection 拼接，只移除视觉折行边界，保留真实换行/空行/中文/空格；真实复制回填 Shell、浏览器离线 16 秒后的同代/cwd 连续性回归通过（[验证记录](docs/verification/M10/2026-09-02-soft-wrap-copy-and-disconnect.md)）。
 - [x] M10.15 contextual Console controls：终端默认全宽；顶部工具入口按需打开 MCP、Approval、Session recovery 与 Advanced 视图；pending Approval/BROKEN Session 自动展开，空 Approval 隐藏 Decision reason，Checkpoint/Interaction/geometry/raw Timeline 退出常驻层级，`Close generation` 改为 `Close Session` 且 RUNNING 关闭需确认（真实 Chrome + PostgreSQL 4-case 回归 L3；不等于正式可用性研究或完整 WCAG 审计）。
+  - [x] Session 标签关闭：每个标签独立 `×`；live close 失败不隐藏、运行中确认、相邻标签切换、CLOSED 不再列为打开标签；BROKEN 按 exact generation 本地移除并恢复刷新偏好，保留 durable history、不伪造关闭租约；不向历史 BROKEN 请求 live Approval（[验证记录](docs/verification/M10/2026-09-02-session-tab-close.md)）。
+  - [x] 活跃 Human 窗口共享尺寸适配（ADR-0061）：终端点击/键盘操作激活，窗口/侧栏变化 debounce 后提交 ResizeAction；后台/被动窗口、远端 snapshot 与草稿高度不抢尺寸；Advanced 可关闭，未知投递不自动重试（[本地 Browser + MCP L3 验证](docs/verification/M10/2026-09-02-active-window-terminal-fit.md)）。
+- [x] M10.16 Runtime 光标查询应答（ADR-0062）：canonical parser 回应 CSI 6 n，经内部 System InputAction、generation/Execution 校验、durable write-attempt 与有界队列发送；实际 MCC 复现退格超时后乱码，真实 .NET 10 中文/退格、PostgreSQL attribution、公开接口伪造拒绝与 UNKNOWN/flood 回归通过（[L2 验证](docs/verification/M10/2026-09-02-terminal-cursor-replies.md)；不等于所有终端查询或敏感期完整模拟）。
+- [x] M10.17 显式 foreground lineInput（ADR-0065）：区分输入上下文与 screenVersion，保留 Human 半行/Guard、精确 target、durable CAS、幂等与 UNKNOWN；真实 PTY/MCP/PostgreSQL 隔离验证通过（[L2 验证记录](docs/verification/M10/2026-09-04-output-independent-line-input.md)）。
+  - [x] Human 默认本地行草稿（ADR-0066）：编辑、中文输入与退格不写 PTY、不占 Guard；Enter 通过相同 lineInput 提交，Agent 可在 Human 编辑时独立提交；明确 raw/TUI 模式、冲突保留草稿与未知投递禁止重复发送（[本地 Browser + MCP L3 验证](docs/verification/M10/2026-09-04-human-local-line-drafts.md)）。
+  - [ ] 在线协调部署与实际 MCC 场景验收：当前运行的 Runtime 未热替换；旧 Execution 已因 owner 失效变为 UNKNOWN，不得自动重放。
 - [ ] Actor/Session/Generation/Snapshot/Checkpoint/fork lineage 生命周期、Artifact/recording export/legal hold、filesystem/tablespace hard quota、remote alert 与 always-on scheduler；Artifact/Event/terminal normalized facts 现有清理分别由 M10.5/M10.7/M10.12 完成。
 - [x] 一条命令启动 PostgreSQL + Runtime + Web；Console 右侧可直接复制完整 MCP JSON，Session 以顶部标签页切换且 `+` 默认从 `/` 创建 zsh（M10.13 L2；private config 含 24 小时 bearer，client-specific install 不自动化）。
 - [ ] macOS/Linux clean-machine install、node-pty platform matrix。
 - [ ] 至少两个真实 MCP Client 版本矩阵。
 - [ ] 连续两周真实开发 dogfood：shared cwd/env、dev server、REPL、TUI、fork、crash、reconnect。
 - [ ] operator/recovery/security/protocol/troubleshooting 文档。
+  - [ ] 本地休眠体验：明确区分浏览器 offline、数据库连接故障与 owner lease expiry；评估单机 sleep-aware 生命周期方案，不能通过跳过 fencing 或复活 BROKEN generation 实现。
 - [ ] SBOM、provenance、release notes 链接全部 L3/L4 证据。
 
 ---

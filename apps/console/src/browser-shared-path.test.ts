@@ -1,4 +1,4 @@
-import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
+import { ACTOR_CAPABILITY_PROFILES, type InteractionState } from "@iterminal/domain";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -64,6 +64,205 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
   });
 
   afterAll(async () => pool.end());
+
+  it("keeps Human foreground drafts local while Agent lines and logs continue", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "iterminal-line-draft-")));
+    fixtures.push(root);
+    daemon = await startRuntimeDaemon({
+      databaseUrl: databaseUrl ?? "",
+      ownerId: "line-draft-browser",
+      socketPath: join(root, "runtime.sock"),
+    });
+    const runtime = new UnixRuntimeClient(daemon.socketPath);
+    consoleServer = await startHumanConsole({ gateway: runtime, port: 0, staticRoot });
+    mcp = await connectAgent(daemon.socketPath);
+    browser = await chromium.launch({ executablePath: browserExecutable, headless: true });
+    page = await browser.newPage({ viewport: { width: 1309, height: 1249 } });
+    await page.goto(consoleServer.url, { waitUntil: "networkidle" });
+    await page.getByRole("button", { name: "New Session" }).click();
+    await waitForPageText(page, ".status-strip", "READY");
+    const session = required((await runtime.listSessions())[0]);
+    const script =
+      'const r=require("node:readline").createInterface({input:process.stdin,terminal:false});let n=0;setInterval(()=>console.log("日志 "+ ++n),40);r.on("line",s=>console.log("ACK:"+s));';
+    const started = await callTool<StartedResult>(mcp, "execute", {
+      sessionId: session.id,
+      generation: session.generation,
+      command: `${JSON.stringify(process.execPath)} -e '${script}'`,
+      idempotencyKey: "start-line-fixture",
+    });
+    await waitUntilRunning(mcp, started.execution.id);
+    const editor = page.getByLabel("Foreground command composer");
+    await editor.waitFor({ state: "visible" });
+    const initial = await runtime.getInteractionState(session.id, session.generation);
+    await editor.fill("Human 中文草稿X");
+    await editor.press("Backspace");
+    const draft = "Human 中文草稿";
+    expect(await editor.inputValue()).toBe(draft);
+    const observed = await callTool<InteractionState>(mcp, "interaction_get", {
+      sessionId: session.id,
+      generation: session.generation,
+    });
+    expect(observed.inputContext).toEqual(initial.inputContext);
+    expect(observed.guard).toBeUndefined();
+    const beforeEnter = await pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM actions WHERE session_id=$1 AND kind='input' AND NOT(payload ? 'terminalResponse')",
+      [session.id],
+    );
+    expect(beforeEnter.rows[0]?.count).toBe(0);
+    const agentLine = await callTool<{ status: string }>(mcp, "input", {
+      sessionId: session.id,
+      generation: session.generation,
+      targetExecutionId: started.execution.id,
+      data: "agent-status\n",
+      idempotencyKey: "agent-while-human-drafts",
+      lineInput: {
+        expectedInputVersion: observed.inputContext?.version,
+        expectedInteractionVersion: observed.version,
+      },
+    });
+    expect(agentLine.status).toBe("DELIVERED");
+    await waitForPageText(page, '[data-testid="browser-terminal-output"]', "ACK:agent-status");
+    expect(await editor.inputValue()).toBe(draft);
+    await editor.press("Enter");
+    await waitForPageText(page, '[data-testid="browser-terminal-output"]', `ACK:${draft}`);
+    await expect.poll(() => editor.inputValue()).toBe("");
+    const sent = await pool.query<{ data: string }>(
+      "SELECT payload->>'data' AS data FROM actions WHERE session_id=$1 AND kind='input' AND NOT(payload ? 'terminalResponse') ORDER BY action_sequence",
+      [session.id],
+    );
+    expect(sent.rows.map((row) => row.data)).toEqual(["agent-status\n", `${draft}\n`]);
+    expect(
+      (await runtime.getInteractionState(session.id, session.generation)).inputContext?.state,
+    ).toBe("clear");
+    await editor.fill("first\nsecond");
+    await editor.press("Enter");
+    await waitForPageText(page, ".error-banner", "INVALID_REQUEST");
+    expect(await editor.inputValue()).toBe("first\nsecond");
+    const afterInvalid = await pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM actions WHERE session_id=$1 AND kind='input'",
+      [session.id],
+    );
+    expect(afterInvalid.rows[0]?.count).toBe(2);
+    // A lost response must not create a fresh duplicate intent on the next Enter.
+    await editor.fill("uncertain-line");
+    let posts = 0;
+    await page.route(`**/api/sessions/${session.id}/input`, async (route) => {
+      posts++;
+      await route.abort("failed");
+    });
+    await editor.press("Enter");
+    await expect.poll(() => posts).toBe(1);
+    await waitForPageText(page, ".error-banner", "Failed to fetch");
+    await editor.press("Enter");
+    expect(posts).toBe(1);
+    expect(await editor.inputValue()).toBe("uncertain-line");
+  }, 60_000);
+
+  it("copies wrapped output back into the Shell without extra newlines and survives Console loss", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "iterminal-copy-browser-")));
+    fixtures.push(root);
+    const directory = join(root, "long-directory-".repeat(4), "publish");
+    await mkdir(directory, { recursive: true });
+    daemon = await startRuntimeDaemon({
+      databaseUrl: databaseUrl ?? "",
+      ownerId: "copy-browser",
+      socketPath: join(root, "runtime.sock"),
+    });
+    const runtime = new UnixRuntimeClient(daemon.socketPath);
+    consoleServer = await startHumanConsole({ gateway: runtime, port: 0, staticRoot });
+    mcp = await connectAgent(daemon.socketPath);
+    browser = await chromium.launch({ executablePath: browserExecutable, headless: true });
+    page = await browser.newPage({ viewport: { width: 1309, height: 1249 } });
+    await page.goto(consoleServer.url, { waitUntil: "networkidle" });
+    await page.getByRole("button", { name: "New Session" }).click();
+    await waitForPageText(page, ".status-strip", "READY");
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    await page.getByLabel("Fit terminal to active window").uncheck();
+    await page.getByLabel("Columns").fill("80");
+    await page.getByLabel("Rows").fill("40");
+    await page.getByRole("button", { name: "Resize canonical PTY" }).click();
+    await waitForPageText(page, ".status-strip", "80×40");
+    await page.getByRole("button", { name: "Close side panel" }).click();
+    const session = required((await runtime.listSessions())[0]);
+    const command = `cd "${directory}"\nprintf '%s\\n' '中文 copy-roundtrip-ok'`;
+    const quoted = (text: string): string => `'${text.replaceAll("'", "'\\''")}'`;
+    const printed = await callTool<StartedResult>(mcp, "execute", {
+      command: `printf '%s\\n' '__COPY_BEGIN__' ${quoted(command)} '__COPY_END__'`,
+      sessionId: session.id,
+      generation: session.generation,
+      idempotencyKey: "print-copy-fixture",
+    });
+    await callTool(mcp, "execution_wait", { executionId: printed.execution.id });
+    await waitForPageText(page, ".status-strip", "READY");
+    await waitForPageText(page, '[data-testid="browser-terminal-output"]', "__COPY_END__");
+    const screen = await runtime.getScreen(session.id, session.generation);
+    const fromRow = screen.lines.findIndex((line) => line === "__COPY_BEGIN__") + 1;
+    const toRow = screen.lines.findIndex((line) => line === "__COPY_END__");
+    expect(fromRow).toBeGreaterThan(0);
+    expect(toRow).toBeGreaterThan(fromRow + 1);
+    expect(screen.wrappedRows?.slice(fromRow, toRow)).toContain(true);
+    const rect = await page.locator(".xterm-screen").boundingBox();
+    if (rect === null) throw new Error("Missing terminal screen geometry");
+    const rowHeight = rect.height / screen.rows;
+    await page.mouse.move(rect.x + 1, rect.y + (fromRow + 0.5) * rowHeight);
+    await page.mouse.down();
+    await page.mouse.move(rect.x + 1, rect.y + (toRow + 0.5) * rowHeight, { steps: 10 });
+    await page.mouse.up();
+    // Exercise the real copy handler without reading or replacing the user's OS clipboard.
+    const copied = await page.evaluate(() => {
+      const target = document.querySelector(".terminal-host .xterm-helper-textarea");
+      if (target === null) throw new Error("Missing terminal copy target");
+      const data = new DataTransfer();
+      const event = new ClipboardEvent("copy", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: data,
+      });
+      target.dispatchEvent(event);
+      return { handled: event.defaultPrevented, text: data.getData("text/plain") };
+    });
+    expect(copied.handled).toBe(true);
+    expect(copied.text).toBe(`${command}\n`);
+    await page.getByLabel("READY command composer").fill(copied.text);
+    const submitted = page.waitForResponse(
+      (response) => response.url().endsWith("/execute") && response.request().method() === "POST",
+    );
+    await page.getByLabel("READY command composer").press("Enter");
+    const response = await submitted;
+    expect(response.status()).toBe(202);
+    const admitted = (await response.json()) as { result: StartedResult };
+    await callTool(mcp, "execution_wait", { executionId: admitted.result.execution.id });
+    await waitForPageText(page, ".status-strip", "READY");
+    const stored = await pool.query<{ command: string; exit_code: number }>(
+      "SELECT command, exit_code FROM executions WHERE session_id = $1 ORDER BY started_at DESC LIMIT 1",
+      [session.id],
+    );
+    expect(stored.rows[0]).toEqual({ command: copied.text, exit_code: 0 });
+
+    // Losing the Console transport for longer than an owner lease must not close the PTY.
+    await page.context().setOffline(true);
+    for (const connection of consoleServer.app.websocketServer.clients) connection.terminate();
+    await waitForPageText(page, ".connection", "offline");
+    await new Promise((resolve) => setTimeout(resolve, 16_000));
+    expect((await runtime.getSession(session.id)).status).toBe("READY");
+    await page.context().setOffline(false);
+    await waitForPageText(page, ".connection", "live");
+    expect((await runtime.getSession(session.id)).generation).toBe(session.generation);
+    const afterReconnect = await callTool<StartedResult>(mcp, "execute", {
+      command: `test "$PWD" = ${quoted(directory)}`,
+      sessionId: session.id,
+      generation: session.generation,
+      idempotencyKey: "same-shell-after-console-offline",
+    });
+    await callTool(mcp, "execution_wait", { executionId: afterReconnect.execution.id });
+    expect(
+      (
+        await pool.query<{ exit_code: number }>("SELECT exit_code FROM executions WHERE id = $1", [
+          afterReconnect.execution.id,
+        ])
+      ).rows[0]?.exit_code,
+    ).toBe(0);
+  }, 60_000);
 
   it("shares cwd, env, Python REPL, Guard, screen, and attributed timeline across transports", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "iterminal-m5-browser-")));
@@ -137,6 +336,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
         activeLabel: document.activeElement?.getAttribute("aria-label"),
         editorBottom: editorRect.bottom,
         editorLeft: editorRect.left,
+        promptIndent: parseFloat(getComputedStyle(editor).textIndent),
         editorTop: editorRect.top,
         screenBottom: screenRect.bottom,
         screenLeft: screenRect.left,
@@ -144,10 +344,55 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
       };
     });
     expect(promptPlacement.activeLabel).toBe("READY command composer");
-    expect(promptPlacement.editorLeft).toBeGreaterThan(promptPlacement.screenLeft);
+    expect(promptPlacement.editorLeft + promptPlacement.promptIndent).toBeGreaterThan(
+      promptPlacement.screenLeft,
+    );
     expect(promptPlacement.editorTop).toBeGreaterThanOrEqual(promptPlacement.screenTop);
     expect(promptPlacement.editorBottom).toBeLessThanOrEqual(promptPlacement.screenBottom + 1);
     expect(await page.locator(".mode-panel").count()).toBe(0);
+    // This scenario exercises draft/history behavior at a deliberately fixed geometry.
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    await page.getByLabel("Fit terminal to active window").uncheck();
+    await page.getByRole("button", { name: "Close side panel" }).click();
+    await page.setViewportSize({ width: 1309, height: 1249 });
+    await page.getByRole("button", { name: "Session", exact: true }).click();
+    const longDraft = `# cd "/${"long-directory/".repeat(12)}publish"\n# env EXAMPLE=${"字母ab".repeat(45)} ./example`;
+    const editor = page.getByLabel("READY command composer");
+    await editor.fill(longDraft);
+    await page.waitForFunction(() => {
+      const input = document.querySelector<HTMLTextAreaElement>(".command-editor");
+      return (
+        input !== null && input.clientHeight >= parseFloat(getComputedStyle(input).lineHeight) * 4
+      );
+    });
+    const wrapped = await commandLayout(page);
+    expect(await editor.inputValue()).toBe(longDraft);
+    expect(wrapped.top).toBeCloseTo(wrapped.screenTop, 0);
+    expect(wrapped.right).toBeLessThanOrEqual(wrapped.viewportRight);
+    expect(wrapped.scrollWidth).toBeLessThanOrEqual(wrapped.clientWidth + 1);
+    expect(wrapped.height).toBeGreaterThan(wrapped.lineHeight * 3);
+    await page.getByRole("button", { name: "Close side panel" }).click();
+    await page.waitForFunction((priorWidth) => {
+      const input = document.querySelector<HTMLTextAreaElement>(".command-editor");
+      return input !== null && input.clientWidth > priorWidth;
+    }, wrapped.clientWidth);
+    expect((await commandLayout(page)).height).toBeLessThan(wrapped.height);
+
+    const tallDraft = Array.from({ length: 120 }, (_, index) => `# draft ${index}`).join("\n");
+    await editor.fill(tallDraft);
+    await page.waitForFunction(
+      () => (document.querySelector(".terminal-surface")?.scrollTop ?? 0) > 0,
+    );
+    const tall = await commandLayout(page);
+    expect(tall.height).toBeGreaterThanOrEqual(tall.lineHeight * 120);
+    expect(tall.bottom).toBeLessThanOrEqual(tall.viewportBottom);
+    await editor.press(process.platform === "darwin" ? "Meta+ArrowUp" : "Control+Home");
+    await page.waitForFunction(
+      () => (document.querySelector(".terminal-surface")?.scrollTop ?? -1) === 0,
+    );
+    expect(await editor.inputValue()).toBe(tallDraft);
+    await editor.fill("");
+    await page.setViewportSize({ width: 1600, height: 1100 });
     const multilineCommand = `cd "${join(workspace, "subdir")}"\nexport ITERM_M5=shared`;
     await page.getByLabel("READY command composer").fill(multilineCommand);
     expect(await page.getByLabel("READY command composer").inputValue()).toBe(multilineCommand);
@@ -165,6 +410,99 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     expect(sessions).toHaveLength(1);
     const session = required(sessions[0]);
     expect(session.workspaceRoot).toBe("/");
+    const historyOutputCommand = "for i in {1..45}; do printf 'LAYOUT_HISTORY\\n'; done";
+    await editor.fill(historyOutputCommand);
+    await editor.press("Enter");
+    await waitForPageText(page, '[data-testid="screen-reader-output"]', "LAYOUT_HISTORY");
+    await waitForPageText(page, ".status-strip", "READY");
+    await page.setViewportSize({ width: 1309, height: 600 });
+    await page.getByRole("button", { name: "Session", exact: true }).click();
+    const bottomDraft = Array.from({ length: 12 }, (_, index) => `# bottom draft ${index}`).join(
+      "\n",
+    );
+    await editor.fill(bottomDraft);
+    await page.waitForFunction(
+      () => {
+        const input = document.querySelector<HTMLTextAreaElement>(".command-editor");
+        const surface = document.querySelector<HTMLElement>(".terminal-surface");
+        return (
+          input !== null &&
+          surface !== null &&
+          surface.scrollTop > 100 &&
+          input.getBoundingClientRect().bottom <=
+            surface.getBoundingClientRect().top + surface.clientHeight
+        );
+      },
+      undefined,
+      { timeout: 5000 },
+    );
+    const bottom = await commandLayout(page);
+    expect(bottom.top - bottom.screenTop).toBeGreaterThan(bottom.lineHeight * 30);
+    expect(bottom.height).toBeGreaterThanOrEqual(bottom.lineHeight * 12);
+    expect(bottom.bottom).toBeLessThanOrEqual(bottom.viewportBottom);
+    expect(bottom.scrollWidth).toBeLessThanOrEqual(bottom.clientWidth + 1);
+    expect(await editor.inputValue()).toBe(bottomDraft);
+    await editor.fill("");
+    await page.getByRole("button", { name: "Close side panel" }).click();
+    await page.setViewportSize({ width: 1600, height: 1100 });
+    const unsubmittedDraft = "echo keep-my-draft";
+    await editor.fill(unsubmittedDraft);
+    await editor.press("ArrowUp");
+    expect(await editor.inputValue()).toBe(historyOutputCommand);
+    await editor.press("ArrowUp");
+    expect(await editor.inputValue()).toBe(multilineCommand);
+    await editor.press("ArrowDown");
+    expect(await editor.inputValue()).toBe(historyOutputCommand);
+    await editor.press("ArrowDown");
+    expect(await editor.inputValue()).toBe(unsubmittedDraft);
+
+    const multilineDraft = "# first line\n# second line";
+    await editor.fill(multilineDraft);
+    await editor.press("ArrowUp");
+    expect(await editor.inputValue()).toBe(multilineDraft);
+    await editor.press("ArrowUp");
+    expect(await editor.inputValue()).toBe(historyOutputCommand);
+    await editor.press("ArrowDown");
+    expect(await editor.inputValue()).toBe(multilineDraft);
+
+    const softWrappedDraft = `# ${"wide-draft".repeat(40)}`;
+    await editor.fill(softWrappedDraft);
+    await editor.press("ArrowUp");
+    expect(await editor.inputValue()).toBe(softWrappedDraft);
+    await editor.press("Shift+ArrowUp");
+    expect(await editor.inputValue()).toBe(softWrappedDraft);
+    await editor.fill("");
+    const imeWasConsumed = await editor.evaluate((element) => {
+      const composingArrow = new KeyboardEvent("keydown", {
+        key: "ArrowUp",
+        isComposing: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      element.dispatchEvent(composingArrow);
+      return composingArrow.defaultPrevented;
+    });
+    expect(imeWasConsumed).toBe(false);
+    expect(await editor.inputValue()).toBe("");
+    const executesBeforeRecall = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM actions WHERE session_id = $1 AND kind = 'execute'",
+      [session.id],
+    );
+    expect(executesBeforeRecall.rows[0]?.count).toBe("2");
+
+    // Simulate the first page load after upgrading, before a history cache exists.
+    await page.evaluate(() => {
+      for (const key of Object.keys(sessionStorage)) {
+        if (key.startsWith("iterminal.command-history.")) sessionStorage.removeItem(key);
+      }
+    });
+    await page.reload({ waitUntil: "networkidle" });
+    await waitForPageText(page, ".connection", "live");
+    await editor.waitFor({ state: "visible" });
+    await editor.press("ArrowUp");
+    expect(await editor.inputValue()).toBe(historyOutputCommand);
+    await editor.fill("");
+
     const proposal = await callTool<ApprovalResult>(mcp, "approval_request", {
       actionIdempotencyKey: "m10-browser-approved-action",
       command: "export ITERM_M10_BROWSER=approved",
@@ -200,7 +538,13 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     await waitUntilRunning(mcp, python.execution.id);
     await waitForPageText(page, ".status-strip", "RUNNING");
 
-    await page.getByRole("button", { name: "Enter interactive focus" }).click();
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    await page.getByLabel("Send keys directly (TUI / raw mode)").check();
+    await page.getByRole("button", { name: "Close side panel" }).click();
+    await page.locator(".terminal-host").click();
+    await page.waitForFunction(
+      () => document.querySelector(".terminal-host")?.classList.contains("interactive") === true,
+    );
     await page.keyboard.type("human_value = 40", { delay: 5 });
     await page.keyboard.press("Enter");
     const humanGuard = await waitForHumanGuard(runtime, session.id, session.generation);
@@ -256,6 +600,11 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     await page.reload({ waitUntil: "networkidle" });
     await waitForPageText(page, ".connection", "live");
     await waitForPageText(page, '[data-testid="screen-reader-output"]', "ENV=shared");
+    await editor.press("ArrowUp");
+    expect(await editor.inputValue()).toBe('printf "PWD=%s ENV=%s\\n" "$PWD" "$ITERM_M5"');
+    await editor.press("ArrowUp");
+    expect(await editor.inputValue()).toBe(historyOutputCommand);
+    await editor.fill("");
     await page.getByRole("button", { name: "Advanced", exact: true }).click();
     await waitForPageText(page, ".timeline", "execution.completed");
     const cursorAfterReload = await page.locator(".status-strip").textContent();
@@ -282,8 +631,16 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     await page.waitForFunction(() => document.querySelectorAll(".session-tab").length === 2);
     const sessionTabs = page.locator(".session-tab");
     expect(await sessionTabs.nth(1).textContent()).toContain("/");
+    await waitForPageText(page, ".status-strip", "READY");
+    await editor.waitFor({ state: "visible" });
+    await editor.press("ArrowUp");
+    expect(await editor.inputValue()).toBe("");
     await sessionTabs.nth(0).click();
     expect(await sessionTabs.nth(0).getAttribute("aria-current")).toBe("page");
+    await waitForPageText(page, ".status-strip", "READY");
+    await editor.waitFor({ state: "visible" });
+    await editor.press("ArrowUp");
+    expect(await editor.inputValue()).toBe('printf "PWD=%s ENV=%s\\n" "$PWD" "$ITERM_M5"');
     const tabSessions = await callTool<readonly SessionResult[]>(mcp, "session_list", {});
     expect(tabSessions).toHaveLength(2);
     expect(tabSessions.every((candidate) => candidate.workspaceRoot === "/")).toBe(true);
@@ -354,7 +711,13 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     const secret = "BROWSER_SECRET_SENTINEL_752c";
     await page.getByLabel("Human-only secret input").fill(secret);
     await page.getByLabel("Human-only secret input").press("Enter");
-    await waitForPageText(page, ".secret-channel.active", "Sensitive output redaction is active");
+    await page
+      .getByRole("button", {
+        name: "Sensitive input protection is active; stop protecting output",
+      })
+      .waitFor({ state: "visible" });
+    expect(await page.locator(".mode-panel").count()).toBe(0);
+    expect(await page.locator(".secret-channel").count()).toBe(0);
     await waitForPageText(
       page,
       '[data-testid="screen-reader-output"]',
@@ -379,14 +742,19 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     expect(blockedInput.isError).toBe(true);
     expect(textContent(blockedInput)).toContain('"code":"SENSITIVE_INPUT_ACTIVE"');
 
-    await page.getByRole("button", { name: "Send TTY Ctrl+C while redacted" }).click();
+    await page.locator(".terminal-host").click();
+    await page.keyboard.press("Control+C");
     await waitForPageText(page, ".status-strip", "READY");
-    await page.getByRole("button", { name: "Complete and stop redaction" }).click();
-    await page.waitForFunction(
-      () => document.querySelector(".secret-channel.active") === null,
-      undefined,
-      { timeout: 10_000 },
-    );
+    await page
+      .getByRole("button", {
+        name: "Sensitive input protection is active; stop protecting output",
+      })
+      .click();
+    await page
+      .getByRole("button", {
+        name: "Sensitive input protection is active; stop protecting output",
+      })
+      .waitFor({ state: "detached" });
     await page.getByLabel("READY command composer").fill("printf 'VISIBLE_AFTER_SECRET\\n'");
     await page.getByLabel("READY command composer").press("Enter");
     await waitForPageText(page, '[data-testid="screen-reader-output"]', "VISIBLE_AFTER_SECRET");
@@ -463,6 +831,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     await page.getByLabel("Columns").fill("96");
     await page.getByLabel("Rows").fill("30");
     await page.getByRole("button", { name: "Resize canonical PTY" }).click();
+    expect(await page.getByLabel("Fit terminal to active window").isChecked()).toBe(false);
     await waitForPageText(page, ".status-strip", "geometry 96×30 v2");
     await waitForPageText(page, '[data-testid="screen-reader-output"]', "SIZE=96x30");
     const afterHuman = await callTool<ScreenResult>(mcp, "screen_get", {
@@ -556,6 +925,232 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     });
   }, 60_000);
 
+  it("fits the active Human window through shared ResizeActions without passive viewer feedback", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "iterminal-window-fit-")));
+    fixtures.push(root);
+    daemon = await startRuntimeDaemon({
+      databaseUrl: databaseUrl ?? "",
+      ownerId: "owner-window-fit",
+      socketPath: join(root, "runtime.sock"),
+    });
+    consoleServer = await startHumanConsole({
+      gateway: new UnixRuntimeClient(daemon.socketPath),
+      port: 0,
+      staticRoot,
+    });
+    mcp = await connectAgent(daemon.socketPath);
+    browser = await chromium.launch({
+      args: ["--disable-background-networking", "--no-first-run"],
+      executablePath: browserExecutable,
+      headless: true,
+    });
+    const context = await browser.newContext({ viewport: { width: 1309, height: 1249 } });
+    page = await context.newPage();
+    await page.goto(consoleServer.url, { waitUntil: "networkidle" });
+    await page.getByRole("button", { name: "New Session" }).click();
+    await waitForPageText(page, ".status-strip", "READY");
+    const session = required(
+      (await callTool<readonly SessionResult[]>(mcp, "session_list", {}))[0],
+    );
+    const getScreen = () =>
+      callTool<ScreenResult>(required(mcp), "screen_get", {
+        sessionId: session.id,
+        generation: session.generation,
+      });
+    expect(await getScreen()).toMatchObject({ columns: 120, rows: 40, geometryVersion: 1 });
+    await page.bringToFront();
+    await page.getByLabel("READY command composer").click();
+    await waitForPageText(page, ".status-strip", "v2");
+    await expect.poll(async () => (await getScreen()).geometryVersion).toBe(2);
+    const first = await getScreen();
+    expect(first.rows).toBeGreaterThan(40);
+    await assertViewportFit(page);
+    const draft = Array.from({ length: 120 }, (_, index) => `# unsubmitted ${index}`).join("\n");
+    await page.getByLabel("READY command composer").fill(draft);
+    await page.waitForTimeout(350);
+    expect((await getScreen()).geometryVersion).toBe(2);
+    expect(await page.getByLabel("READY command composer").inputValue()).toBe(draft);
+    await page.getByLabel("READY command composer").fill("");
+
+    const watcher = await callTool<StartedResult>(mcp, "execute", {
+      command:
+        "python3 -u -c 'import os,signal,time; emit=lambda *_: print(f\"SIZE={os.get_terminal_size().columns}x{os.get_terminal_size().lines}\",flush=True); signal.signal(signal.SIGWINCH,emit); emit(); time.sleep(45)'",
+      generation: session.generation,
+      sessionId: session.id,
+      idempotencyKey: "window-fit-watcher",
+    });
+    await waitForPageText(
+      page,
+      '[data-testid="screen-reader-output"]',
+      `SIZE=${first.columns}x${first.rows}`,
+    );
+    await page.setViewportSize({ width: 1100, height: 850 });
+    await expect.poll(async () => (await getScreen()).geometryVersion).toBe(3);
+    const smaller = await getScreen();
+    expect(smaller.columns).toBeLessThan(first.columns);
+    expect(smaller.rows).toBeLessThan(first.rows);
+    await waitForPageText(
+      page,
+      '[data-testid="screen-reader-output"]',
+      `SIZE=${smaller.columns}x${smaller.rows}`,
+    );
+    await assertViewportFit(page);
+    await page.getByRole("button", { name: "Session", exact: true }).click();
+    await expect.poll(async () => (await getScreen()).geometryVersion).toBe(4);
+    expect((await getScreen()).columns).toBeLessThan(smaller.columns);
+    await assertViewportFit(page);
+
+    const observer = await page.context().newPage();
+    await observer.setViewportSize({ width: 1500, height: 1000 });
+    await observer.goto(consoleServer.url, { waitUntil: "networkidle" });
+    await observer.bringToFront();
+    await waitForPageText(observer, ".status-strip", "RUNNING");
+    // Playwright forces every headless page focused by default. Release that override for
+    // the background viewer to exercise real document.hasFocus()/blur admission.
+    const background = await page.context().newCDPSession(page);
+    await background.send("Emulation.setFocusEmulationEnabled", { enabled: false });
+    await observer.bringToFront();
+    await expect.poll(() => page?.evaluate(() => document.hasFocus())).toBe(false);
+    await observer.setViewportSize({ width: 1450, height: 950 });
+    await page.setViewportSize({ width: 1150, height: 900 });
+    await observer.waitForTimeout(500);
+    expect((await getScreen()).geometryVersion).toBe(4);
+    await observer.locator(".terminal-host").click({ position: { x: 12, y: 12 } });
+    await expect.poll(async () => (await getScreen()).geometryVersion).toBe(5);
+    const secondWindow = await getScreen();
+    await waitForPageText(
+      page,
+      ".status-strip",
+      `geometry ${secondWindow.columns}×${secondWindow.rows} v5`,
+    );
+    await assertViewportFit(observer);
+    await observer.waitForTimeout(500);
+    expect((await getScreen()).geometryVersion).toBe(5);
+
+    // Remote canonical changes do not count as local layout intent, even in the active viewer.
+    await callTool(mcp, "terminal_resize", {
+      columns: 100,
+      rows: 32,
+      expectedGeometryVersion: 5,
+      generation: session.generation,
+      sessionId: session.id,
+      idempotencyKey: "window-fit-agent",
+    });
+    await waitForPageText(observer, ".status-strip", "geometry 100×32 v6");
+    await observer.waitForTimeout(500);
+    expect((await getScreen()).geometryVersion).toBe(6);
+    await observer.reload({ waitUntil: "networkidle" });
+    await observer.waitForTimeout(300);
+    expect((await getScreen()).geometryVersion).toBe(6);
+    const actions = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM actions WHERE session_id = $1 AND kind = 'resize'",
+      [session.id],
+    );
+    expect(actions.rows[0]?.count).toBe("5");
+    await callTool(mcp, "control", {
+      delivery: { mode: "TTY_CONTROL", control: "CTRL_C" },
+      generation: session.generation,
+      sessionId: session.id,
+      targetExecutionId: watcher.execution.id,
+      idempotencyKey: "window-fit-stop",
+    });
+    await callTool(mcp, "execution_wait", { executionId: watcher.execution.id });
+  }, 60_000);
+
+  it("closes tabs without switching background selection and preserves failed or cancelled closes", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "iterminal-tab-close-")));
+    fixtures.push(root);
+    daemon = await startRuntimeDaemon({
+      databaseUrl: databaseUrl ?? "",
+      ownerId: "owner-tab-close",
+      socketPath: join(root, "runtime.sock"),
+    });
+    const runtime = new UnixRuntimeClient(daemon.socketPath);
+    const first = await runtime.createSession({ shell: "zsh", workspaceRoot: root });
+    const second = await runtime.createSession({ shell: "zsh", workspaceRoot: root });
+    const third = await runtime.createSession({ shell: "zsh", workspaceRoot: root });
+    const closed = await runtime.createSession({ shell: "zsh", workspaceRoot: root });
+    await runtime.closeSession(closed.id, closed.generation);
+    consoleServer = await startHumanConsole({ gateway: runtime, port: 0, staticRoot });
+    browser = await chromium.launch({
+      args: ["--disable-background-networking", "--no-first-run"],
+      executablePath: browserExecutable,
+      headless: true,
+    });
+    page = await browser.newPage({ viewport: { height: 900, width: 1309 } });
+    await page.goto(consoleServer.url, { waitUntil: "networkidle" });
+    await waitForPageText(page, ".status-strip", "READY");
+    expect(await page.locator(".session-tab").count()).toBe(3);
+    expect(await page.locator("button button").count()).toBe(0);
+    await page.getByRole("button", { name: "Close zsh 3", exact: true }).click();
+    await expect.poll(() => required(page).locator(".session-tab").count()).toBe(2);
+    expect(await page.locator(".session-tab").nth(0).getAttribute("aria-current")).toBe("page");
+    expect((await runtime.getSession(third.id)).status).toBe("CLOSED");
+
+    const closeUrl = `${consoleServer.url}/api/sessions/${first.id}`;
+    await page.route(closeUrl, async (route) => {
+      if (route.request().method() !== "DELETE") return route.continue();
+      await route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: {
+            code: "RUNTIME_UNAVAILABLE",
+            message: "Injected close failure",
+            allowedNextActions: [],
+            details: {},
+            retryable: false,
+          },
+        }),
+      });
+    });
+    await page.getByRole("button", { name: "Close zsh 1", exact: true }).click();
+    await waitForPageText(page, ".error-banner", "Injected close failure");
+    expect(await page.locator(".session-tab").count()).toBe(2);
+    expect((await runtime.getSession(first.id)).status).toBe("READY");
+    await page.unroute(closeUrl);
+
+    const started = await runtime.startExecute({
+      actor: {
+        id: "agent-tab-close",
+        type: "agent",
+        client: "tab-close-test",
+        principal: "tab-close-test",
+        capabilities: ACTOR_CAPABILITY_PROFILES.agent,
+      },
+      command: "sleep 60",
+      idempotencyKey: "tab-close-running",
+      sessionGeneration: first.generation,
+      sessionId: first.id,
+    });
+    await waitForPageText(page, ".status-strip", "RUNNING");
+    page.once("dialog", (dialog) => void dialog.dismiss());
+    await page.getByRole("button", { name: "Close zsh 1", exact: true }).click();
+    await expect
+      .poll(() =>
+        required(page).getByRole("button", { name: "Close zsh 1", exact: true }).isEnabled(),
+      )
+      .toBe(true);
+    expect((await runtime.getSession(first.id)).status).toBe("RUNNING");
+    expect((await runtime.getExecution(started.execution.id)).status).toBe("RUNNING");
+    page.once("dialog", (dialog) => void dialog.accept());
+    await page.getByRole("button", { name: "Close zsh 1", exact: true }).click();
+    await expect.poll(() => required(page).locator(".session-tab").count()).toBe(1);
+    await waitForPageText(page, ".status-strip", "READY");
+    expect((await runtime.getSession(first.id)).status).toBe("CLOSED");
+    expect((await runtime.getSession(second.id)).status).toBe("READY");
+    await page.getByRole("button", { name: "Close zsh 1", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => required(page).locator(".session-tab").count()).toBe(0);
+    await waitForPageText(page, ".status-strip", "NONE");
+    expect((await runtime.getSession(second.id)).status).toBe("CLOSED");
+    await page.reload({ waitUntil: "networkidle" });
+    expect(await page.locator(".session-tab").count()).toBe(0);
+    await page.getByRole("button", { name: "New Session", exact: true }).click();
+    await waitForPageText(page, ".status-strip", "READY");
+    expect(await page.locator(".session-tab").count()).toBe(1);
+  }, 60_000);
+
   it("lets a Human inspect and rebuild a same-owner historical checkpoint after daemon loss", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "iterminal-m7-browser-rebuild-")));
     fixtures.push(root);
@@ -614,7 +1209,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     await page.goto(consoleServer.url, { waitUntil: "networkidle" });
 
     await waitForPageText(page, ".status-strip", "BROKEN");
-    await waitForPageText(page, ".mode-note", "no live PTY or screen");
+    expect(await page.locator(".mode-panel").count()).toBe(0);
     await waitForPageText(page, ".checkpoint-panel", "v2");
     await waitForPageText(page, ".checkpoint-panel", restoredCwd);
     await waitForPageText(page, ".checkpoint-panel", "ITERM_M7_SAFE");
@@ -668,8 +1263,73 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
       parent_status: "BROKEN",
     });
     expect(durable.rows[0]?.actor_id).toMatch(/^human_console_/);
+
+    // Historical parents are read-only: removing their tabs must not attempt DELETE.
+    const deletes: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "DELETE") deletes.push(request.url());
+    });
+    await page.locator(".session-tab").nth(0).click();
+    await waitForPageText(page, ".status-strip", "BROKEN");
+    await waitForPageText(page, ".checkpoint-panel", "v2");
+    expect(await page.locator(".error-banner").count()).toBe(0);
+    await page.getByRole("button", { name: "Close zsh 1", exact: true }).click();
+    await expect.poll(() => required(page).locator(".session-tab").count()).toBe(1);
+    expect(deletes).toHaveLength(0);
+    await waitForPageText(page, ".status-strip", "READY");
+    expect((await replacementRuntime.getSession(parent.id)).status).toBe("BROKEN");
+    await page.reload({ waitUntil: "networkidle" });
+    await expect.poll(() => required(page).locator(".session-tab").count()).toBe(1);
+    await waitForPageText(page, ".status-strip", "READY");
+    await page.getByRole("button", { name: "Close zsh 1", exact: true }).click();
+    await expect.poll(() => required(page).locator(".session-tab").count()).toBe(0);
+    await waitForPageText(page, ".status-strip", "NONE");
+    expect((await replacementRuntime.getSession(required(child).id)).status).toBe("CLOSED");
+    await page.reload({ waitUntil: "networkidle" });
+    expect(await page.locator(".session-tab").count()).toBe(0);
+    expect(await page.getByRole("button", { name: "New Session", exact: true }).isEnabled()).toBe(
+      true,
+    );
   }, 60_000);
 });
+
+async function assertViewportFit(target: Page): Promise<void> {
+  await expect
+    .poll(() =>
+      target.evaluate(() => {
+        const surface = document.querySelector<HTMLElement>(".terminal-surface");
+        const host = document.querySelector<HTMLElement>(".terminal-host");
+        const grid = document.querySelector(".xterm-screen")?.getBoundingClientRect();
+        const geometry = host?.getAttribute("aria-label")?.match(/Canonical (\d+) by (\d+)/u);
+        if (
+          surface === null ||
+          host === null ||
+          grid === undefined ||
+          geometry === undefined ||
+          geometry === null
+        )
+          return false;
+        const padding = getComputedStyle(host);
+        const remainingWidth =
+          surface.clientWidth -
+          parseFloat(padding.paddingLeft) -
+          parseFloat(padding.paddingRight) -
+          grid.width;
+        const remainingHeight =
+          surface.clientHeight -
+          parseFloat(padding.paddingTop) -
+          parseFloat(padding.paddingBottom) -
+          grid.height;
+        return (
+          remainingWidth >= -1 &&
+          remainingWidth < grid.width / Number(geometry[1]) + 1 &&
+          remainingHeight >= -1 &&
+          remainingHeight < grid.height / Number(geometry[2]) + 1
+        );
+      }),
+    )
+    .toBe(true);
+}
 
 async function connectAgent(socketPath: string): Promise<Client> {
   const transport = new StdioClientTransport({
@@ -759,6 +1419,41 @@ async function waitForPageText(page: Page, selector: string, expected: string): 
     { expectedText: expected, target: selector },
     { timeout: 10_000 },
   );
+}
+
+async function commandLayout(page: Page): Promise<{
+  top: number;
+  bottom: number;
+  right: number;
+  height: number;
+  lineHeight: number;
+  screenTop: number;
+  viewportBottom: number;
+  viewportRight: number;
+  scrollWidth: number;
+  clientWidth: number;
+}> {
+  return page.evaluate(() => {
+    const input = document.querySelector<HTMLTextAreaElement>(".command-editor");
+    const surface = document.querySelector<HTMLElement>(".terminal-surface");
+    const screen = document.querySelector<HTMLElement>(".xterm-screen");
+    if (input === null || surface === null || screen === null)
+      throw new Error("Command layout is missing");
+    const rect = input.getBoundingClientRect();
+    const viewport = surface.getBoundingClientRect();
+    return {
+      top: rect.top,
+      bottom: rect.bottom,
+      right: rect.right,
+      height: rect.height,
+      lineHeight: parseFloat(getComputedStyle(input).lineHeight),
+      screenTop: screen.getBoundingClientRect().top,
+      viewportBottom: viewport.top + surface.clientHeight,
+      viewportRight: viewport.left + surface.clientWidth,
+      scrollWidth: input.scrollWidth,
+      clientWidth: input.clientWidth,
+    };
+  });
 }
 
 function delay(milliseconds: number): Promise<void> {

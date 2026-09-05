@@ -15,6 +15,8 @@ import type {
   ExecuteAction,
   Execution,
   InputAction,
+  InputContext,
+  LineInputPrecondition,
   InputPolicyMode,
   InteractionGuard,
   InteractionState,
@@ -37,6 +39,7 @@ import type {
   TerminalScreenSearchResult,
   TerminalScreenWaitResult,
   TerminalStateObservation,
+  TerminalCursorResponse,
 } from "@iterminal/domain";
 import {
   actorHasCapability,
@@ -53,7 +56,10 @@ import {
   MIN_TERMINAL_ROWS,
   RuntimeError,
   isCanonicalActorCapabilities,
+  isTerminalResponseAction,
+  TERMINAL_RESPONSE_ACTOR,
 } from "@iterminal/domain";
+import { deliveredInputState, validateLineInput } from "./input-context.js";
 
 import type {
   DurableSessionEvent,
@@ -166,6 +172,7 @@ export interface InputRequest {
   readonly targetExecutionId: string;
   readonly data: string;
   readonly expectedScreenVersion?: number;
+  readonly lineInput?: LineInputPrecondition;
   readonly idempotencyKey: string;
 }
 
@@ -370,6 +377,7 @@ export class RuntimeService {
   readonly #agentExecuteApproval: AgentExecuteApprovalPolicy;
   readonly #mutationTails = new Map<string, Promise<void>>();
   readonly #interactionStates = new Map<string, InteractionState>();
+  readonly #inputContexts = new Map<string, InputContext>();
   readonly #sensitiveInputs = new Map<string, SensitiveInput>();
   readonly #sessionLeases = new Map<string, SessionLease>();
   readonly #sessionCreations = new Map<string, SessionCreationReplay>();
@@ -387,6 +395,10 @@ export class RuntimeService {
   #ownerIdentity: RuntimeOwnerIdentity;
   readonly #sessionLeaseMilliseconds: number;
   readonly #screenProjectionFactory: TerminalScreenProjectionFactory | undefined;
+  readonly #terminalResponseBudgets = new Map<
+    string,
+    { pending: number; count: number; since: number }
+  >();
 
   public constructor(
     private readonly store: RuntimeStore,
@@ -1817,7 +1829,10 @@ export class RuntimeService {
     return this.#withMutationLock(sessionId, async () => {
       await this.#flushDurable(sessionId);
       const session = this.#requireGeneration(sessionId, generation);
-      return cloneInteractionState(await this.#reconcileExpiredGuard(session));
+      const state = cloneInteractionState(await this.#reconcileExpiredGuard(session));
+      return session.activeExecutionId === undefined
+        ? state
+        : { ...state, inputContext: { ...this.#inputContext(session, session.activeExecutionId) } };
     });
   }
 
@@ -2072,6 +2087,7 @@ export class RuntimeService {
       request.expectedScreenVersion,
     );
     await this.#assertInteractionAllowed(session, request.actor, "secret", false);
+    const previousInputContext = this.#inputContext(session, request.targetExecutionId);
     const acceptedAt = this.#timestamp();
     const sensitiveInputId = `sec_${randomUUID()}`;
     const action: SecretInputAction = {
@@ -2148,6 +2164,7 @@ export class RuntimeService {
           deliveredEvent,
         ),
       );
+      this.#completeUntrackedInput(session, action, previousInputContext);
       return action;
     } catch {
       action.status = "UNKNOWN";
@@ -2204,10 +2221,10 @@ export class RuntimeService {
           version: sensitiveInput.version,
         });
       }
-      if (!sameActor(sensitiveInput.actor, request.actor)) {
+      if (!sameActor(sensitiveInput.actor, request.actor) && session.status !== "READY") {
         throw new RuntimeError(
           "POLICY_DENIED",
-          "Only the Human who started the period may finish it",
+          "Only the Human who started the period may finish it while the Execution is live",
         );
       }
       if (request.expectedVersion !== sensitiveInput.version) {
@@ -2244,15 +2261,23 @@ export class RuntimeService {
     });
   }
 
-  async #sendInputLocked(request: InputRequest): Promise<InputAction> {
+  async #sendInputLocked(
+    request: InputRequest,
+    terminalResponse?: TerminalCursorResponse,
+  ): Promise<InputAction> {
     if (request.data.includes("\0")) {
       throw new RuntimeError("INVALID_REQUEST", "Input data cannot contain NUL bytes");
+    }
+    if (request.lineInput !== undefined) {
+      validateLineInput(request.data, request.lineInput, request.expectedScreenVersion);
     }
     await this.#flushDurable(request.sessionId);
     const requestHash = hashRequest({
       data: request.data,
       expectedScreenVersion: request.expectedScreenVersion,
       targetExecutionId: request.targetExecutionId,
+      ...(terminalResponse === undefined ? {} : { terminalResponse }),
+      ...(request.lineInput === undefined ? {} : { lineInput: request.lineInput }),
     });
     const scope = `${request.sessionId}:${request.actor.id}`;
     const replay = this.#idempotentReplay(scope, request.idempotencyKey, requestHash);
@@ -2262,19 +2287,48 @@ export class RuntimeService {
       }
       return replay;
     }
-    this.#assertSensitiveInteraction(
-      request.sessionId,
-      request.sessionGeneration,
-      request.actor,
-      "input",
-    );
+    if (terminalResponse === undefined) {
+      this.#assertSensitiveInteraction(
+        request.sessionId,
+        request.sessionGeneration,
+        request.actor,
+        "input",
+      );
+    }
     const session = this.#requireInteractionTarget(
       request.sessionId,
       request.sessionGeneration,
       request.targetExecutionId,
       request.expectedScreenVersion,
     );
-    await this.#assertInteractionAllowed(session, request.actor, "input", false);
+    if (terminalResponse === undefined)
+      await this.#assertInteractionAllowed(session, request.actor, "input", false);
+    const inputContext = this.#inputContext(session, request.targetExecutionId);
+    if (request.lineInput !== undefined) {
+      const state = this.#requireInteractionState(session.id, session.generation);
+      if (
+        inputContext.version !== request.lineInput.expectedInputVersion ||
+        state.version !== request.lineInput.expectedInteractionVersion
+      ) {
+        throw new RuntimeError(
+          "INPUT_CONTEXT_CHANGED",
+          "Input or interaction context changed; re-observe before deciding",
+          {
+            currentInputVersion: inputContext.version,
+            currentInteractionVersion: state.version,
+          },
+        );
+      }
+      if (inputContext.state !== "clear") {
+        throw new RuntimeError(
+          "INPUT_CONTEXT_UNSAFE",
+          "Pending or unknown foreground input prevents independent line submission",
+          {
+            inputState: inputContext.state,
+          },
+        );
+      }
+    }
     const action: InputAction = {
       acceptedAt: this.#timestamp(),
       actionSequence: this.store.nextActionSequence(session.id, session.generation),
@@ -2288,10 +2342,23 @@ export class RuntimeService {
       status: "ACCEPTED",
       targetExecutionId: request.targetExecutionId,
       type: "input",
+      ...(request.lineInput === undefined ? {} : { lineInput: { ...request.lineInput } }),
+      ...(terminalResponse === undefined
+        ? {}
+        : {
+            terminalResponse: {
+              kind: terminalResponse.kind,
+              sourceScreenVersion: terminalResponse.sourceScreenVersion,
+            },
+          }),
       ...(request.expectedScreenVersion === undefined
         ? {}
         : { expectedScreenVersion: request.expectedScreenVersion }),
     };
+    if (terminalResponse !== undefined && !isTerminalResponseAction(action)) {
+      this.store.rollbackActionSequence(session.id, session.generation, action.actionSequence);
+      throw new RuntimeError("INVALID_REQUEST", "Invalid generated terminal response");
+    }
     const acceptedEvent = this.#eventDraft(session, "action.accepted", {}, action);
     try {
       await this.#enqueueDurable(session.id, 0, () =>
@@ -2330,6 +2397,21 @@ export class RuntimeService {
           deliveredEvent,
         ),
       );
+      if (terminalResponse === undefined) {
+        this.#inputContexts.set(session.id, {
+          targetExecutionId: action.targetExecutionId,
+          version: action.actionSequence,
+          state: deliveredInputState(inputContext.state, request.data),
+          ...(deliveredInputState(inputContext.state, request.data) !== "unknown"
+            ? {}
+            : {
+                unknownReason:
+                  inputContext.state === "unknown"
+                    ? (inputContext.unknownReason ?? "delivery")
+                    : "untracked_input",
+              }),
+        });
+      }
       return action;
     } catch (error) {
       action.status = "UNKNOWN";
@@ -2608,6 +2690,7 @@ export class RuntimeService {
       targetExecutionId: request.targetExecutionId,
       type: "control",
     };
+    const previousInputContext = this.#inputContext(session, request.targetExecutionId);
     const acceptedEvent = this.#eventDraft(session, "action.accepted", {}, action);
     try {
       await this.#enqueueDurable(session.id, 0, () =>
@@ -2648,6 +2731,7 @@ export class RuntimeService {
           deliveredEvent,
         ),
       );
+      this.#completeUntrackedInput(session, action, previousInputContext);
       return action;
     } catch (error) {
       action.status = "UNKNOWN";
@@ -2682,6 +2766,15 @@ export class RuntimeService {
     action: InputAction | SecretInputAction | ControlAction,
     payload: Readonly<Record<string, unknown>>,
   ): Promise<void> {
+    if (action.type !== "input" || !isTerminalResponseAction(action)) {
+      // Stay unknown on any write/durability failure; only proven ordinary delivery refines it.
+      this.#inputContexts.set(session.id, {
+        targetExecutionId: action.targetExecutionId,
+        version: action.actionSequence,
+        state: "unknown",
+        unknownReason: "delivery",
+      });
+    }
     const event = this.#eventDraft(
       session,
       "interaction.write_attempted",
@@ -2790,13 +2883,85 @@ export class RuntimeService {
       return;
     }
     const screenVersion = this.store.bumpScreenVersion(sessionId, generation);
-    this.#screens.get(sessionId)?.write(data, screenVersion);
     const execution =
       current.activeExecutionId === undefined
         ? undefined
         : this.store.getExecution(current.activeExecutionId);
     const action = execution === undefined ? undefined : this.store.getAction(execution.actionId);
+    this.#screens.get(sessionId)?.write(data, screenVersion, (response) => {
+      if (execution !== undefined)
+        this.#queueTerminalResponse(sessionId, generation, execution.id, response);
+    });
     this.#appendPtyOutput(current, data, screenVersion, action, execution);
+  }
+
+  #queueTerminalResponse(
+    sessionId: string,
+    generation: number,
+    executionId: string,
+    response: TerminalCursorResponse,
+  ): void {
+    const current = this.store.getSession(sessionId);
+    if (
+      current?.generation !== generation ||
+      current.status !== "RUNNING" ||
+      current.activeExecutionId !== executionId
+    )
+      return;
+    const now = Date.now();
+    const budget = this.#terminalResponseBudgets.get(sessionId) ?? {
+      pending: 0,
+      count: 0,
+      since: now,
+    };
+    if (now - budget.since >= 1_000) {
+      budget.count = 0;
+      budget.since = now;
+    }
+    if (budget.pending >= 32 || budget.count >= 120) {
+      this.#tripDurability(
+        sessionId,
+        new RuntimeError("BACKPRESSURE", "Terminal response budget exhausted"),
+      );
+      return;
+    }
+    budget.pending += 1;
+    budget.count += 1;
+    this.#terminalResponseBudgets.set(sessionId, budget);
+    void this.#withMutationLock(sessionId, async () => {
+      const live = this.store.getSession(sessionId);
+      if (
+        live?.generation !== generation ||
+        live.status !== "RUNNING" ||
+        live.activeExecutionId !== executionId
+      )
+        return;
+      await this.#sendInputLocked(
+        {
+          actor: TERMINAL_RESPONSE_ACTOR,
+          data: response.data,
+          idempotencyKey: `terminal-response-${randomUUID()}`,
+          sessionGeneration: generation,
+          sessionId,
+          targetExecutionId: executionId,
+        },
+        response,
+      );
+    })
+      .catch((error: unknown) => {
+        const live = this.store.getSession(sessionId);
+        if (
+          live?.generation === generation &&
+          live.status === "RUNNING" &&
+          live.activeExecutionId === executionId
+        )
+          this.#tripDurability(sessionId, error);
+      })
+      .finally(() => {
+        budget.pending -= 1;
+        if (budget.pending === 0 && this.store.getSession(sessionId)?.status !== "RUNNING")
+          this.#terminalResponseBudgets.delete(sessionId);
+      });
   }
 
   async #launchSession(
@@ -2965,6 +3130,29 @@ export class RuntimeService {
       );
     }
     return session;
+  }
+
+  #completeUntrackedInput(
+    session: Session,
+    action: SecretInputAction | ControlAction,
+    previous: InputContext,
+  ): void {
+    this.#inputContexts.set(session.id, {
+      targetExecutionId: action.targetExecutionId,
+      version: action.actionSequence,
+      state: "unknown",
+      unknownReason:
+        previous.state === "unknown" && previous.unknownReason !== "untracked_input"
+          ? "delivery"
+          : "untracked_input",
+    });
+  }
+
+  #inputContext(session: Session, targetExecutionId: string): InputContext {
+    const current = this.#inputContexts.get(session.id);
+    return current?.targetExecutionId === targetExecutionId
+      ? current
+      : { targetExecutionId, version: 0, state: "clear" };
   }
 
   #requireInteractionTarget(

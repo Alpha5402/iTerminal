@@ -3,6 +3,10 @@
 - Status: Accepted for M6.6
 - Date: 2026-08-30
 
+Console initiation is amended by [ADR-0061](./0061-active-human-window-terminal-fit.md): an
+explicitly activated foreground Human window may request responsive fitting through the same
+ResizeAction boundary. The no-automatic-fit statements below describe the original M6.6 behavior.
+
 ## Context
 
 The live Runtime and Virtual Screen currently start at a fixed 120×40 geometry. That avoids viewer races, but it prevents a Human or Agent from deliberately resizing a TUI and verifying the resulting `SIGWINCH`/reflow behavior. Letting every browser call `fit()` and write directly to node-pty would make the last connected viewer an implicit terminal owner, bypass Actions, and let a transient layout change silently alter every other participant's screen.

@@ -5,6 +5,9 @@
 
 The browser ingress portion is tightened by ADR-0054; exact authority, all-API request headers,
 Fetch Metadata, and bounded stream admission in that later decision take precedence.
+Geometry is dynamic under ADR-0025; ADR-0061 permits the explicitly activated foreground Human
+window to request fitting through ResizeActions. Original fixed-geometry statements below are
+retained as M5 context, not the current fitting policy.
 
 ## Context
 
@@ -20,7 +23,11 @@ The browser also needs reconnect behavior. A WebSocket is transient and cannot b
 
 The first release accepts only `127.0.0.1`, `::1`, or `localhost` listen hosts. Non-loopback binding is rejected before listen. HTTP Host and WebSocket Origin must name the actual loopback listener. Browser state-changing requests also carry an HttpOnly, SameSite=Strict Console session cookie plus a same-origin request header. Tokens never appear in URL query strings.
 
-The server creates one stable Human Actor per Console cookie. Request bodies cannot supply or override Actor identity. This is trusted-local identity, not remote authentication; remote exposure remains prohibited until M10 capability/authentication work.
+The server creates one stable Human Actor per Console cookie. A valid server-issued cookie rehydrates
+the same Actor after a Console process restart, so an in-flight Human-only interaction does not
+silently change owners. Request bodies cannot supply or override Actor identity. This is
+trusted-local identity, not remote authentication; remote exposure remains prohibited until M10
+capability/authentication work.
 
 ### HTTP commands
 
@@ -51,12 +58,40 @@ Per-connection pending bytes and update cadence are bounded. A slow consumer rec
 The React page renders the canonical Virtual Screen through xterm.js at fixed 120x40 geometry.
 
 - READY focuses a separate command composer and submits an ExecuteAction on Enter.
-- RUNNING may enter interactive focus. Browser key data is grouped into a 20 ms batch before one InputAction.
+- READY history navigation is a local editor operation, never PTY input or automatic replay.
+  The Console collects this Human Actor's `execution.started.payload.observedCommand` events for
+  the selected Session generation. A bounded per-tab sessionStorage cache retains at most 100
+  entries and 65,536 UTF-16 code units, seeded from available Event pages on reconnect. It does not
+  import host Shell history or claim to recover commands outside retained/received Events.
+  Up/Down recall commands at the first/last visual editor row, preserve the pending draft, and
+  require Enter for execution. IME composition, selections, modified arrow keys, secure input,
+  and RUNNING foreground programs do not use this history handler. Storage failure falls back to
+  in-memory history without blocking execution.
+- Focusing a RUNNING terminal immediately enables native keyboard interaction. Browser key data is
+  grouped into a 20 ms batch before one InputAction; no separate focus, Ctrl+C, or secure-input
+  control bar is rendered.
 - The page acquires a 500 ms Human Guard before a raw-key burst, renews only within ADR-0023 bounds, and releases after idle, blur, or explicit focus exit.
 - WebSocket disconnect triggers best-effort server-side release for a Guard held by that Console Actor. TTL remains the safety boundary when release cannot be confirmed.
 - Ctrl+C is an explicit TTY ControlAction; emergency Guard bypass stays a separate Human-only control option.
 
-### Rendering and truth
+### Session tab dismissal (2026-09-02)
+
+Each tab has a separate keyboard-accessible close button, not a nested button. Closing a live
+Session uses the existing exact-generation HTTP close operation. The client refreshes its status
+before closing; STARTING/RESERVED/RUNNING requires confirmation. A failed or uncertain close keeps
+the tab visible and is not automatically retried. Closing a background tab leaves selection alone;
+closing the selected tab prefers the right neighbor, then the left. CLOSED history is not rendered
+as open tabs, and closing the last tab leaves the explicit new-Session button available.
+
+BROKEN historical projections have neither a live PTY nor a Session lease (ADR-0028). Their close
+button dismisses the tab locally without sending a Runtime mutation or pretending the generation
+became CLOSED. Exact Session/generation dismissal keys are kept in browser-local storage (latest
+2,000, bounded input parsing); refresh restores them. Storage failure degrades to in-memory
+dismissal. Clearing browser storage, switching browser origins/profiles, or exceeding that bound
+can show historical tabs again. No command text, credentials, checkpoints, or output are stored in
+these keys. This is presentation state, not durable deletion, cross-client archival, or retention.
+
+### Screen rendering
 
 The headless Runtime projection is canonical. The first Console reconstructs bounded plain screen text and cursor position into xterm.js; it does not claim browser/headless style parity or resize ownership. Timeline attribution comes from durable Events, never from parsing terminal text.
 

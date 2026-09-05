@@ -228,6 +228,75 @@ describe("M10.4 Human-only secret input", () => {
       await runtime.closeSession(session.id, session.generation);
     }
   }, 20_000);
+
+  it("lets another capable Human reconcile an orphaned period only after the Execution ends", async () => {
+    const runtime = createTestRuntime();
+    const workspace = createWorkspace();
+    const session = await runtime.createSession({ shell: "zsh", workspaceRoot: workspace });
+    const recoveringHuman: Actor = {
+      capabilities: ACTOR_CAPABILITY_PROFILES.human,
+      client: "replacement-human-console",
+      id: "replacement-human",
+      principal: "replacement-local-human",
+      type: "human",
+    };
+    try {
+      const started = await runtime.startExecute({
+        actor: humanActor,
+        command: "read -r ignored; sleep 30",
+        idempotencyKey: "orphaned-secret-reader",
+        sessionGeneration: session.generation,
+        sessionId: session.id,
+      });
+      await started.started;
+      const action = await runtime.beginSecretInput({
+        actor: humanActor,
+        data: "ORPHANED_TRANSIENT_SECRET\r",
+        idempotencyKey: "orphaned-secret-submit",
+        sessionGeneration: session.generation,
+        sessionId: session.id,
+        targetExecutionId: started.execution.id,
+      });
+
+      await expect(
+        runtime.finishSensitiveInput({
+          actor: recoveringHuman,
+          expectedVersion: 1,
+          idempotencyKey: "unsafe-live-recovery",
+          outcome: "completed",
+          sensitiveInputId: action.sensitiveInputId,
+          sessionGeneration: session.generation,
+          sessionId: session.id,
+        }),
+      ).rejects.toMatchObject({ code: "POLICY_DENIED" });
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await runtime.sendControl({
+        actor: humanActor,
+        bypassGuard: true,
+        delivery: { control: "CTRL_C", mode: "TTY_CONTROL" },
+        idempotencyKey: "stop-orphaned-secret-reader",
+        sessionGeneration: session.generation,
+        sessionId: session.id,
+        targetExecutionId: started.execution.id,
+      });
+      await started.completion;
+
+      await expect(
+        runtime.finishSensitiveInput({
+          actor: recoveringHuman,
+          expectedVersion: 1,
+          idempotencyKey: "safe-ready-recovery",
+          outcome: "cancelled",
+          sensitiveInputId: action.sensitiveInputId,
+          sessionGeneration: session.generation,
+          sessionId: session.id,
+        }),
+      ).resolves.toMatchObject({ status: "CANCELLED", version: 2 });
+    } finally {
+      await runtime.closeSession(session.id, session.generation);
+    }
+  }, 20_000);
 });
 
 function createWorkspace(): string {

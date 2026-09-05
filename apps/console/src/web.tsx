@@ -2,8 +2,26 @@ import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 
 import { Terminal } from "@xterm/xterm";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+
+import {
+  commandHistoryKey,
+  CommandHistoryNavigation,
+  mergeCommandHistory,
+  readCommandHistory,
+  type CommandHistoryEntry,
+} from "./command-history.js";
+import { ActiveWindowFit, fittedGeometry } from "./terminal-fit.js";
+import { terminalSelectionText } from "./terminal-copy.js";
+import {
+  DISMISSED_TABS_KEY,
+  dismissSessionTab,
+  readDismissedTabs,
+  selectedSessionTab,
+  sessionTabKey,
+  visibleSessionTabs,
+} from "./session-tabs.js";
 
 type SessionStatus = "STARTING" | "READY" | "RESERVED" | "RUNNING" | "BROKEN" | "CLOSED";
 type InputPolicy = "common" | "human_guarded" | "human_only" | "agent_only";
@@ -70,6 +88,12 @@ interface InteractionState {
   readonly sessionGeneration: number;
   readonly sessionId: string;
   readonly version: number;
+  readonly inputContext?: {
+    readonly targetExecutionId: string;
+    readonly version: number;
+    readonly state: "clear" | "pending" | "unknown";
+    readonly unknownReason?: "untracked_input" | "delivery";
+  };
 }
 
 interface Approval {
@@ -101,11 +125,14 @@ interface ScreenSnapshot {
   readonly cursor: { readonly column: number; readonly row: number };
   readonly geometryVersion: number;
   readonly lines: readonly string[];
+  readonly wrappedRows?: readonly boolean[];
   readonly rows: number;
   readonly screenVersion: number;
 }
 
 interface SessionEvent {
+  readonly sessionId: string;
+  readonly sessionGeneration: number;
   readonly actor?: Actor;
   readonly id: string;
   readonly observedAt: string;
@@ -170,6 +197,8 @@ interface ResumeState {
 interface CursorComposerLayout {
   readonly height: number;
   readonly left: number;
+  readonly lineLeft: number;
+  readonly lineWidth: number;
   readonly top: number;
   readonly width: number;
 }
@@ -186,6 +215,22 @@ const INSPECTOR_TITLES: Record<InspectorView, string> = {
 function App(): React.JSX.Element {
   const [bootstrap, setBootstrap] = useState<Bootstrap>();
   const [sessions, setSessions] = useState<readonly Session[]>([]);
+  const [dismissedTabs, setDismissedTabs] = useState<readonly string[]>(() => {
+    try {
+      return readDismissedTabs(window.localStorage);
+    } catch {
+      return [];
+    }
+  });
+  const dismissedTabsRef = useRef(dismissedTabs);
+  const visibleSessions = useMemo(
+    () => visibleSessionTabs(sessions, dismissedTabs),
+    [sessions, dismissedTabs],
+  );
+  const visibleSessionsRef = useRef(visibleSessions);
+  visibleSessionsRef.current = visibleSessions;
+  const closingTabs = useRef(new Set<string>());
+  const [pendingTabCloses, setPendingTabCloses] = useState<readonly string[]>([]);
   const [selectedId, setSelectedId] = useState<string>();
   const [session, setSession] = useState<Session>();
   const [interaction, setInteraction] = useState<InteractionState>();
@@ -198,7 +243,7 @@ function App(): React.JSX.Element {
   const [sensitiveInput, setSensitiveInput] = useState<SensitiveInput>();
   const [secret, setSecret] = useState("");
   const [secretSubmitting, setSecretSubmitting] = useState(false);
-  const [secureInputRequested, setSecureInputRequested] = useState(false);
+  const [sensitiveFinishing, setSensitiveFinishing] = useState(false);
   const [dismissedSecretPromptKey, setDismissedSecretPromptKey] = useState<string>();
   const [cursor, setCursor] = useState(0);
   const latestCursor = useRef(0);
@@ -207,6 +252,14 @@ function App(): React.JSX.Element {
   );
   const [error, setError] = useState<ApiErrorBody>();
   const [command, setCommand] = useState("");
+  const [foregroundDrafts, setForegroundDrafts] = useState<Record<string, string>>({});
+  const [rawInput, setRawInput] = useState(false);
+  const rawInputState = useRef(false);
+  const foregroundPending = useRef(new Set<string>());
+  const [foregroundBlocked, setForegroundBlocked] = useState<readonly string[]>([]);
+  const commandHistories = useRef(new Map<string, readonly CommandHistoryEntry[]>());
+  const commandHistoryNavigation = useRef(new CommandHistoryNavigation());
+  const historyCaretRestore = useRef(false);
   const [creatingSession, setCreatingSession] = useState(false);
   const [mcpConfigCopied, setMcpConfigCopied] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -214,8 +267,14 @@ function App(): React.JSX.Element {
   const [interactive, setInteractive] = useState(false);
   const [resizeColumns, setResizeColumns] = useState(SCREEN_COLUMNS.toString());
   const [resizeRows, setResizeRows] = useState(SCREEN_ROWS.toString());
+  const [autoFit, setAutoFit] = useState(true);
+  const [fitNotice, setFitNotice] = useState<string>();
+  const fitController = useRef<ActiveWindowFit | undefined>(undefined);
+  const fitEnabled = useRef(true);
+  const fitLive = useRef(false);
   const [browserTerminalMirror, setBrowserTerminalMirror] = useState("");
   const [cursorComposerLayout, setCursorComposerLayout] = useState<CursorComposerLayout>();
+  const [commandEditorHeight, setCommandEditorHeight] = useState(0);
   const interactiveState = useRef(false);
   const commandEditor = useRef<HTMLTextAreaElement>(null);
   const secretEditor = useRef<HTMLInputElement>(null);
@@ -232,6 +291,8 @@ function App(): React.JSX.Element {
   const latestSession = useRef<Session | undefined>(undefined);
   const latestInteraction = useRef<InteractionState | undefined>(undefined);
   const latestScreen = useRef<ScreenSnapshot | undefined>(undefined);
+  const renderedCopyScreen = useRef<ScreenSnapshot | undefined>(undefined);
+  const columnSelection = useRef(false);
   const guardReleaseTimer = useRef<number | undefined>(undefined);
   const guardTask = useRef<Promise<void>>(Promise.resolve());
   const inputBuffer = useRef("");
@@ -247,11 +308,51 @@ function App(): React.JSX.Element {
   const secureInputVisible =
     session?.status === "RUNNING" &&
     sensitiveInput?.status !== "ACTIVE" &&
-    (secureInputRequested ||
-      (secretPromptKey !== undefined && secretPromptKey !== dismissedSecretPromptKey));
-  const cursorComposerRequested = session?.status === "READY" || secureInputVisible;
-  const commandEditorRows = Math.min(6, Math.max(1, command.split("\n").length));
+    secretPromptKey !== undefined &&
+    secretPromptKey !== dismissedSecretPromptKey;
+  const foregroundScope =
+    session?.activeExecutionId === undefined
+      ? undefined
+      : `${session.id}:${session.generation}:${session.activeExecutionId}`;
+  const foregroundLineVisible =
+    session?.status === "RUNNING" &&
+    !rawInput &&
+    !secureInputVisible &&
+    sensitiveInput?.status !== "ACTIVE";
+  const editorValue =
+    foregroundLineVisible && foregroundScope !== undefined
+      ? (foregroundDrafts[foregroundScope] ?? "")
+      : command;
+  const cursorComposerRequested =
+    session?.status === "READY" || foregroundLineVisible || secureInputVisible;
   const pendingApprovalCount = approvals.filter((approval) => approval.status === "PENDING").length;
+
+  useEffect(() => {
+    if (session === undefined || bootstrap === undefined) return;
+    const key = commandHistoryKey(bootstrap.actor.id, session.id, session.generation);
+    let prior = commandHistories.current.get(key);
+    if (prior === undefined) {
+      try {
+        prior = readCommandHistory(sessionStorage, key);
+      } catch {
+        prior = [];
+      }
+    }
+    const next = mergeCommandHistory(
+      prior,
+      timeline.filter(
+        (event) => event.sessionId === session.id && event.sessionGeneration === session.generation,
+      ),
+      bootstrap.actor.id,
+    );
+    commandHistories.current.set(key, next);
+    if (next === prior) return;
+    try {
+      sessionStorage.setItem(key, JSON.stringify(next));
+    } catch {
+      // History is an optional editor cache, never an execution prerequisite.
+    }
+  }, [bootstrap?.actor.id, session?.id, session?.generation, timeline]);
 
   useEffect(() => {
     latestSession.current = session;
@@ -263,11 +364,26 @@ function App(): React.JSX.Element {
     latestScreen.current = screen;
   }, [screen]);
   useEffect(() => {
+    fitLive.current = streamState === "live";
+    fitController.current?.observe();
+  }, [screen, session, streamState]);
+  useEffect(() => {
+    fitEnabled.current = autoFit;
+    if (!autoFit) fitController.current?.suspend();
+  }, [autoFit]);
+  useEffect(() => {
     latestCursor.current = cursor;
   }, [cursor]);
   useEffect(() => {
     interactiveState.current = interactive;
   }, [interactive]);
+  useEffect(() => {
+    rawInputState.current = rawInput;
+  }, [rawInput]);
+  useEffect(() => {
+    setRawInput(false);
+    rawInputState.current = false;
+  }, [foregroundScope]);
   useEffect(() => {
     if (pendingApprovalCount === 0) return;
     setInspectorView("approvals");
@@ -293,17 +409,21 @@ function App(): React.JSX.Element {
   const refreshSessions = useCallback(async (): Promise<void> => {
     const next = await api<readonly Session[]>("/api/sessions");
     setSessions(next);
-    if (selectedId !== undefined && !next.some((candidate) => candidate.id === selectedId)) {
-      setSelectedId(undefined);
-    }
-  }, [selectedId]);
+    setSelectedId((current) =>
+      selectedSessionTab(
+        current,
+        visibleSessionsRef.current,
+        visibleSessionTabs(next, dismissedTabsRef.current),
+      ),
+    );
+  }, []);
 
   useEffect(() => {
     void api<Bootstrap>("/api/bootstrap")
       .then((value) => {
         setBootstrap(value);
         setSessions(value.sessions);
-        setSelectedId(value.sessions.find((candidate) => candidate.status !== "CLOSED")?.id);
+        setSelectedId(visibleSessionTabs(value.sessions, dismissedTabsRef.current)[0]?.id);
       })
       .catch((reason: unknown) => setError(normalizeClientError(reason)));
   }, []);
@@ -347,7 +467,7 @@ function App(): React.JSX.Element {
         void sendControl("CTRL_D");
         return;
       }
-      queueInput(data);
+      if (rawInputState.current) queueInput(data);
     });
     return () => {
       dataSubscription.dispose();
@@ -357,20 +477,142 @@ function App(): React.JSX.Element {
   }, [bootstrap?.actor.id]);
 
   useEffect(() => {
-    if (terminal.current !== undefined && screen !== undefined) {
-      renderScreen(terminal.current, screen, session?.status === "RUNNING", (text) => {
-        setBrowserTerminalMirror(text);
-        if (cursorComposerRequested) {
-          window.requestAnimationFrame(() => {
-            syncCursorComposerLayout(
-              terminalHost.current,
-              terminalSurface.current,
-              screen,
-              setCursorComposerLayout,
-            );
-          });
-        }
-      });
+    const host = terminalHost.current;
+    const surface = terminalSurface.current;
+    if (
+      host === null ||
+      surface === null ||
+      bootstrap === undefined ||
+      selectedId === undefined ||
+      selectedGeneration === undefined
+    )
+      return;
+    const scope = `${selectedId}:${selectedGeneration.toString()}`;
+    const controller = new ActiveWindowFit(
+      () => {
+        const current = latestSession.current;
+        const snapshot = latestScreen.current;
+        const rendered = terminal.current;
+        const grid = host.querySelector(".xterm-screen")?.getBoundingClientRect();
+        if (
+          current?.id !== selectedId ||
+          current.generation !== selectedGeneration ||
+          snapshot === undefined ||
+          rendered === undefined ||
+          grid === undefined
+        )
+          return undefined;
+        const padding = getComputedStyle(host);
+        const desired = fittedGeometry(
+          surface.clientWidth - parseFloat(padding.paddingLeft) - parseFloat(padding.paddingRight),
+          surface.clientHeight - parseFloat(padding.paddingTop) - parseFloat(padding.paddingBottom),
+          grid.width / rendered.cols,
+          grid.height / rendered.rows,
+          bootstrap.geometryBounds,
+        );
+        return desired === undefined
+          ? undefined
+          : { scope, version: snapshot.geometryVersion, current: snapshot, desired };
+      },
+      () => {
+        const current = latestSession.current;
+        const policy = latestInteraction.current;
+        return (
+          fitEnabled.current &&
+          fitLive.current &&
+          document.hasFocus() &&
+          document.visibilityState === "visible" &&
+          current?.id === selectedId &&
+          current.generation === selectedGeneration &&
+          ["READY", "RESERVED", "RUNNING"].includes(current.status) &&
+          policy?.policy !== "agent_only" &&
+          (policy?.guard === undefined || policy.guard.actor.id === bootstrap.actor.id)
+        );
+      },
+      async (request) => {
+        await api(`/api/sessions/${encodeURIComponent(selectedId)}/resize`, {
+          method: "POST",
+          body: {
+            ...request.desired,
+            expectedGeometryVersion: request.version,
+            generation: selectedGeneration,
+            idempotencyKey: crypto.randomUUID(),
+          },
+        });
+        setFitNotice(undefined);
+      },
+      (reason) => {
+        const code = normalizeClientError(reason).code;
+        const rejected = [
+          "GEOMETRY_CHANGED",
+          "INPUT_GUARDED",
+          "POLICY_DENIED",
+          "SESSION_NOT_READY",
+          "RATE_LIMITED",
+        ].includes(code);
+        setFitNotice(
+          rejected
+            ? `Window fitting paused (${code}). Interact with the terminal to try again.`
+            : `Window fitting paused (${code}). Check shared geometry before reopening this Session; the request was not retried.`,
+        );
+        return rejected ? "rejected" : "uncertain";
+      },
+    );
+    fitController.current = controller;
+    setFitNotice(undefined);
+    const activate = (event: Event): void => {
+      if (event.isTrusted) controller.activate();
+    };
+    const suspend = (): void => controller.suspend();
+    let lastWidth = surface.clientWidth;
+    let lastHeight = surface.clientHeight;
+    const observer = new ResizeObserver(() => {
+      // Ignore canonical reflow and draft growth: only the allocated viewport requests a fit.
+      const width = surface.clientWidth;
+      const height = surface.clientHeight;
+      if (width === lastWidth && height === lastHeight) return;
+      lastWidth = width;
+      lastHeight = height;
+      controller.layoutChanged();
+    });
+    observer.observe(surface);
+    surface.addEventListener("pointerdown", activate, true);
+    surface.addEventListener("keydown", activate, true);
+    window.addEventListener("blur", suspend);
+    document.addEventListener("visibilitychange", suspend);
+    return () => {
+      controller.dispose();
+      observer.disconnect();
+      surface.removeEventListener("pointerdown", activate, true);
+      surface.removeEventListener("keydown", activate, true);
+      window.removeEventListener("blur", suspend);
+      document.removeEventListener("visibilitychange", suspend);
+      fitController.current = undefined;
+    };
+  }, [bootstrap, selectedId, selectedGeneration]);
+
+  useEffect(() => {
+    const view = terminal.current;
+    if (view !== undefined && screen !== undefined) {
+      renderScreen(
+        view,
+        screen,
+        session?.status === "RUNNING" && !cursorComposerRequested,
+        (text) => {
+          if (terminal.current === view) renderedCopyScreen.current = screen;
+          setBrowserTerminalMirror(text);
+          if (cursorComposerRequested) {
+            window.requestAnimationFrame(() => {
+              syncCursorComposerLayout(
+                terminalHost.current,
+                terminalSurface.current,
+                screen,
+                setCursorComposerLayout,
+              );
+            });
+          }
+        },
+      );
     }
   }, [cursorComposerRequested, screen, session?.status]);
 
@@ -389,25 +631,58 @@ function App(): React.JSX.Element {
     const observer = new ResizeObserver(sync);
     observer.observe(host);
     observer.observe(surface);
-    host.addEventListener("scroll", sync);
+    surface.addEventListener("scroll", sync);
     window.addEventListener("resize", sync);
     return () => {
       window.cancelAnimationFrame(frame);
       observer.disconnect();
-      host.removeEventListener("scroll", sync);
+      surface.removeEventListener("scroll", sync);
       window.removeEventListener("resize", sync);
     };
   }, [cursorComposerRequested, screen]);
 
-  const readyCommandVisible = session?.status === "READY" && cursorComposerLayout !== undefined;
+  const readyCommandVisible =
+    session?.id === selectedId &&
+    (session?.status === "READY" || foregroundLineVisible) &&
+    screen !== undefined &&
+    cursorComposerLayout !== undefined;
+  useLayoutEffect(() => {
+    const editor = commandEditor.current;
+    const surface = terminalSurface.current;
+    if (
+      !readyCommandVisible ||
+      editor === null ||
+      surface === null ||
+      cursorComposerLayout === undefined
+    )
+      return;
+    // Measure actual visual rows, including soft wraps, without changing the command bytes.
+    editor.style.height = "0px";
+    const height = Math.max(cursorComposerLayout.height, editor.scrollHeight);
+    editor.style.height = `${height.toString()}px`;
+    setCommandEditorHeight(height);
+    if (historyCaretRestore.current) {
+      historyCaretRestore.current = false;
+      placeCaretAtEnd(editor);
+    }
+    const frame = window.requestAnimationFrame(() => revealCommandCaret(editor, surface));
+    return () => window.cancelAnimationFrame(frame);
+  }, [editorValue, cursorComposerLayout, readyCommandVisible]);
+
   useEffect(() => {
-    if (session?.status !== "READY" || !readyCommandVisible) return;
+    if (!readyCommandVisible) return;
     const frame = window.requestAnimationFrame(() => {
-      commandEditor.current?.focus();
+      commandEditor.current?.focus({ preventScroll: true });
       if (commandEditor.current !== null) placeCaretAtEnd(commandEditor.current);
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [readyCommandVisible, session?.generation, session?.id, session?.status]);
+  }, [
+    readyCommandVisible,
+    session?.generation,
+    session?.id,
+    session?.status,
+    session?.activeExecutionId,
+  ]);
 
   useEffect(() => {
     if (!secureInputVisible || cursorComposerLayout === undefined) return;
@@ -419,7 +694,6 @@ function App(): React.JSX.Element {
 
   useEffect(() => {
     setDismissedSecretPromptKey(undefined);
-    setSecureInputRequested(false);
     setSecret("");
   }, [session?.activeExecutionId, session?.generation, session?.id]);
 
@@ -459,6 +733,16 @@ function App(): React.JSX.Element {
       setTimeline([]);
       setCursor(0);
       setStreamState("offline");
+      setCheckpoint(undefined);
+      setApprovals([]);
+      setSensitiveInput(undefined);
+      setCommand("");
+      setError(undefined);
+      setBrowserTerminalMirror("");
+      latestScreen.current = undefined;
+      renderedCopyScreen.current = undefined;
+      terminal.current?.reset();
+      terminal.current?.write("\u001b[?25l");
       return;
     }
     const selected = sessions.find((candidate) => candidate.id === selectedId);
@@ -469,6 +753,7 @@ function App(): React.JSX.Element {
     setInteraction(undefined);
     setScreen(undefined);
     latestScreen.current = undefined;
+    renderedCopyScreen.current = undefined;
     terminal.current?.reset();
     setBrowserTerminalMirror("");
     setCursor(saved?.cursor ?? 0);
@@ -477,6 +762,8 @@ function App(): React.JSX.Element {
     setCheckpoint(undefined);
     setStaleAcknowledged(false);
     setCommand("");
+    commandHistoryNavigation.current.reset();
+    historyCaretRestore.current = false;
     let disposed = false;
     if (selected.status === "BROKEN" || selected.status === "CLOSED") {
       setStreamState("offline");
@@ -569,7 +856,7 @@ function App(): React.JSX.Element {
   }, [session?.generation, session?.id, session?.status]);
 
   useEffect(() => {
-    if (session === undefined || session.status === "CLOSED") {
+    if (session === undefined || session.status === "CLOSED" || session.status === "BROKEN") {
       setApprovals([]);
       return;
     }
@@ -610,9 +897,11 @@ function App(): React.JSX.Element {
 
   useEffect(() => {
     const running = session?.status === "RUNNING";
-    if (terminal.current !== undefined) terminal.current.options.disableStdin = !running;
+    if (terminal.current !== undefined)
+      terminal.current.options.disableStdin =
+        !running || (!rawInput && sensitiveInput?.status !== "ACTIVE");
     if (!running) setInteractive(false);
-  }, [session?.status]);
+  }, [session?.status, rawInput, sensitiveInput?.status]);
 
   const queueInput = (data: string): void => {
     inputBuffer.current += data;
@@ -662,7 +951,6 @@ function App(): React.JSX.Element {
           `/api/sessions/${encodeURIComponent(currentSession.id)}/secret-input?generation=${currentSession.generation.toString()}`,
         ),
       );
-      setSecureInputRequested(false);
     } catch (reason) {
       setError(normalizeClientError(reason));
     } finally {
@@ -671,7 +959,15 @@ function App(): React.JSX.Element {
   };
 
   const finishSecretInput = async (outcome: "completed" | "cancelled"): Promise<void> => {
-    if (session === undefined || sensitiveInput === undefined) return;
+    if (
+      session === undefined ||
+      sensitiveInput === undefined ||
+      (sensitiveInput.actor.id !== bootstrap?.actor.id && session.status !== "READY") ||
+      sensitiveFinishing
+    ) {
+      return;
+    }
+    setSensitiveFinishing(true);
     try {
       setSensitiveInput(
         await api<SensitiveInput>(
@@ -688,7 +984,10 @@ function App(): React.JSX.Element {
         ),
       );
     } catch (reason) {
-      setError(normalizeClientError(reason));
+      const failure = normalizeClientError(reason);
+      if (failure.code !== "POLICY_DENIED") setError(failure);
+    } finally {
+      setSensitiveFinishing(false);
     }
   };
 
@@ -893,6 +1192,10 @@ function App(): React.JSX.Element {
 
   const execute = async (event: React.FormEvent): Promise<void> => {
     event.preventDefault();
+    if (foregroundLineVisible) {
+      await submitForegroundLine();
+      return;
+    }
     if (session === undefined || command.trim() === "") return;
     try {
       await api(`/api/sessions/${encodeURIComponent(session.id)}/execute`, {
@@ -904,8 +1207,83 @@ function App(): React.JSX.Element {
         method: "POST",
       });
       setCommand("");
+      commandHistoryNavigation.current.reset();
     } catch (reason) {
       setError(normalizeClientError(reason));
+    }
+  };
+
+  const submitForegroundLine = async (): Promise<void> => {
+    if (
+      session === undefined ||
+      foregroundScope === undefined ||
+      editorValue.trim() === "" ||
+      foregroundPending.current.has(foregroundScope) ||
+      foregroundBlocked.includes(foregroundScope)
+    )
+      return;
+    const target = session;
+    const scope = foregroundScope;
+    const draft = editorValue;
+    let attempted = false;
+    foregroundPending.current.add(scope);
+    try {
+      const observed = await api<InteractionState>(
+        `/api/sessions/${encodeURIComponent(target.id)}/interaction?generation=${target.generation}`,
+      );
+      const context = observed.inputContext;
+      if (context === undefined || context.targetExecutionId !== target.activeExecutionId)
+        throw new Error(
+          "Foreground input context is unavailable; refresh and check the active program",
+        );
+      const current = latestSession.current;
+      if (
+        current?.id !== target.id ||
+        current.generation !== target.generation ||
+        current.activeExecutionId !== target.activeExecutionId
+      )
+        return;
+      attempted = true;
+      const result = await api<{ status: string }>(
+        `/api/sessions/${encodeURIComponent(target.id)}/input`,
+        {
+          method: "POST",
+          body: {
+            data: `${draft}\n`,
+            generation: target.generation,
+            targetExecutionId: target.activeExecutionId,
+            lineInput: {
+              expectedInputVersion: context.version,
+              expectedInteractionVersion: observed.version,
+            },
+            idempotencyKey: crypto.randomUUID(),
+          },
+        },
+      );
+      if (result.status !== "DELIVERED")
+        throw new Error("Input delivery is uncertain; inspect Events before sending again");
+      setForegroundDrafts((drafts) =>
+        drafts[scope] === draft ? { ...drafts, [scope]: "" } : drafts,
+      );
+    } catch (reason) {
+      const failure = normalizeClientError(reason);
+      const rejected = [
+        "INVALID_REQUEST",
+        "INPUT_CONTEXT_CHANGED",
+        "INPUT_CONTEXT_UNSAFE",
+        "INPUT_GUARDED",
+        "POLICY_DENIED",
+        "EXECUTION_CHANGED",
+        "SESSION_GENERATION_CHANGED",
+        "SESSION_BROKEN",
+        "SESSION_NOT_READY",
+        "SENSITIVE_INPUT_ACTIVE",
+        "RATE_LIMITED",
+      ].includes(failure.code);
+      if (attempted && !rejected) setForegroundBlocked((keys) => [...keys, scope]);
+      setError(failure);
+    } finally {
+      foregroundPending.current.delete(scope);
     }
   };
 
@@ -918,6 +1296,38 @@ function App(): React.JSX.Element {
     } catch (reason) {
       setError(normalizeClientError(reason));
     }
+  };
+
+  const navigateCommandHistory = (event: React.KeyboardEvent<HTMLTextAreaElement>): boolean => {
+    if (
+      (event.key !== "ArrowUp" && event.key !== "ArrowDown") ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.shiftKey ||
+      event.nativeEvent.isComposing ||
+      event.nativeEvent.keyCode === 229 ||
+      session?.status !== "READY" ||
+      bootstrap === undefined
+    )
+      return false;
+    const editor = event.currentTarget;
+    if (editor.selectionStart !== editor.selectionEnd) return false;
+    const { row, lineHeight } = commandCaretPosition(editor);
+    const lastRow = Math.max(0, Math.round(editor.clientHeight / lineHeight) - 1);
+    if (event.key === "ArrowUp" ? row > 0 : row < lastRow) return false;
+    const key = commandHistoryKey(bootstrap.actor.id, session.id, session.generation);
+    const recalled = commandHistoryNavigation.current.move(
+      event.key === "ArrowUp" ? "older" : "newer",
+      command,
+      commandHistories.current.get(key) ?? [],
+    );
+    if (recalled === undefined) return false;
+    event.preventDefault();
+    historyCaretRestore.current = recalled !== command;
+    if (recalled === command) placeCaretAtEnd(editor);
+    setCommand(recalled);
+    return true;
   };
 
   const changePolicy = async (mode: InputPolicy): Promise<void> => {
@@ -967,16 +1377,54 @@ function App(): React.JSX.Element {
     }
   };
 
-  const closeSession = async (): Promise<void> => {
-    if (session === undefined) return;
+  const closeSession = async (target: Session): Promise<void> => {
+    const key = sessionTabKey(target);
+    if (closingTabs.current.has(key)) return;
+    closingTabs.current.add(key);
+    setPendingTabCloses([...closingTabs.current]);
     try {
-      await api(`/api/sessions/${encodeURIComponent(session.id)}`, {
-        body: { generation: session.generation },
-        method: "DELETE",
-      });
-      await refreshSessions();
+      // Historical BROKEN projections have no live PTY or Session lease to close.
+      // Dismissing a tab is local presentation state, not deletion of durable history.
+      if (target.status !== "BROKEN" && target.status !== "CLOSED") {
+        const current = await api<Session>(`/api/sessions/${encodeURIComponent(target.id)}`);
+        if (current.generation !== target.generation) {
+          await refreshSessions();
+          return;
+        }
+        if (
+          ["STARTING", "RESERVED", "RUNNING"].includes(current.status) &&
+          !window.confirm("Close this Session and stop its running process?")
+        ) {
+          return;
+        }
+        if (current.status !== "BROKEN" && current.status !== "CLOSED") {
+          const closed = await api<Session>(`/api/sessions/${encodeURIComponent(target.id)}`, {
+            body: { generation: target.generation },
+            method: "DELETE",
+          });
+          setSessions((items) => items.map((item) => (item.id === closed.id ? closed : item)));
+        }
+      }
+      const dismissed = dismissSessionTab(dismissedTabsRef.current, target);
+      dismissedTabsRef.current = dismissed;
+      setDismissedTabs(dismissed);
+      try {
+        window.localStorage.setItem(DISMISSED_TABS_KEY, JSON.stringify(dismissed));
+      } catch {
+        // Browser storage may be unavailable; keep this page's dismissal usable.
+      }
+      setSelectedId((current) =>
+        selectedSessionTab(
+          current,
+          visibleSessionsRef.current,
+          visibleSessionsRef.current.filter((item) => sessionTabKey(item) !== key),
+        ),
+      );
     } catch (reason) {
       setError(normalizeClientError(reason));
+    } finally {
+      closingTabs.current.delete(key);
+      setPendingTabCloses([...closingTabs.current]);
     }
   };
 
@@ -1027,6 +1475,9 @@ function App(): React.JSX.Element {
 
   const resizeTerminal = async (event: React.FormEvent): Promise<void> => {
     event.preventDefault();
+    fitEnabled.current = false;
+    fitController.current?.suspend();
+    setAutoFit(false);
     if (session === undefined || screen === undefined) return;
     try {
       await api(`/api/sessions/${encodeURIComponent(session.id)}/resize`, {
@@ -1114,21 +1565,40 @@ function App(): React.JSX.Element {
         <section className="terminal-stage" aria-label="Shared terminal">
           <nav aria-label="Sessions" className="session-tabs">
             <div className="session-tab-strip">
-              {sessions.map((candidate, index) => (
-                <button
-                  aria-current={candidate.id === selectedId ? "page" : undefined}
-                  className={candidate.id === selectedId ? "session-tab selected" : "session-tab"}
-                  key={candidate.id}
-                  onClick={() => setSelectedId(candidate.id)}
-                  title={`${candidate.shell} · ${candidate.workspaceRoot} · ${candidate.status}`}
-                  type="button"
-                >
-                  <span className={`session-tab-signal status-${candidate.status.toLowerCase()}`} />
-                  <span className="session-tab-name">
-                    {candidate.shell} {index + 1}
-                  </span>
-                  <small>{candidate.workspaceRoot}</small>
-                </button>
+              {visibleSessions.map((candidate, index) => (
+                <div className="session-tab-item" key={sessionTabKey(candidate)}>
+                  <button
+                    aria-current={candidate.id === selectedId ? "page" : undefined}
+                    className={candidate.id === selectedId ? "session-tab selected" : "session-tab"}
+                    onClick={() => setSelectedId(candidate.id)}
+                    title={`${candidate.shell} · ${candidate.workspaceRoot} · ${candidate.status}`}
+                    type="button"
+                  >
+                    <span
+                      className={`session-tab-signal status-${candidate.status.toLowerCase()}`}
+                    />
+                    <span className="session-tab-name">
+                      {candidate.shell} {index + 1}
+                    </span>
+                    <small>{candidate.workspaceRoot}</small>
+                  </button>
+                  <button
+                    aria-label={`Close ${candidate.shell} ${index + 1}`}
+                    className="session-tab-close"
+                    disabled={pendingTabCloses.includes(sessionTabKey(candidate))}
+                    onClick={() => void closeSession(candidate)}
+                    title={
+                      candidate.status === "BROKEN"
+                        ? "Remove broken tab; keep history"
+                        : "Close Session"
+                    }
+                    type="button"
+                  >
+                    <span aria-hidden="true">
+                      {pendingTabCloses.includes(sessionTabKey(candidate)) ? "…" : "×"}
+                    </span>
+                  </button>
+                </div>
               ))}
             </div>
             <button
@@ -1153,65 +1623,147 @@ function App(): React.JSX.Element {
               {screen?.geometryVersion ?? 1}
             </span>
             <span>cursor {cursor}</span>
+            {sensitiveInput?.status === "ACTIVE" && (
+              <button
+                aria-label={
+                  sensitiveInput.actor.id === bootstrap?.actor.id || session?.status === "READY"
+                    ? "Sensitive input protection is active; stop protecting output"
+                    : "Sensitive input protection is active in another Console session"
+                }
+                className="sensitive-indicator"
+                disabled={
+                  sensitiveFinishing ||
+                  (sensitiveInput.actor.id !== bootstrap?.actor.id && session?.status !== "READY")
+                }
+                onClick={() => void finishSecretInput("completed")}
+                title={
+                  sensitiveInput.actor.id === bootstrap?.actor.id || session?.status === "READY"
+                    ? "Sensitive input is protected. Click when the program can no longer echo it."
+                    : "Sensitive input is protected by the Console session that started it."
+                }
+                type="button"
+              >
+                {sensitiveFinishing ? "…" : "***"}
+              </button>
+            )}
             {session?.activeExecutionId !== undefined && <code>{session.activeExecutionId}</code>}
           </div>
           <div
             className="terminal-surface"
             onClick={(event) => {
               if (
-                session?.status !== "READY" ||
+                (session?.status !== "READY" && !foregroundLineVisible) ||
                 commandEditor.current?.contains(event.target as Node) === true ||
                 terminal.current?.hasSelection() === true
               ) {
                 return;
               }
-              commandEditor.current?.focus();
+              commandEditor.current?.focus({ preventScroll: true });
               if (commandEditor.current !== null) placeCaretAtEnd(commandEditor.current);
             }}
             ref={terminalSurface}
           >
             <div
               aria-label={`Canonical ${screen?.columns ?? SCREEN_COLUMNS} by ${screen?.rows ?? SCREEN_ROWS} terminal viewport`}
-              aria-readonly={session?.status !== "RUNNING"}
+              aria-readonly={session?.status !== "RUNNING" || !rawInput}
               className={`terminal-host ${session?.status === "RUNNING" ? "terminal-running" : "terminal-readonly"}${interactive ? " interactive" : ""}`}
+              onMouseDownCapture={(event) => {
+                columnSelection.current = event.altKey;
+              }}
+              onCopyCapture={(event) => {
+                const displayed = renderedCopyScreen.current;
+                const view = terminal.current;
+                if (displayed === undefined || view === undefined || columnSelection.current)
+                  return;
+                const text = terminalSelectionText(view, displayed);
+                if (text === undefined || text === "") return;
+                event.preventDefault();
+                event.stopPropagation();
+                event.clipboardData.setData("text/plain", text);
+              }}
               onBlur={() => {
                 setInteractive(false);
                 releaseGuardAfterPendingInput();
               }}
               onFocus={() => {
-                if (session?.status === "RUNNING") setInteractive(true);
+                if (
+                  session?.status === "RUNNING" &&
+                  (rawInput || sensitiveInput?.status === "ACTIVE")
+                )
+                  setInteractive(true);
               }}
               ref={terminalHost}
+              style={
+                readyCommandVisible &&
+                sensitiveInput?.status !== "ACTIVE" &&
+                cursorComposerLayout !== undefined
+                  ? { minHeight: cursorComposerLayout.top + commandEditorHeight + 16 }
+                  : undefined
+              }
               tabIndex={session?.status === "RUNNING" ? 0 : -1}
             />
-            {session?.status === "READY" &&
+            {readyCommandVisible &&
               sensitiveInput?.status !== "ACTIVE" &&
               cursorComposerLayout !== undefined && (
                 <form
-                  aria-label="Shell prompt command line"
+                  aria-label={
+                    foregroundLineVisible ? "Foreground command line" : "Shell prompt command line"
+                  }
                   className="terminal-cursor-composer terminal-command-composer"
                   onSubmit={(event) => void execute(event)}
                   style={{
-                    height: cursorComposerLayout.height * commandEditorRows,
-                    left: cursorComposerLayout.left,
+                    height: Math.max(cursorComposerLayout.height, commandEditorHeight),
+                    left: cursorComposerLayout.lineLeft,
                     lineHeight: `${cursorComposerLayout.height.toString()}px`,
-                    top: Math.max(
-                      0,
-                      cursorComposerLayout.top -
-                        cursorComposerLayout.height * (commandEditorRows - 1),
-                    ),
-                    width: cursorComposerLayout.width,
+                    top: cursorComposerLayout.top,
+                    width: cursorComposerLayout.lineWidth,
                   }}
                 >
                   <textarea
-                    aria-label="READY command composer"
+                    aria-label={
+                      foregroundLineVisible
+                        ? "Foreground command composer"
+                        : "READY command composer"
+                    }
                     aria-multiline="true"
                     autoCapitalize="off"
                     autoComplete="off"
                     autoFocus
                     className="command-editor"
-                    onChange={(event) => setCommand(event.currentTarget.value)}
+                    onChange={(event) => {
+                      commandHistoryNavigation.current.reset();
+                      historyCaretRestore.current = false;
+                      if (foregroundLineVisible && foregroundScope !== undefined) {
+                        const value = event.currentTarget.value;
+                        setForegroundDrafts((drafts) => ({ ...drafts, [foregroundScope]: value }));
+                      } else setCommand(event.currentTarget.value);
+                    }}
+                    onSelect={(event) => {
+                      const editor = event.currentTarget;
+                      const surface = terminalSurface.current;
+                      if (surface !== null) {
+                        window.requestAnimationFrame(() => {
+                          if (editor.isConnected) revealCommandCaret(editor, surface);
+                        });
+                      }
+                    }}
                     onKeyDown={(event) => {
+                      if (
+                        foregroundLineVisible &&
+                        event.ctrlKey &&
+                        !event.metaKey &&
+                        !event.nativeEvent.isComposing
+                      ) {
+                        const control = ({ c: "CTRL_C", d: "CTRL_D", z: "CTRL_Z" } as const)[
+                          event.key.toLowerCase() as "c" | "d" | "z"
+                        ];
+                        if (control !== undefined) {
+                          event.preventDefault();
+                          void sendControl(control);
+                          return;
+                        }
+                      }
+                      if (navigateCommandHistory(event)) return;
                       if (
                         event.key !== "Enter" ||
                         event.shiftKey ||
@@ -1220,15 +1772,19 @@ function App(): React.JSX.Element {
                         return;
                       }
                       event.preventDefault();
-                      if (command.trim() !== "") {
+                      if (editorValue.trim() !== "") {
                         event.currentTarget.closest("form")?.requestSubmit();
                       }
                     }}
                     ref={commandEditor}
-                    rows={commandEditorRows}
+                    rows={1}
                     spellCheck={false}
-                    value={command}
-                    wrap="off"
+                    style={{
+                      textIndent: cursorComposerLayout.left - cursorComposerLayout.lineLeft,
+                    }}
+                    value={editorValue}
+                    maxLength={foregroundLineVisible ? 64 * 1024 - 1 : 256 * 1024}
+                    wrap="soft"
                   />
                 </form>
               )}
@@ -1256,7 +1812,6 @@ function App(): React.JSX.Element {
                     if (event.key !== "Escape") return;
                     event.preventDefault();
                     setDismissedSecretPromptKey(secretPromptKey);
-                    setSecureInputRequested(false);
                     setSecret("");
                     terminal.current?.focus();
                   }}
@@ -1278,69 +1833,6 @@ function App(): React.JSX.Element {
           >
             {browserTerminalMirror}
           </pre>
-          {(sensitiveInput?.status === "ACTIVE" ||
-            (session?.status !== "READY" && !secureInputVisible)) && (
-            <div className="mode-panel">
-              {sensitiveInput?.status === "ACTIVE" ? (
-                <div className="secret-channel active" aria-live="polite">
-                  <strong>Sensitive output redaction is active.</strong>
-                  <span>
-                    Finish only after the foreground program can no longer echo the secret.
-                  </span>
-                  <div>
-                    <button onClick={() => void sendControl("CTRL_C")} type="button">
-                      Send TTY Ctrl+C while redacted
-                    </button>
-                    <button onClick={() => void finishSecretInput("completed")} type="button">
-                      Complete and stop redaction
-                    </button>
-                    <button onClick={() => void finishSecretInput("cancelled")} type="button">
-                      Cancel and stop redaction
-                    </button>
-                  </div>
-                </div>
-              ) : session?.status === "RUNNING" ? (
-                <>
-                  <div className="interactive-controls">
-                    <button
-                      aria-pressed={interactive}
-                      onClick={() => {
-                        if (interactive) {
-                          terminal.current?.blur();
-                          setInteractive(false);
-                        } else {
-                          terminal.current?.focus();
-                          setInteractive(true);
-                        }
-                      }}
-                      type="button"
-                    >
-                      {interactive ? "Leave interactive focus" : "Enter interactive focus"}
-                    </button>
-                    <button onClick={() => void sendControl("CTRL_C")} type="button">
-                      Send TTY Ctrl+C
-                    </button>
-                    <button
-                      onClick={() => {
-                        setDismissedSecretPromptKey(undefined);
-                        setSecureInputRequested(true);
-                      }}
-                      type="button"
-                    >
-                      Enter secure input at cursor
-                    </button>
-                    <span>Raw keys become 20 ms InputAction batches.</span>
-                  </div>
-                </>
-              ) : (
-                <p className="mode-note">
-                  {session?.status === "BROKEN"
-                    ? "Historical generation: no live PTY or screen. Rebuild from its checkpoint."
-                    : "Select or create a READY Session."}
-                </p>
-              )}
-            </div>
-          )}
         </section>
 
         {inspectorOpen && (
@@ -1496,18 +1988,11 @@ function App(): React.JSX.Element {
                 {session !== undefined && session.status !== "CLOSED" && (
                   <button
                     className="danger"
-                    onClick={() => {
-                      if (
-                        session.status === "RUNNING" &&
-                        !window.confirm("Close this Session and stop its running process?")
-                      ) {
-                        return;
-                      }
-                      void closeSession();
-                    }}
+                    disabled={pendingTabCloses.includes(sessionTabKey(session))}
+                    onClick={() => void closeSession(session)}
                     type="button"
                   >
-                    Close Session
+                    {session.status === "BROKEN" ? "Remove tab" : "Close Session"}
                   </button>
                 )}
               </>
@@ -1516,6 +2001,25 @@ function App(): React.JSX.Element {
             {inspectorView === "advanced" && (
               <>
                 <section aria-label="Advanced interaction settings">
+                  <label className="checkpoint-acknowledgement">
+                    <input
+                      type="checkbox"
+                      checked={rawInput}
+                      disabled={session?.status !== "RUNNING"}
+                      onChange={(event) => {
+                        setRawInput(event.currentTarget.checked);
+                        if (!event.currentTarget.checked) {
+                          setInteractive(false);
+                          releaseGuardAfterPendingInput();
+                        }
+                      }}
+                    />
+                    Send keys directly (TUI / raw mode)
+                  </label>
+                  <p className="mode-note">
+                    By default, drafts stay local until Enter. Direct keys are for editors and TUIs
+                    and use the Human Guard.
+                  </p>
                   <div className="section-title">
                     <h2>Input ownership</h2>
                     <span>v{interaction?.version ?? "—"}</span>
@@ -1554,6 +2058,25 @@ function App(): React.JSX.Element {
                       {screen?.columns ?? SCREEN_COLUMNS}×{screen?.rows ?? SCREEN_ROWS}
                     </span>
                   </div>
+                  <label className="checkpoint-acknowledgement">
+                    <input
+                      type="checkbox"
+                      checked={autoFit}
+                      onChange={(event) => {
+                        const enabled = event.target.checked;
+                        fitEnabled.current = enabled;
+                        setAutoFit(enabled);
+                        if (enabled) fitController.current?.activate();
+                        else fitController.current?.suspend();
+                      }}
+                    />
+                    Fit terminal to active window
+                  </label>
+                  {fitNotice !== undefined && (
+                    <p className="mode-note" role="status">
+                      {fitNotice}
+                    </p>
+                  )}
                   <form className="geometry-form" onSubmit={(event) => void resizeTerminal(event)}>
                     <label>
                       Columns
@@ -1705,23 +2228,90 @@ function syncCursorComposerLayout(
   if (screenRect.width === 0 || screenRect.height === 0) return;
   const cellWidth = screenRect.width / screen.columns;
   const cellHeight = screenRect.height / screen.rows;
-  const left = screenRect.left - surfaceRect.left + screen.cursor.column * cellWidth;
-  const top = screenRect.top - surfaceRect.top + screen.cursor.row * cellHeight;
+  const lineLeft = screenRect.left - surfaceRect.left + surface.scrollLeft;
+  const lineWidth = Math.max(
+    cellWidth,
+    Math.min(
+      screenRect.width,
+      surface.clientWidth - lineLeft - parseFloat(getComputedStyle(host).paddingRight),
+    ),
+  );
+  const left = lineLeft + screen.cursor.column * cellWidth;
+  const top = screenRect.top - surfaceRect.top + surface.scrollTop + screen.cursor.row * cellHeight;
   const next = {
     height: cellHeight,
     left,
+    lineLeft,
+    lineWidth,
     top,
-    width: Math.max(cellWidth, screenRect.right - surfaceRect.left - left),
+    width: Math.max(cellWidth, lineLeft + lineWidth - left),
   };
   setLayout((current) =>
     current !== undefined &&
     Math.abs(current.height - next.height) < 0.1 &&
     Math.abs(current.left - next.left) < 0.1 &&
+    Math.abs(current.lineLeft - next.lineLeft) < 0.1 &&
+    Math.abs(current.lineWidth - next.lineWidth) < 0.1 &&
     Math.abs(current.top - next.top) < 0.1 &&
     Math.abs(current.width - next.width) < 0.1
       ? current
       : next,
   );
+}
+
+function commandCaretPosition(editor: HTMLTextAreaElement): { row: number; lineHeight: number } {
+  // A textarea's own scrollTop cannot reveal a caret below the terminal scrollport.
+  // Mirror only the non-secret READY draft to locate the selection's visual line.
+  const style = getComputedStyle(editor);
+  const mirror = document.createElement("div");
+  for (const property of [
+    "font",
+    "line-height",
+    "letter-spacing",
+    "text-indent",
+    "tab-size",
+    "white-space",
+    "overflow-wrap",
+    "word-break",
+  ]) {
+    mirror.style.setProperty(property, style.getPropertyValue(property));
+  }
+  Object.assign(mirror.style, {
+    position: "fixed",
+    visibility: "hidden",
+    pointerEvents: "none",
+    top: "0",
+    left: "-100000px",
+    width: `${editor.clientWidth.toString()}px`,
+    padding: "0",
+    border: "0",
+  });
+  mirror.setAttribute("aria-hidden", "true");
+  const caretIndex =
+    editor.selectionDirection === "backward" ? editor.selectionStart : editor.selectionEnd;
+  mirror.textContent = editor.value.slice(0, caretIndex);
+  const caret = document.createElement("span");
+  caret.textContent = "\u200b";
+  mirror.append(caret);
+  document.body.append(mirror);
+  const lineHeight = parseFloat(style.lineHeight);
+  const row = Math.floor(
+    (caret.getBoundingClientRect().top - mirror.getBoundingClientRect().top) / lineHeight,
+  );
+  mirror.remove();
+  return { row, lineHeight };
+}
+
+function revealCommandCaret(editor: HTMLTextAreaElement, surface: HTMLDivElement): void {
+  if (document.activeElement !== editor) return;
+  const { row, lineHeight } = commandCaretPosition(editor);
+  const caretTop = editor.getBoundingClientRect().top + row * lineHeight;
+  const viewportTop = surface.getBoundingClientRect().top;
+  const viewportBottom = viewportTop + surface.clientHeight;
+  if (caretTop < viewportTop + 8) surface.scrollTop -= viewportTop + 8 - caretTop;
+  else if (caretTop + lineHeight > viewportBottom - 8)
+    surface.scrollTop += caretTop + lineHeight - viewportBottom + 8;
+  surface.scrollLeft = 0;
 }
 
 function detectSecretPromptKey(

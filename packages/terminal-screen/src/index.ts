@@ -9,6 +9,7 @@ import {
   MAX_TERMINAL_ROWS,
   MIN_TERMINAL_COLUMNS,
   MIN_TERMINAL_ROWS,
+  isCursorPositionResponse,
   RuntimeError,
   TERMINAL_SCREEN_HISTORY_ENTRIES,
   type TerminalScreenCell,
@@ -21,6 +22,7 @@ import {
   type TerminalScreenRegionResult,
   type TerminalScreenSearchResult,
   type TerminalScreenSnapshot,
+  type TerminalCursorResponse,
 } from "@iterminal/domain";
 import headless from "@xterm/headless";
 import type { IBufferCell, Terminal as XtermTerminal } from "@xterm/headless";
@@ -56,6 +58,7 @@ export class XtermScreenProjection implements TerminalScreenProjection {
   readonly #history: TerminalScreenSnapshot[] = [];
   readonly #historyEntries: number;
   readonly #versionWaiters = new Set<VersionWaiter>();
+  #responseSink: ((data: string) => void) | undefined;
 
   public constructor(
     private readonly identity: {
@@ -89,9 +92,16 @@ export class XtermScreenProjection implements TerminalScreenProjection {
       scrollback,
     });
     this.#recordSnapshot();
+    this.#terminal.onData((data) => {
+      if (isCursorPositionResponse(data)) this.#responseSink?.(data);
+    });
   }
 
-  public write(data: string, screenVersion: number): void {
+  public write(
+    data: string,
+    screenVersion: number,
+    onResponse?: (response: TerminalCursorResponse) => void,
+  ): void {
     if (this.#disposed) return;
     if (this.#failure !== undefined) throw this.#failure;
     if (!Number.isSafeInteger(screenVersion) || screenVersion <= this.#scheduledVersion) {
@@ -107,10 +117,27 @@ export class XtermScreenProjection implements TerminalScreenProjection {
               return;
             }
             try {
+              const replies: string[] = [];
+              // One extra response lets Application detect queue overflow without an
+              // unbounded parser-side array. Dispatch only after parsing has completed.
+              this.#responseSink = (reply) => {
+                if (replies.length < 33) replies.push(reply);
+              };
               this.#terminal.write(data, () => {
+                this.#responseSink = undefined;
+                if (this.#disposed) {
+                  resolve();
+                  return;
+                }
                 this.#appliedVersion = screenVersion;
                 const snapshot = this.#recordSnapshot();
                 this.#notifyVersionWaiters(snapshot);
+                for (const reply of replies)
+                  onResponse?.({
+                    kind: "cursor_position",
+                    data: reply,
+                    sourceScreenVersion: screenVersion,
+                  });
                 resolve();
               });
             } catch (error) {
@@ -352,9 +379,12 @@ export class XtermScreenProjection implements TerminalScreenProjection {
   #capture(): TerminalScreenSnapshot {
     const active = this.#terminal.buffer.active;
     const lines: string[] = [];
+    const wrappedRows: boolean[] = [];
     for (let row = 0; row < this.#terminal.rows; row += 1) {
       const line = active.getLine(active.viewportY + row);
-      lines.push(sliceTerminalCells(line, 0, this.#terminal.cols));
+      const continues = active.getLine(active.viewportY + row + 1)?.isWrapped === true;
+      lines.push(sliceTerminalCells(line, 0, this.#terminal.cols, continues));
+      wrappedRows.push(line?.isWrapped === true);
     }
     return {
       buffer: active === this.#terminal.buffer.alternate ? "alternate" : "normal",
@@ -362,6 +392,7 @@ export class XtermScreenProjection implements TerminalScreenProjection {
       cursor: { column: active.cursorX, row: active.cursorY },
       geometryVersion: this.#geometryVersion,
       lines,
+      wrappedRows,
       rows: this.#terminal.rows,
       screenVersion: this.#appliedVersion,
       sessionGeneration: this.identity.sessionGeneration,
@@ -459,9 +490,12 @@ export class XtermScreenProjection implements TerminalScreenProjection {
         snapshot: cloneSnapshot(current),
       };
     }
-    const changedRows = current.lines.flatMap((text, row) =>
-      text === previous.lines[row] ? [] : [{ row, text }],
-    );
+    const changedRows = current.lines.flatMap((text, row) => {
+      const wrapped = current.wrappedRows?.[row] === true;
+      return text === previous.lines[row] && wrapped === (previous.wrappedRows?.[row] === true)
+        ? []
+        : [{ row, text, wrapped }];
+    });
     return {
       afterVersion,
       changedRows,
@@ -549,7 +583,16 @@ function sliceTerminalCells(
   line: ReturnType<XtermTerminal["buffer"]["active"]["getLine"]>,
   startColumn: number,
   endColumn: number,
+  preserveSpaces = false,
 ): string {
+  // Keep real spaces at soft boundaries, but omit unused cells before a wide glyph wraps.
+  if (preserveSpaces) {
+    while (endColumn > startColumn) {
+      const last = line?.getCell(endColumn - 1);
+      if (last !== undefined && (last.getChars() !== "" || last.getWidth() === 0)) break;
+      endColumn -= 1;
+    }
+  }
   let text = "";
   let column = startColumn;
   while (column < endColumn) {
@@ -567,7 +610,7 @@ function sliceTerminalCells(
     text += cell === undefined ? " ".repeat(width) : visibleCellText(cell) || " ".repeat(width);
     column += width;
   }
-  return text.trimEnd();
+  return preserveSpaces ? text : text.trimEnd();
 }
 
 function snapshotFrame(snapshot: TerminalScreenSnapshot): TerminalScreenFrame {
@@ -631,7 +674,11 @@ function screenColor(
 }
 
 function cloneSnapshot(snapshot: TerminalScreenSnapshot): TerminalScreenSnapshot {
-  return { ...snapshotFrame(snapshot), lines: [...snapshot.lines] };
+  return {
+    ...snapshotFrame(snapshot),
+    lines: [...snapshot.lines],
+    ...(snapshot.wrappedRows === undefined ? {} : { wrappedRows: [...snapshot.wrappedRows] }),
+  };
 }
 
 function normalizeSearchText(value: string, caseSensitive: boolean): string {

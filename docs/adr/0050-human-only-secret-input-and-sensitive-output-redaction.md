@@ -33,11 +33,13 @@ The operation is valid only for an authenticated `human` Actor with `secret.inpu
 the current Input Policy, active Interaction Guard, exact generation and target Execution, and an
 optional expected screen version. `agent_only` denies it. No emergency bypass exists.
 
-At most one sensitive period may be `ACTIVE` in one Session generation. Its exact Actor must finish
-it using the current state version. A disconnect, timeout, Guard expiry, Execution exit, or transport
-uncertainty does not automatically disable redaction. This is intentionally fail-closed. A new
-Execute is rejected while a period remains active; the Human must reconcile it first. Closing or
-losing the generation terminates live observation and may leave only an `UNKNOWN` historical state.
+At most one sensitive period may be `ACTIVE` in one Session generation. While its Execution is
+live, the exact Actor must finish it using the current state version. A disconnect, timeout, Guard
+expiry, Execution exit, or transport uncertainty does not automatically disable redaction. This is
+intentionally fail-closed. A new Execute is rejected while a period remains active. Once the
+Session is `READY` and therefore has no live foreground Execution that can echo the secret, another
+capable Human may reconcile an orphaned period. Closing or losing the generation terminates live
+observation and may leave only an `UNKNOWN` historical state.
 
 While the period is active, new ordinary Input is denied for every Actor and Control is denied
 except for the exact Human who opened the period. That Human may still send an explicit Control such
@@ -46,6 +48,12 @@ observation remain available against the sanitized stream.
 
 MCP exposes no begin, finish, or secret-state tool. The Human Console server supplies its own
 server-held Human Actor; browser input cannot supply an Actor identity.
+
+The Console presents an active period as a compact `***` terminal-status indicator, not a modal or
+bottom control panel. The owning Human may click that indicator to commit `secret.input.finish` once
+the foreground program can no longer echo the secret. Ctrl+C remains an ordinary terminal key. A
+different Actor sees a non-interactive indicator while the Execution is live; once the Session is
+`READY`, that indicator becomes the explicit orphan-recovery action.
 
 ### Metadata-only Action and state
 
@@ -112,7 +120,7 @@ This decision prevents the submitted request bytes and raw output observed durin
 from entering normal Runtime persistence and observation surfaces. It does not erase terminal text
 recorded before activation, protect another process outside this PTY, inspect OS swap/core dumps, or
 taint-track a program that deliberately prints a remembered secret after the Human ends redaction.
-The Console warns the Human to finish only after the foreground interaction is safe.
+The compact Console indicator explains this boundary through its accessible label and tooltip.
 
 ## Consequences
 

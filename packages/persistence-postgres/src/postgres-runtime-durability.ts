@@ -32,7 +32,7 @@ import type {
   SessionStatus,
   ShellCheckpoint,
 } from "@iterminal/domain";
-import { RuntimeError } from "@iterminal/domain";
+import { RuntimeError, isTerminalResponseAction } from "@iterminal/domain";
 import type { Pool, PoolClient } from "pg";
 
 import { PostgresObservationRepository } from "./postgres-observation-repository.js";
@@ -1035,12 +1035,13 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
         input_policy: InputPolicyMode;
         next_action_sequence: string;
         screen_version: string;
+        state_version: string;
         sensitive_actor_id: string | null;
         status: SessionStatus;
       }>(
         `SELECT session.current_generation, session.status, session.active_execution_id,
                 session.next_action_sequence, session.screen_version,
-                interaction.input_policy, interaction.guard_actor_id,
+                interaction.input_policy, interaction.state_version, interaction.guard_actor_id,
                 interaction.guard_expires_at, now() AS database_now,
                 (SELECT sensitive.actor_id FROM sensitive_inputs sensitive
                   WHERE sensitive.session_id = session.id
@@ -1083,6 +1084,36 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
         });
       }
       assertDurableInteractionAllowed(action, current);
+      if (action.type === "input" && action.lineInput !== undefined) {
+        const latestInput = await client.query<{ action_sequence: string }>(
+          `SELECT action_sequence FROM actions
+            WHERE session_id = $1 AND session_generation = $2
+              AND kind IN ('input', 'control', 'secret_input')
+              AND payload->>'targetExecutionId' = $3
+              AND NOT (payload ? 'terminalResponse')
+              AND action_sequence > (
+                SELECT source.action_sequence FROM actions source
+                JOIN executions execution ON execution.action_id = source.id
+                WHERE execution.id = $3
+              )
+            ORDER BY action_sequence DESC LIMIT 1`,
+          [action.sessionId, action.sessionGeneration, action.targetExecutionId],
+        );
+        const inputVersion = Number(latestInput.rows[0]?.action_sequence ?? 0);
+        if (
+          inputVersion !== action.lineInput.expectedInputVersion ||
+          Number(current.state_version) !== action.lineInput.expectedInteractionVersion
+        ) {
+          throw new RuntimeError(
+            "INPUT_CONTEXT_CHANGED",
+            "Durable input or interaction context changed",
+            {
+              currentInputVersion: inputVersion,
+              currentInteractionVersion: Number(current.state_version),
+            },
+          );
+        }
+      }
       const durableSequence = Number.parseInt(current.next_action_sequence, 10) + 1;
       if (durableSequence !== action.actionSequence) {
         throw new RuntimeError("DELIVERY_UNKNOWN", "Live and durable Action sequence diverged", {
@@ -2055,6 +2086,7 @@ function assertDurableInteractionAllowed(
     sensitive_actor_id?: string | null;
   }>,
 ): void {
+  if (action.type === "input" && isTerminalResponseAction(action)) return;
   if (
     state.sensitive_actor_id !== undefined &&
     state.sensitive_actor_id !== null &&
@@ -2287,6 +2319,10 @@ function actionPayload(
   if (action.type === "input") {
     return {
       data: action.data,
+      ...(action.lineInput === undefined ? {} : { lineInput: action.lineInput }),
+      ...(action.terminalResponse === undefined
+        ? {}
+        : { terminalResponse: action.terminalResponse }),
       targetExecutionId: action.targetExecutionId,
       ...(action.expectedScreenVersion === undefined
         ? {}
