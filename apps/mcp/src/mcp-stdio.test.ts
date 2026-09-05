@@ -218,6 +218,11 @@ describe("M4 stdio MCP bridge", () => {
       sessionId: session.id,
     });
     expect(firstPage.truncated).toBe(true);
+    expect(firstPage.retention).toEqual({
+      gap: false,
+      minimumAvailableSequence: 1,
+      source: "memory",
+    });
     const cursor = firstPage.nextAfter;
     if (cursor === undefined) throw new Error("Expected a continuation cursor");
     await first.close();
@@ -667,6 +672,11 @@ type ExecutionResult = {
 type EventPageResult = {
   readonly events: readonly { readonly type: string }[];
   readonly nextAfter?: number;
+  readonly retention?: {
+    readonly gap: boolean;
+    readonly minimumAvailableSequence: number;
+    readonly source: "memory";
+  };
   readonly truncated: boolean;
 };
 

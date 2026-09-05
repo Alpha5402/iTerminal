@@ -21,6 +21,43 @@ import {
 } from "./index.js";
 
 describe("UnixRuntimeClient delivery classification", () => {
+  it("round-trips canonical bounded Event retention metadata", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-events-retention-"));
+    const server = await startRuntimeRpcServer({
+      gateway: {
+        ...stubGateway(),
+        queryEvents: () =>
+          Promise.resolve({
+            events: [
+              {
+                id: "event-retained",
+                observedAt: "2026-09-05T00:00:00.000Z",
+                payload: { retained: true },
+                sequence: 7,
+                sessionGeneration: 2,
+                sessionId: "session-retained",
+                type: "fixture.retained",
+              },
+            ],
+            retention: { gap: true, minimumAvailableSequence: 7, source: "memory" as const },
+            truncated: false,
+          }),
+      },
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    try {
+      await expect(
+        new UnixRuntimeClient(server.socketPath).queryEvents("session-retained", 2, 0, 100),
+      ).resolves.toMatchObject({
+        events: [{ sequence: 7, type: "fixture.retained" }],
+        retention: { gap: true, minimumAvailableSequence: 7, source: "memory" },
+      });
+    } finally {
+      await server.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
   it("round-trips one compact observation and enforces its distinct grant", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-execution-observe-"));
     const secret = randomBytes(32);
