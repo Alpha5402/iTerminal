@@ -20,6 +20,7 @@ const MCP_OPERATIONS = [
   "control.send",
   "events.query",
   "execution.get",
+  "execution.observe",
   "execution.output.read",
   "execution.start",
   "execution.wait",

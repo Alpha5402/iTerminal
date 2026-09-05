@@ -67,6 +67,9 @@ import type {
   ActionLookupResult,
   ArtifactReadRequest,
   ArtifactReadResult,
+  ExecutionObservationNextAction,
+  ExecutionObservationRequest,
+  ExecutionObservationResult,
   ExecutionOutputReadRequest,
   ExecutionOutputReadResult,
   ExecutionWaitRequest,
@@ -92,6 +95,9 @@ import type {
 import {
   DEFAULT_EXECUTION_WAIT_MILLISECONDS,
   MAX_ARTIFACT_READ_BYTES,
+  MAX_EXECUTION_OBSERVATION_RESPONSE_BYTES,
+  MAX_EXECUTION_OBSERVATION_TEXT_BYTES,
+  MAX_EXECUTION_OBSERVATION_TEXT_SOURCE_BYTES,
   MAX_EXECUTION_OUTPUT_READ_BYTES,
   MAX_EXECUTION_WAIT_MILLISECONDS,
 } from "./ports.js";
@@ -635,6 +641,122 @@ export class RuntimeService {
         true,
       );
     }
+  }
+
+  public async observeExecution(
+    request: ExecutionObservationRequest,
+    signal?: AbortSignal,
+  ): Promise<ExecutionObservationResult> {
+    validateSessionId(request.sessionId);
+    validateGeneration(request.generation);
+    validateExecutionId(request.executionId);
+    validateExecutionOutputRead(request.cursor, request.maxBytes);
+    const execution = this.#requireExecution(request.executionId);
+    if (
+      execution.sessionId !== request.sessionId ||
+      execution.sessionGeneration !== request.generation
+    ) {
+      throw new RuntimeError(
+        "EXECUTION_NOT_FOUND",
+        "Execution was not found in the requested scope",
+      );
+    }
+
+    const waited = await this.waitExecutionV2(
+      {
+        executionId: request.executionId,
+        ...(request.waitMs === undefined ? {} : { waitMs: request.waitMs }),
+      },
+      signal,
+    );
+    if (signal?.aborted === true) throw executionWaitAbortError();
+    const output = await this.readExecutionOutput({
+      ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+      executionId: request.executionId,
+      generation: request.generation,
+      ...(request.maxBytes === undefined ? {} : { maxBytes: request.maxBytes }),
+      sessionId: request.sessionId,
+    });
+    if (
+      output.executionId !== request.executionId ||
+      output.generation !== request.generation ||
+      output.sessionId !== request.sessionId
+    ) {
+      throw new RuntimeError(
+        "RUNTIME_UNAVAILABLE",
+        "Execution output reader returned a conflicting observation scope",
+        { component: "execution_observation" },
+        true,
+      );
+    }
+    if (
+      waited.completed &&
+      (!isExecutionTerminal(output.executionState) ||
+        waited.executionState !== output.executionState)
+    ) {
+      throw new RuntimeError(
+        "RUNTIME_UNAVAILABLE",
+        "Execution observation state moved backward after terminal settlement",
+        { component: "execution_observation" },
+        true,
+      );
+    }
+
+    const chunk = output.chunks[0];
+    if (output.chunks.length > 1 || (chunk?.byteLength ?? 0) > MAX_EXECUTION_OUTPUT_READ_BYTES) {
+      throw new RuntimeError(
+        "RUNTIME_UNAVAILABLE",
+        "Execution output reader exceeded the compact observation byte bound",
+        { component: "execution_observation" },
+        true,
+      );
+    }
+    const contentBase64 = chunk?.contentBase64 ?? "";
+    const byteLength = chunk?.byteLength ?? 0;
+    const textView = executionObservationText(contentBase64, byteLength);
+    const completed = isExecutionTerminal(output.executionState);
+    const nextActions: ExecutionObservationNextAction[] = [];
+    if (output.hasMore) nextActions.push("continue_output");
+    if (!completed) nextActions.push("wait_for_completion");
+    if (output.gap !== null) nextActions.push("acknowledge_output_gap");
+    if (output.executionState === "UNKNOWN") nextActions.push("lookup_original_action");
+
+    const result: ExecutionObservationResult = {
+      gap: output.gap,
+      identity: {
+        executionId: output.executionId,
+        generation: output.generation,
+        sessionId: output.sessionId,
+      },
+      nextActions,
+      nextCursor: output.nextCursor ?? null,
+      output: {
+        byteLength,
+        contentBase64,
+        encoding: "base64",
+        hasMore: output.hasMore,
+        retention: output.retention,
+        stream: "pty",
+        ...textView,
+      },
+      state: {
+        completed,
+        executionState: output.executionState,
+        persistenceLag: output.persistenceLag,
+      },
+    };
+    if (
+      new TextEncoder().encode(JSON.stringify(result)).byteLength >
+      MAX_EXECUTION_OBSERVATION_RESPONSE_BYTES
+    ) {
+      throw new RuntimeError(
+        "RUNTIME_UNAVAILABLE",
+        "Execution observation exceeded its canonical response budget",
+        { component: "execution_observation" },
+        true,
+      );
+    }
+    return result;
   }
 
   #forgetDurableSessionCreation(idempotencyKey: string, promise: Promise<Session>): void {
@@ -4771,6 +4893,49 @@ function executionWaitAbortError(): Error {
   const error = new Error("Execution wait aborted");
   error.name = "AbortError";
   return error;
+}
+
+function executionObservationText(
+  contentBase64: string,
+  byteLength: number,
+): Readonly<{
+  readonly text?: string;
+  readonly textStatus: "complete" | "unaligned_utf8" | "omitted_for_budget";
+}> {
+  const bytes = Buffer.from(contentBase64, "base64");
+  if (bytes.byteLength !== byteLength) {
+    throw new RuntimeError(
+      "RUNTIME_UNAVAILABLE",
+      "Execution output byte metadata is inconsistent",
+      { component: "execution_observation" },
+      true,
+    );
+  }
+  if (bytes.byteLength > MAX_EXECUTION_OBSERVATION_TEXT_SOURCE_BYTES) {
+    return { textStatus: "omitted_for_budget" };
+  }
+  let decoded: string;
+  try {
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return { textStatus: "unaligned_utf8" };
+  }
+  const text = [...decoded]
+    .map((character) => {
+      const codePoint = character.codePointAt(0)!;
+      if (character === "\n" || character === "\r" || character === "\t") return character;
+      if (codePoint < 0x20) return String.fromCodePoint(0x2400 + codePoint);
+      if (codePoint === 0x7f) return "␡";
+      if (codePoint >= 0x80 && codePoint <= 0x9f) {
+        return `\\u{${codePoint.toString(16).padStart(4, "0")}}`;
+      }
+      return character;
+    })
+    .join("");
+  if (new TextEncoder().encode(text).byteLength > MAX_EXECUTION_OBSERVATION_TEXT_BYTES) {
+    return { textStatus: "omitted_for_budget" };
+  }
+  return { text, textStatus: "complete" };
 }
 
 function validateCheckpointEnvironmentKeys(keys: readonly string[]): readonly string[] {

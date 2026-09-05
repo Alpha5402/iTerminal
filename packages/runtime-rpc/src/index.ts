@@ -10,6 +10,8 @@ import type {
   ActionLookupResult,
   ArtifactReadRequest,
   ArtifactReadResult,
+  ExecutionObservationRequest,
+  ExecutionObservationResult,
   ExecutionOutputReadRequest,
   ExecutionOutputReadResult,
   ExecutionWaitRequest,
@@ -73,6 +75,8 @@ import {
   actionLookupTransportRequestSchema,
   artifactReadResultSchema,
   artifactReadTransportRequestSchema,
+  executionObserveResultSchema,
+  executionObserveTransportRequestSchema,
   executionOutputReadResultSchema,
   executionOutputReadTransportRequestSchema,
   executionWaitV2ResultSchema,
@@ -253,6 +257,7 @@ const operationSchemas = {
     limit: z.number().int().min(1).max(500).default(100),
   }),
   "execution.get": z.strictObject({ executionId: z.string().min(1).max(256) }),
+  "execution.observe": executionObserveTransportRequestSchema,
   "execution.output.read": executionOutputReadTransportRequestSchema,
   "execution.dispatch": z.strictObject({ executionId: z.string().min(1).max(256) }),
   "execution.start": executeTransportRequestSchema.extend({
@@ -377,6 +382,10 @@ export interface StartedExecutionView {
 export interface RuntimeGateway {
   lookupAction(request: ActionLookupRequest): Promise<ActionLookupResult>;
   readArtifact(request: ArtifactReadRequest): Promise<ArtifactReadResult>;
+  observeExecution?(
+    request: ExecutionObservationRequest,
+    signal?: AbortSignal,
+  ): Promise<ExecutionObservationResult>;
   readExecutionOutput(request: ExecutionOutputReadRequest): Promise<ExecutionOutputReadResult>;
   getRuntimeCapabilities?(request?: RuntimeCapabilitiesRequest): Promise<RuntimeCapabilities>;
   requestExecuteApproval(request: RequestExecuteApprovalRequest): Promise<Approval>;
@@ -444,6 +453,7 @@ export class LocalRuntimeGateway implements RuntimeGateway {
         "action.input.v1",
         "action.lookup.v1",
         ...(options.artifactRead === true ? (["artifact.read.v1"] as const) : []),
+        ...(options.executionOutputRead === true ? (["execution.observe.v1"] as const) : []),
         ...(options.executionOutputRead === true ? (["execution.output.read.v1"] as const) : []),
         "execution.wait.v2",
         "runtime.capabilities.v1",
@@ -457,6 +467,13 @@ export class LocalRuntimeGateway implements RuntimeGateway {
 
   public readArtifact(request: ArtifactReadRequest): Promise<ArtifactReadResult> {
     return this.runtime.readArtifact(request);
+  }
+
+  public observeExecution(
+    request: ExecutionObservationRequest,
+    signal?: AbortSignal,
+  ): Promise<ExecutionObservationResult> {
+    return this.runtime.observeExecution(request, signal);
   }
 
   public readExecutionOutput(
@@ -809,6 +826,21 @@ export class UnixRuntimeClient implements RuntimeGateway {
       ...result,
       ...(nextCursor === undefined ? {} : { nextCursor }),
     };
+  }
+
+  public async observeExecution(
+    request: ExecutionObservationRequest,
+    signal?: AbortSignal,
+  ): Promise<ExecutionObservationResult> {
+    const parsed = executionObserveTransportRequestSchema.parse(request);
+    return executionObserveResultSchema.parse(
+      await this.#request(
+        "execution.observe",
+        parsed,
+        parsed.waitMs + WAIT_V2_TRANSPORT_SETTLEMENT_MS,
+        signal,
+      ),
+    );
   }
 
   public requestExecuteApproval(request: RequestExecuteApprovalRequest): Promise<Approval> {
@@ -1359,6 +1391,28 @@ async function dispatch(
           ...(request.maxBytes === undefined ? {} : { maxBytes: request.maxBytes }),
           sessionId: request.sessionId,
         }),
+      );
+    }
+    case "execution.observe": {
+      const request = operationSchemas[operation].parse(input);
+      if (gateway.observeExecution === undefined) {
+        throw new RuntimeError(
+          "INVALID_REQUEST",
+          "Compact Execution observation is not supported by this service",
+        );
+      }
+      return executionObserveResultSchema.parse(
+        await gateway.observeExecution(
+          {
+            ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+            executionId: request.executionId,
+            generation: request.generation,
+            ...(request.maxBytes === undefined ? {} : { maxBytes: request.maxBytes }),
+            sessionId: request.sessionId,
+            waitMs: request.waitMs,
+          },
+          signal,
+        ),
       );
     }
     case "runtime.capabilities": {

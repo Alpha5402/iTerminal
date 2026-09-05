@@ -9,6 +9,7 @@ export const RUNTIME_FEATURES = Object.freeze([
   "action.input.v1",
   "action.lookup.v1",
   "artifact.read.v1",
+  "execution.observe.v1",
   "execution.output.read.v1",
   "execution.wait.v2",
   "runtime.capabilities.v1",
@@ -282,6 +283,143 @@ export const executionOutputReadResultSchema = z
     }
   });
 
+export const executionObserveTransportRequestSchema = executionOutputReadTransportRequestSchema
+  .extend({
+    waitMs: z.number().int().min(0).max(30_000).default(10_000),
+  })
+  .strict();
+
+const executionObservationNextActionSchema = z.enum([
+  "continue_output",
+  "wait_for_completion",
+  "acknowledge_output_gap",
+  "lookup_original_action",
+]);
+
+const executionObservationOutputSchema = z
+  .strictObject({
+    byteLength: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(64 * 1024),
+    contentBase64: z
+      .string()
+      .max(Math.ceil((64 * 1024) / 3) * 4)
+      .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
+    encoding: z.literal("base64"),
+    hasMore: z.boolean(),
+    retention: z.strictObject({
+      minimumAvailableSequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      source: z.literal("durable"),
+    }),
+    stream: z.literal("pty"),
+    text: z
+      .string()
+      .max(32 * 1024)
+      .optional(),
+    textStatus: z.enum(["complete", "unaligned_utf8", "omitted_for_budget"]),
+  })
+  .superRefine((output, context) => {
+    const padding = output.contentBase64.endsWith("==")
+      ? 2
+      : output.contentBase64.endsWith("=")
+        ? 1
+        : 0;
+    const decodedBytes =
+      output.contentBase64.length === 0 ? 0 : (output.contentBase64.length / 4) * 3 - padding;
+    if (decodedBytes !== output.byteLength) {
+      context.addIssue({
+        code: "custom",
+        message: "Execution observation base64 length must match byteLength",
+      });
+    }
+    if (output.textStatus === "complete" && output.text === undefined) {
+      context.addIssue({ code: "custom", message: "Complete readable text must be present" });
+    }
+    if (output.textStatus !== "complete" && output.text !== undefined) {
+      context.addIssue({ code: "custom", message: "Incomplete readable text must be omitted" });
+    }
+    if (output.textStatus === "complete" && output.byteLength > 8 * 1024) {
+      context.addIssue({ code: "custom", message: "Readable text source exceeds its byte budget" });
+    }
+    if (output.text !== undefined && new TextEncoder().encode(output.text).byteLength > 32 * 1024) {
+      context.addIssue({
+        code: "custom",
+        message: "Readable text exceeds its encoded byte budget",
+      });
+    }
+  });
+
+export const executionObserveResultSchema = z
+  .strictObject({
+    gap: executionOutputGapSchema.nullable(),
+    identity: z.strictObject({
+      executionId: executionIdTransportSchema,
+      generation: sessionGenerationTransportSchema,
+      sessionId: sessionIdTransportSchema,
+    }),
+    nextActions: z.array(executionObservationNextActionSchema).max(3),
+    nextCursor: executionOutputCursorSchema.nullable(),
+    output: executionObservationOutputSchema,
+    state: z.strictObject({
+      completed: z.boolean(),
+      executionState: executionStatusTransportSchema,
+      persistenceLag: z.enum(["none", "possible"]),
+    }),
+  })
+  .superRefine((result, context) => {
+    const active =
+      result.state.executionState === "DISPATCHING" || result.state.executionState === "RUNNING";
+    if (result.state.completed === active) {
+      context.addIssue({
+        code: "custom",
+        message: "completed must describe Execution terminality, not success",
+      });
+    }
+    if (active !== (result.state.persistenceLag === "possible")) {
+      context.addIssue({
+        code: "custom",
+        message: "Execution state and durable persistence lag must agree",
+      });
+    }
+    if (result.gap?.kind !== undefined && result.gap.kind !== "event_retention") {
+      if (result.output.hasMore) {
+        context.addIssue({
+          code: "custom",
+          message: "An Artifact gap cannot be represented as continuous hasMore output",
+        });
+      }
+    }
+    if (
+      (result.output.byteLength > 0 ||
+        result.output.hasMore ||
+        result.gap?.kind === "event_retention") &&
+      result.nextCursor === null
+    ) {
+      context.addIssue({ code: "custom", message: "Observed output requires a next cursor" });
+    }
+    const expectedActions: z.output<typeof executionObservationNextActionSchema>[] = [];
+    if (result.output.hasMore) expectedActions.push("continue_output");
+    if (!result.state.completed) expectedActions.push("wait_for_completion");
+    if (result.gap !== null) expectedActions.push("acknowledge_output_gap");
+    if (result.state.executionState === "UNKNOWN") {
+      expectedActions.push("lookup_original_action");
+    }
+    if (
+      result.nextActions.length !== expectedActions.length ||
+      result.nextActions.some((action, index) => action !== expectedActions[index])
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "nextActions must be derived from the concrete observation",
+      });
+    }
+    if (new TextEncoder().encode(JSON.stringify(result)).byteLength > 96 * 1024) {
+      context.addIssue({ code: "custom", message: "Execution observation exceeds 96 KiB" });
+    }
+  });
+
 const actionLookupIdentitySchema = z.strictObject({
   generation: sessionGenerationTransportSchema,
   idempotencyKey: idempotencyKeyTransportSchema,
@@ -365,6 +503,10 @@ export type ExecutionOutputReadTransportRequest = z.output<
   typeof executionOutputReadTransportRequestSchema
 >;
 export type ExecutionOutputReadResult = z.output<typeof executionOutputReadResultSchema>;
+export type ExecutionObserveTransportRequest = z.output<
+  typeof executionObserveTransportRequestSchema
+>;
+export type ExecutionObserveResult = z.output<typeof executionObserveResultSchema>;
 export type ExecutionWaitV2TransportRequest = z.output<
   typeof executionWaitV2TransportRequestSchema
 >;

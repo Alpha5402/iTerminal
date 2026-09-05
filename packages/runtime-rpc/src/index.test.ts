@@ -21,6 +21,83 @@ import {
 } from "./index.js";
 
 describe("UnixRuntimeClient delivery classification", () => {
+  it("round-trips one compact observation and enforces its distinct grant", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-execution-observe-"));
+    const secret = randomBytes(32);
+    let calls = 0;
+    const server = await startRuntimeRpcServer({
+      authentication: { audience: "runtime-rpc-test", secret },
+      gateway: {
+        ...stubGateway(),
+        observeExecution: (request, signal) => {
+          calls += 1;
+          expect(request).toEqual({
+            executionId: "execution-rpc",
+            generation: 3,
+            sessionId: "session-rpc",
+            waitMs: 10_000,
+          });
+          expect(signal).toBeInstanceOf(AbortSignal);
+          return Promise.resolve({
+            gap: null,
+            identity: {
+              executionId: request.executionId,
+              generation: request.generation,
+              sessionId: request.sessionId,
+            },
+            nextActions: ["wait_for_completion"],
+            nextCursor: null,
+            output: {
+              byteLength: 0,
+              contentBase64: "",
+              encoding: "base64",
+              hasMore: false,
+              retention: { minimumAvailableSequence: 1, source: "durable" },
+              stream: "pty",
+              text: "",
+              textStatus: "complete",
+            },
+            state: {
+              completed: false,
+              executionState: "RUNNING",
+              persistenceLag: "possible",
+            },
+          });
+        },
+      },
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    const allowed = new UnixRuntimeClient(server.socketPath, {
+      authorization: signRuntimeRpcGrant(secret, exactAgentGrant(["execution.observe"])),
+    });
+    const denied = new UnixRuntimeClient(server.socketPath, {
+      authorization: signRuntimeRpcGrant(secret, exactAgentGrant(["execution.output.read"])),
+    });
+    try {
+      await expect(
+        allowed.observeExecution({
+          executionId: "execution-rpc",
+          generation: 3,
+          sessionId: "session-rpc",
+        }),
+      ).resolves.toMatchObject({
+        state: { completed: false, executionState: "RUNNING" },
+      });
+      await expect(
+        denied.observeExecution({
+          executionId: "execution-rpc",
+          generation: 3,
+          sessionId: "session-rpc",
+          waitMs: 0,
+        }),
+      ).rejects.toMatchObject({ code: "POLICY_DENIED" });
+      expect(calls).toBe(1);
+    } finally {
+      await server.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
   it("round-trips bounded Execution wait v2 and enforces its distinct grant", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-execution-wait-v2-"));
     const secret = randomBytes(32);

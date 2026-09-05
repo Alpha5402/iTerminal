@@ -6,6 +6,7 @@ import { createMcpServer, MCP_INSTRUCTIONS } from "./server.js";
 const baselineToolNames = new Set([
   "action_lookup",
   "artifact_read",
+  "execution_observe",
   "execution_output_read",
   "runtime_capabilities",
   "session_create",
@@ -69,6 +70,10 @@ describe("MCP tool metadata", () => {
     expect(registered.execution_wait?.description).toContain("Prefer execution_wait_v2");
     expect(registered.execution_wait_v2?.description).toContain(
       "completed=true means terminal, not successful",
+    );
+    expect(registered.execution_observe?.description).toContain("Raw base64 is authoritative");
+    expect(registered.execution_observe?.description).toContain(
+      "original Actor and idempotency key",
     );
   });
 });
