@@ -165,6 +165,11 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     await waitUntilRunning(mcp, started.execution.id);
     const editor = page.getByLabel("Foreground command composer");
     await editor.waitFor({ state: "visible" });
+    const modeBar = page.getByTestId("input-mode-bar");
+    expect(await modeBar.textContent()).toContain(`Execution ${started.execution.id}`);
+    expect(
+      await page.getByRole("button", { name: "Line input" }).getAttribute("aria-pressed"),
+    ).toBe("true");
     const initial = await runtime.getInteractionState(session.id, session.generation);
     await editor.fill("Human 中文草稿X");
     await editor.press("Backspace");
@@ -339,6 +344,326 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
       path: join(c01ScreenshotDir, "accepted-with-newer-draft.png"),
       fullPage: true,
     });
+  }, 60_000);
+
+  it("fences explicit line and raw modes to the focused current Execution", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "iterminal-input-modes-")));
+    fixtures.push(root);
+    const nodeFixture = join(root, "line-repl.cjs");
+    const menuFixture = join(root, "raw-menu.cjs");
+    await writeFile(
+      nodeFixture,
+      [
+        'const readline = require("node:readline");',
+        "const input = readline.createInterface({ input: process.stdin, terminal: false });",
+        'console.log("NODE_READY");',
+        'input.on("line", (line) => {',
+        "  console.log(`LINE:${JSON.stringify(line)}`);",
+        '  if (line === "quit") process.exit(0);',
+        "});",
+      ].join("\n"),
+    );
+    await writeFile(
+      menuFixture,
+      [
+        "process.stdin.setRawMode(true);",
+        "process.stdin.resume();",
+        'process.stdout.write("\\u001b[?1049hMENU:0");',
+        'process.stdin.on("data", (chunk) => {',
+        '  const data = chunk.toString("utf8");',
+        '  if (data.includes("\\u001b[B")) process.stdout.write("\\rMENU:1");',
+        '  if (data.includes("\\t")) process.stdout.write("\\r\\nTAB_SEEN");',
+        '  if (data.includes("q")) {',
+        '    process.stdout.write("\\u001b[?1049lMENU_EXIT\\n");',
+        "    process.exit(0);",
+        "  }",
+        "});",
+      ].join("\n"),
+    );
+    daemon = await startRuntimeDaemon({
+      databaseUrl: databaseUrl ?? "",
+      ownerId: "input-modes-browser",
+      socketPath: join(root, "runtime.sock"),
+    });
+    const runtime = new UnixRuntimeClient(daemon.socketPath);
+    consoleServer = await startHumanConsole({ gateway: runtime, port: 0, staticRoot });
+    mcp = await connectAgent(daemon.socketPath);
+    browser = await chromium.launch({
+      args: ["--disable-background-networking", "--no-first-run"],
+      executablePath: browserExecutable,
+      headless: true,
+    });
+    page = await browser.newPage({ viewport: { height: 900, width: 1309 } });
+    await page.goto(consoleServer.url, { waitUntil: "networkidle" });
+    await createSessionFromForm(page, root);
+    await waitForPageText(page, ".status-strip", "READY");
+    const lineSession = required((await runtime.listSessions())[0]);
+    const node = await callTool<StartedResult>(mcp, "execute", {
+      command: `${JSON.stringify(process.execPath)} ${JSON.stringify(nodeFixture)}`,
+      generation: lineSession.generation,
+      idempotencyKey: "c02-node-line-repl",
+      sessionId: lineSession.id,
+    });
+    await waitUntilRunning(mcp, node.execution.id);
+    await waitForPageText(page, '[data-testid="browser-terminal-output"]', "NODE_READY");
+    const modeBar = page.getByTestId("input-mode-bar");
+    await waitForPageText(page, '[data-testid="input-mode-bar"]', node.execution.id);
+    expect(await modeBar.textContent()).toContain(`Target ${lineSession.id}`);
+    expect(await modeBar.textContent()).toContain(
+      `generation ${lineSession.generation.toString()}`,
+    );
+    expect(
+      await page.getByRole("button", { name: "Line input" }).getAttribute("aria-pressed"),
+    ).toBe("true");
+
+    const screenshotDir = join(
+      repositoryRoot,
+      "docs/verification/review-remediation/artifacts/2026-09-05-C02",
+    );
+    await mkdir(screenshotDir, { recursive: true });
+    await page.screenshot({
+      path: join(screenshotDir, "node-line-mode-target.png"),
+      fullPage: true,
+    });
+
+    const editor = page.getByLabel("Foreground command composer");
+    await editor.click();
+    const composingEnterPrevented = await editor.evaluate((element) => {
+      element.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      const event = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        isComposing: true,
+        key: "Enter",
+      });
+      element.dispatchEvent(event);
+      element.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+      return event.defaultPrevented;
+    });
+    expect(composingEnterPrevented).toBe(false);
+    await page.keyboard.insertText("中文-ime");
+    expect(await editor.inputValue()).toBe("中文-ime");
+    const beforeLineEnter = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM actions WHERE session_id=$1 AND kind='input'",
+      [lineSession.id],
+    );
+    expect(beforeLineEnter.rows[0]?.count).toBe("0");
+    await editor.press("Enter");
+    await waitForPageText(page, '[data-testid="browser-terminal-output"]', 'LINE:"中文-ime"');
+    await expect.poll(() => editor.inputValue()).toBe("");
+    const ordinaryLine = await pool.query<{ count: string; data: string }>(
+      `SELECT count(*)::text AS count, max(payload->>'data') AS data
+       FROM actions WHERE session_id=$1 AND kind='input'`,
+      [lineSession.id],
+    );
+    expect(ordinaryLine.rows[0]).toEqual({ count: "1", data: "中文-ime\n" });
+    await page.getByTestId("submission-intent").getByRole("button", { name: "Dismiss" }).click();
+
+    const beforeEmptyLine = ordinaryLine.rows[0]?.count;
+    await editor.press("Enter");
+    await waitForPageText(page, '[data-testid="input-mode-bar"]', "does not send an empty return");
+    const afterEmptyLine = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM actions WHERE session_id=$1 AND kind='input'",
+      [lineSession.id],
+    );
+    expect(afterEmptyLine.rows[0]?.count).toBe(beforeEmptyLine);
+
+    const humanDraft = "draft-stays-local";
+    await editor.fill(humanDraft);
+    await callTool(mcp, "input", {
+      data: "agent-line\n",
+      generation: lineSession.generation,
+      idempotencyKey: "c02-agent-while-human-drafts",
+      sessionId: lineSession.id,
+      targetExecutionId: node.execution.id,
+    });
+    await waitForPageText(page, '[data-testid="browser-terminal-output"]', 'LINE:"agent-line"');
+    expect(await editor.inputValue()).toBe(humanDraft);
+    const actionsBeforeSwitch = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM actions WHERE session_id=$1",
+      [lineSession.id],
+    );
+    await page.getByRole("button", { name: "Raw keys" }).click();
+    expect(await editor.count()).toBe(0);
+    await page.getByRole("button", { name: "Line input" }).click();
+    await editor.waitFor({ state: "visible" });
+    expect(await editor.inputValue()).toBe(humanDraft);
+    const actionsAfterSwitch = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM actions WHERE session_id=$1",
+      [lineSession.id],
+    );
+    expect(actionsAfterSwitch.rows[0]?.count).toBe(actionsBeforeSwitch.rows[0]?.count);
+    await editor.fill("");
+
+    await page.getByRole("button", { name: "Raw keys" }).click();
+    const beforeExplicitFocus = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM actions WHERE session_id=$1 AND kind='input'",
+      [lineSession.id],
+    );
+    await page.keyboard.type("X");
+    await page.waitForTimeout(40);
+    const afterUnfocusedKey = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM actions WHERE session_id=$1 AND kind='input'",
+      [lineSession.id],
+    );
+    expect(afterUnfocusedKey.rows[0]?.count).toBe(beforeExplicitFocus.rows[0]?.count);
+    await page.locator(".terminal-host").click();
+    await page.waitForFunction(
+      () => document.querySelector(".terminal-host")?.classList.contains("interactive") === true,
+    );
+    await page.keyboard.press("Enter");
+    await waitForPageText(page, '[data-testid="browser-terminal-output"]', 'LINE:""');
+    await waitUntilGuardReleased(runtime, lineSession.id, lineSession.generation);
+    await page.locator(".terminal-host").click();
+    await page.keyboard.insertText("原始中文");
+    await page.waitForTimeout(40);
+    await page.keyboard.press("Enter");
+    await waitForPageText(page, '[data-testid="browser-terminal-output"]', 'LINE:"原始中文"');
+    const rawIme = await pool.query<{ data: string }>(
+      `SELECT payload->>'data' AS data FROM actions
+       WHERE session_id=$1 AND kind='input' AND actor_id LIKE 'human_console_%'
+       ORDER BY action_sequence`,
+      [lineSession.id],
+    );
+    expect(
+      rawIme.rows
+        .map((row) => row.data)
+        .join("")
+        .split("原始中文"),
+    ).toHaveLength(2);
+    await waitUntilGuardReleased(runtime, lineSession.id, lineSession.generation);
+
+    await page.getByRole("button", { name: "Line input" }).click();
+    await createSessionFromForm(page, root);
+    await page.waitForFunction(() => document.querySelectorAll(".session-tab").length === 2);
+    const sessionTabs = page.locator(".session-tab");
+    await sessionTabs.nth(0).click();
+    await waitForPageText(page, '[data-testid="input-mode-bar"]', node.execution.id);
+
+    let releaseGuard!: () => void;
+    const guardRelease = new Promise<void>((resolveGuard) => {
+      releaseGuard = resolveGuard;
+    });
+    let markGuardStarted!: () => void;
+    const guardStarted = new Promise<void>((resolveGuard) => {
+      markGuardStarted = resolveGuard;
+    });
+    let inputPosts = 0;
+    await page.route(`**/api/sessions/${lineSession.id}/input`, async (route) => {
+      inputPosts++;
+      await route.continue();
+    });
+    await page.route(`**/api/sessions/${lineSession.id}/interaction/guard`, async (route) => {
+      markGuardStarted();
+      await guardRelease;
+      await route.continue();
+    });
+    await page.getByRole("button", { name: "Raw keys" }).click();
+    await page.locator(".terminal-host").click();
+    await page.keyboard.type("Z");
+    await guardStarted;
+    await sessionTabs.nth(1).click();
+    releaseGuard();
+    await page.waitForTimeout(100);
+    expect(inputPosts).toBe(0);
+    await sessionTabs.nth(0).click();
+    await waitForPageText(page, '[data-testid="input-mode-bar"]', "dropped and was not sent");
+    expect(
+      await page.getByRole("button", { name: "Line input" }).getAttribute("aria-pressed"),
+    ).toBe("true");
+    const crossedTab = await pool.query<{ count: string }>(
+      `SELECT count(*) FROM actions
+       WHERE session_id=$1 AND kind='input' AND payload->>'data' LIKE '%Z%'`,
+      [lineSession.id],
+    );
+    expect(crossedTab.rows[0]?.count).toBe("0");
+    await page.unroute(`**/api/sessions/${lineSession.id}/input`);
+    await page.unroute(`**/api/sessions/${lineSession.id}/interaction/guard`);
+
+    await editor.fill("quit");
+    await editor.press("Enter");
+    await callTool(mcp, "execution_wait", { executionId: node.execution.id });
+    await waitForPageText(page, ".status-strip", "READY");
+    await page.getByTestId("submission-intent").getByRole("button", { name: "Dismiss" }).click();
+    const menu = await callTool<StartedResult>(mcp, "execute", {
+      command: `${JSON.stringify(process.execPath)} ${JSON.stringify(menuFixture)}`,
+      generation: lineSession.generation,
+      idempotencyKey: "c02-raw-menu",
+      sessionId: lineSession.id,
+    });
+    await waitUntilRunning(mcp, menu.execution.id);
+    await waitForPageText(page, '[data-testid="input-mode-bar"]', menu.execution.id);
+    expect(await page.getByTestId("input-mode-bar").textContent()).toContain(
+      `Previous: Session ${lineSession.id}, generation ${lineSession.generation.toString()}, Execution ${node.execution.id}`,
+    );
+    expect(await page.getByTestId("input-mode-bar").textContent()).toContain(
+      `Current: Session ${lineSession.id}, generation ${lineSession.generation.toString()}, Execution ${menu.execution.id}`,
+    );
+    expect(
+      await page.getByRole("button", { name: "Line input" }).getAttribute("aria-pressed"),
+    ).toBe("true");
+    await page.screenshot({
+      path: join(screenshotDir, "new-execution-reset-line-mode.png"),
+      fullPage: true,
+    });
+
+    const stale = await page.evaluate(
+      async ({ executionId, generation, sessionId }) => {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/input`, {
+          body: JSON.stringify({
+            data: "\u001b[A",
+            generation,
+            idempotencyKey: "c02-stale-old-execution",
+            targetExecutionId: executionId,
+          }),
+          headers: {
+            "content-type": "application/json",
+            "x-iterminal-request": "console",
+          },
+          method: "POST",
+        });
+        return { body: (await response.json()) as unknown, status: response.status };
+      },
+      {
+        executionId: node.execution.id,
+        generation: lineSession.generation,
+        sessionId: lineSession.id,
+      },
+    );
+    expect(stale.status).not.toBe(202);
+    expect(JSON.stringify(stale.body)).toContain("EXECUTION_CHANGED");
+    const staleAction = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM actions WHERE idempotency_key='c02-stale-old-execution'",
+    );
+    expect(staleAction.rows[0]?.count).toBe("0");
+
+    await page.getByRole("button", { name: "Raw keys" }).click();
+    await page.locator(".terminal-host").click();
+    await page.keyboard.press("ArrowDown");
+    await waitForPageText(page, '[data-testid="browser-terminal-output"]', "MENU:1");
+    await page.keyboard.press("Tab");
+    await waitForPageText(page, '[data-testid="browser-terminal-output"]', "TAB_SEEN");
+    await page.screenshot({
+      path: join(screenshotDir, "raw-menu-focused-target.png"),
+      fullPage: true,
+    });
+    await page.keyboard.type("q");
+    await callTool(mcp, "execution_wait", { executionId: menu.execution.id });
+    await waitForPageText(page, ".status-strip", "READY");
+    expect(await page.getByTestId("input-mode-bar").count()).toBe(0);
+    await page.getByLabel("READY command composer").waitFor({ state: "visible" });
+    const menuInputs = await pool.query<{ data: string; target_execution_id: string }>(
+      `SELECT payload->>'data' AS data, payload->>'targetExecutionId' AS target_execution_id
+       FROM actions WHERE session_id=$1 AND payload->>'targetExecutionId'=$2 AND kind='input'
+       ORDER BY action_sequence`,
+      [lineSession.id, menu.execution.id],
+    );
+    expect(menuInputs.rows.map((row) => row.data).join("")).toContain("\u001b[B");
+    expect(menuInputs.rows.map((row) => row.data).join("")).toContain("\t");
+    expect(menuInputs.rows.map((row) => row.data).join("")).toContain("q");
+    expect(menuInputs.rows.every((row) => row.target_execution_id === menu.execution.id)).toBe(
+      true,
+    );
   }, 60_000);
 
   it("copies wrapped output back into the Shell without extra newlines and survives Console loss", async () => {
@@ -720,15 +1045,24 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     });
     await waitUntilRunning(mcp, python.execution.id);
     await waitForPageText(page, ".status-strip", "RUNNING");
-
-    await page.getByRole("button", { name: "Advanced", exact: true }).click();
-    await page.getByLabel("Send keys directly (TUI / raw mode)").check();
-    await page.getByRole("button", { name: "Close side panel" }).click();
+    const pythonModeBar = page.getByTestId("input-mode-bar");
+    expect(await pythonModeBar.textContent()).toContain(`Execution ${python.execution.id}`);
+    expect(
+      await page.getByRole("button", { name: "Line input" }).getAttribute("aria-pressed"),
+    ).toBe("true");
+    const pythonLine = page.getByLabel("Foreground command composer");
+    await pythonLine.fill("human_value = 40");
+    await pythonLine.press("Enter");
+    await expect.poll(() => pythonLine.inputValue()).toBe("");
+    await page.getByRole("button", { name: "Raw keys" }).click();
+    expect(await page.getByRole("button", { name: "Raw keys" }).getAttribute("aria-pressed")).toBe(
+      "true",
+    );
     await page.locator(".terminal-host").click();
     await page.waitForFunction(
       () => document.querySelector(".terminal-host")?.classList.contains("interactive") === true,
     );
-    await page.keyboard.type("human_value = 40", { delay: 5 });
+    // An explicit empty return is a raw Input Action; line mode intentionally has no empty special case.
     await page.keyboard.press("Enter");
     const humanGuard = await waitForHumanGuard(runtime, session.id, session.generation);
     expect(humanGuard.guardActorType).toBe("human");

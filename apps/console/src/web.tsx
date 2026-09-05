@@ -21,6 +21,15 @@ import {
   readCommandHistory,
   type CommandHistoryEntry,
 } from "./command-history.js";
+import {
+  classifyRawTerminalData,
+  rawInputBatchCanSend,
+  rawInputTargetLabel,
+  sameRawInputTarget,
+  type InputMode,
+  type RawControl,
+  type RawInputTarget,
+} from "./input-mode.js";
 import { ActiveWindowFit, fittedGeometry } from "./terminal-fit.js";
 import { terminalSelectionText } from "./terminal-copy.js";
 import {
@@ -238,6 +247,11 @@ interface LocalDraft {
   readonly value: string;
 }
 
+interface RawInputBatch {
+  readonly data: string;
+  readonly target: RawInputTarget;
+}
+
 type InspectorView = "advanced" | "approvals" | "mcp" | "session";
 
 const INSPECTOR_TITLES: Record<InspectorView, string> = {
@@ -289,7 +303,11 @@ function App(): React.JSX.Element {
   const [commandDraft, setCommandDraft] = useState<LocalDraft>({ revision: 0, value: "" });
   const [foregroundDrafts, setForegroundDrafts] = useState<Record<string, LocalDraft>>({});
   const [rawInput, setRawInput] = useState(false);
+  const [inputModeNotice, setInputModeNotice] = useState<string>();
   const rawInputState = useRef(false);
+  const rawInputTarget = useRef<RawInputTarget | undefined>(undefined);
+  const pendingRawResetTarget = useRef<RawInputTarget | undefined>(undefined);
+  const sensitiveInputActiveState = useRef(false);
   const foregroundPreparing = useRef(new Set<string>());
   const [submissionIntent, dispatchSubmissionIntent] = useReducer(
     submissionIntentReducer,
@@ -338,7 +356,7 @@ function App(): React.JSX.Element {
   const columnSelection = useRef(false);
   const guardReleaseTimer = useRef<number | undefined>(undefined);
   const guardTask = useRef<Promise<void>>(Promise.resolve());
-  const inputBuffer = useRef("");
+  const inputBuffer = useRef<RawInputBatch | undefined>(undefined);
   const inputTimer = useRef<number | undefined>(undefined);
   const selectedGeneration = sessions.find((candidate) => candidate.id === selectedId)?.generation;
   const approvalRevision = timeline.findLast((event) =>
@@ -353,10 +371,11 @@ function App(): React.JSX.Element {
     sensitiveInput?.status !== "ACTIVE" &&
     secretPromptKey !== undefined &&
     secretPromptKey !== dismissedSecretPromptKey;
+  const activeRawInputTarget = rawInputTargetFromSession(session);
   const foregroundScope =
-    session?.activeExecutionId === undefined
+    activeRawInputTarget === undefined
       ? undefined
-      : `${session.id}:${session.generation}:${session.activeExecutionId}`;
+      : `${activeRawInputTarget.sessionId}:${activeRawInputTarget.generation.toString()}:${activeRawInputTarget.executionId}`;
   const foregroundLineVisible =
     session?.status === "RUNNING" &&
     !rawInput &&
@@ -381,6 +400,20 @@ function App(): React.JSX.Element {
     },
     [],
   );
+  const cancelPendingRawInput = useCallback((reason: string): boolean => {
+    if (inputTimer.current !== undefined) {
+      window.clearTimeout(inputTimer.current);
+      inputTimer.current = undefined;
+    }
+    const pending = inputBuffer.current;
+    inputBuffer.current = undefined;
+    if (pending !== undefined) {
+      setInputModeNotice(
+        `Raw key batch for ${rawInputTargetLabel(pending.target)} was dropped and was not sent: ${reason}.`,
+      );
+    }
+    return pending !== undefined;
+  }, []);
 
   useEffect(() => {
     if (!isSubmissionIntentPending(submissionIntent)) return;
@@ -446,9 +479,50 @@ function App(): React.JSX.Element {
     rawInputState.current = rawInput;
   }, [rawInput]);
   useEffect(() => {
+    sensitiveInputActiveState.current = sensitiveInput?.status === "ACTIVE";
+  }, [sensitiveInput?.status]);
+  useEffect(() => {
+    if ((!secureInputVisible && sensitiveInput?.status !== "ACTIVE") || !rawInputState.current)
+      return;
+    cancelPendingRawInput("protected input became active");
     setRawInput(false);
     rawInputState.current = false;
-  }, [foregroundScope]);
+    rawInputTarget.current = undefined;
+    setInteractive(false);
+    interactiveState.current = false;
+    terminal.current?.blur();
+    setInputModeNotice(
+      "Raw keys reset to Line input because protected input became active. Secret text must use the transient protected input control and is never stored as a raw intent.",
+    );
+  }, [cancelPendingRawInput, secureInputVisible, sensitiveInput?.status]);
+  useEffect(() => {
+    const previous = rawInputTarget.current;
+    const droppedPending = cancelPendingRawInput("the active target changed");
+    if (
+      rawInputState.current &&
+      previous !== undefined &&
+      !sameRawInputTarget(previous, activeRawInputTarget)
+    ) {
+      pendingRawResetTarget.current = activeRawInputTarget === undefined ? previous : undefined;
+      setInputModeNotice(
+        `Raw keys reset to Line input because the target changed. Previous: ${rawInputTargetLabel(previous)}. Current: ${rawInputTargetLabel(activeRawInputTarget)}.${droppedPending ? " A pending raw key batch was dropped and was not sent." : ""}`,
+      );
+    } else if (
+      pendingRawResetTarget.current !== undefined &&
+      activeRawInputTarget !== undefined &&
+      !sameRawInputTarget(pendingRawResetTarget.current, activeRawInputTarget)
+    ) {
+      setInputModeNotice(
+        `Raw keys remain reset to Line input for the new target. Previous: ${rawInputTargetLabel(pendingRawResetTarget.current)}. Current: ${rawInputTargetLabel(activeRawInputTarget)}.`,
+      );
+      pendingRawResetTarget.current = undefined;
+    }
+    setRawInput(false);
+    rawInputState.current = false;
+    rawInputTarget.current = undefined;
+    setInteractive(false);
+    interactiveState.current = false;
+  }, [cancelPendingRawInput, foregroundScope]);
   useEffect(() => {
     if (pendingApprovalCount === 0) return;
     setInspectorView("approvals");
@@ -524,15 +598,25 @@ function App(): React.JSX.Element {
     terminal.current = instance;
     const dataSubscription = instance.onData((data) => {
       if (!interactiveState.current) return;
-      if (data === "\u0003") {
-        void sendControl("CTRL_C");
+      const dispatch = classifyRawTerminalData(data);
+      if (sensitiveInputActiveState.current) {
+        if (
+          dispatch.kind === "control" &&
+          (dispatch.control === "CTRL_C" || dispatch.control === "CTRL_D")
+        ) {
+          void sendControl(dispatch.control);
+        }
         return;
       }
-      if (data === "\u0004") {
-        void sendControl("CTRL_D");
-        return;
+      const target = rawInputTarget.current;
+      if (!rawInputState.current || target === undefined) return;
+      if (dispatch.kind === "control") {
+        void sendControl(dispatch.control, target);
+      } else if (dispatch.kind === "input") {
+        queueInput(dispatch.data, target);
+      } else {
+        setInputModeNotice(dispatch.message);
       }
-      if (rawInputState.current) queueInput(data);
     });
     return () => {
       dataSubscription.dispose();
@@ -776,12 +860,16 @@ function App(): React.JSX.Element {
     }
     if (frame.session !== undefined) {
       const nextSession = frame.session;
+      latestSession.current = nextSession;
       setSession(nextSession);
       setSessions((current) =>
         current.map((candidate) => (candidate.id === nextSession.id ? nextSession : candidate)),
       );
     }
-    if (frame.interaction !== undefined) setInteraction(frame.interaction);
+    if (frame.interaction !== undefined) {
+      latestInteraction.current = frame.interaction;
+      setInteraction(frame.interaction);
+    }
     if (frame.screen !== undefined) setScreen(frame.screen);
     if (frame.events !== undefined) {
       setTimeline((current) => mergeEvents(current, frame.events ?? []));
@@ -792,6 +880,7 @@ function App(): React.JSX.Element {
 
   useEffect(() => {
     if (selectedId === undefined) {
+      latestSession.current = undefined;
       setSession(undefined);
       setInteraction(undefined);
       setScreen(undefined);
@@ -814,6 +903,7 @@ function App(): React.JSX.Element {
     if (selected === undefined) return;
     setError(undefined);
     const saved = readResume(selected.id, selected.generation);
+    latestSession.current = selected;
     setSession(selected);
     setInteraction(undefined);
     setScreen(undefined);
@@ -968,27 +1058,59 @@ function App(): React.JSX.Element {
     if (!running) setInteractive(false);
   }, [session?.status, rawInput, sensitiveInput?.status]);
 
-  const queueInput = (data: string): void => {
-    inputBuffer.current += data;
+  const queueInput = (data: string, target: RawInputTarget): void => {
+    const pending = inputBuffer.current;
+    if (pending !== undefined && !sameRawInputTarget(pending.target, target)) {
+      setInputModeNotice(
+        `Raw key batch for ${rawInputTargetLabel(target)} was dropped and was not sent because another target already had a pending batch.`,
+      );
+      return;
+    }
+    inputBuffer.current = { data: (pending?.data ?? "") + data, target };
     if (inputTimer.current !== undefined) return;
     inputTimer.current = window.setTimeout(() => {
       inputTimer.current = undefined;
       const batch = inputBuffer.current;
-      inputBuffer.current = "";
+      inputBuffer.current = undefined;
+      if (batch === undefined) return;
       guardTask.current = guardTask.current
         .then(async () => {
-          await ensureGuard();
-          const currentSession = requiredRunningSession();
-          await api(`/api/sessions/${encodeURIComponent(currentSession.id)}/input`, {
-            body: {
-              data: batch,
-              generation: currentSession.generation,
-              idempotencyKey: crypto.randomUUID(),
-              targetExecutionId: requiredExecution(currentSession),
-            },
-            method: "POST",
-          });
-          scheduleGuardRelease();
+          let guardPrepared = false;
+          try {
+            const stillCurrent = (): boolean =>
+              rawInputBatchCanSend({
+                activeTarget: rawInputTargetFromSession(latestSession.current),
+                armedTarget: rawInputTarget.current,
+                batchTarget: batch.target,
+                focused: interactiveState.current,
+                rawMode: rawInputState.current,
+              });
+            if (!stillCurrent()) {
+              setInputModeNotice(
+                `Raw key batch for ${rawInputTargetLabel(batch.target)} was dropped and was not sent because raw focus or the active target changed.`,
+              );
+              return;
+            }
+            await ensureGuard(batch.target);
+            guardPrepared = true;
+            if (!stillCurrent()) {
+              setInputModeNotice(
+                `Raw key batch for ${rawInputTargetLabel(batch.target)} was dropped and was not sent because raw focus or the active target changed while input ownership was checked.`,
+              );
+              return;
+            }
+            await api(`/api/sessions/${encodeURIComponent(batch.target.sessionId)}/input`, {
+              body: {
+                data: batch.data,
+                generation: batch.target.generation,
+                idempotencyKey: crypto.randomUUID(),
+                targetExecutionId: batch.target.executionId,
+              },
+              method: "POST",
+            });
+          } finally {
+            if (guardPrepared) scheduleGuardRelease();
+          }
         })
         .catch((reason: unknown) => setError(normalizeClientError(reason)));
     }, INPUT_BATCH_MS);
@@ -1056,14 +1178,22 @@ function App(): React.JSX.Element {
     }
   };
 
-  const ensureGuard = async (): Promise<void> => {
+  const ensureGuard = async (target: RawInputTarget): Promise<void> => {
     const currentSession = requiredRunningSession();
+    if (!sameRawInputTarget(rawInputTargetFromSession(currentSession), target)) {
+      throw new Error(`EXECUTION_CHANGED: ${rawInputTargetLabel(target)}`);
+    }
     let state = latestInteraction.current;
-    if (state === undefined) {
+    if (
+      state === undefined ||
+      state.sessionId !== target.sessionId ||
+      state.sessionGeneration !== target.generation
+    ) {
       state = await api<InteractionState>(
-        `/api/sessions/${encodeURIComponent(currentSession.id)}/interaction?generation=${currentSession.generation.toString()}`,
+        `/api/sessions/${encodeURIComponent(target.sessionId)}/interaction?generation=${target.generation.toString()}`,
       );
       setInteraction(state);
+      latestInteraction.current = state;
     }
     if (state.policy !== "human_guarded") return;
     const ownGuard = state.guard?.actor.id === bootstrap?.actor.id;
@@ -1072,7 +1202,7 @@ function App(): React.JSX.Element {
     }
     if (state.guard !== undefined && Date.parse(state.guard.expiresAt) - Date.now() < 200) {
       state = await api<InteractionState>(
-        `/api/sessions/${encodeURIComponent(currentSession.id)}/interaction?generation=${currentSession.generation.toString()}`,
+        `/api/sessions/${encodeURIComponent(target.sessionId)}/interaction?generation=${target.generation.toString()}`,
       );
       setInteraction(state);
       latestInteraction.current = state;
@@ -1082,11 +1212,11 @@ function App(): React.JSX.Element {
     }
     if (state.guard === undefined) {
       state = await api<InteractionState>(
-        `/api/sessions/${encodeURIComponent(currentSession.id)}/interaction/guard`,
+        `/api/sessions/${encodeURIComponent(target.sessionId)}/interaction/guard`,
         {
           body: {
             expectedVersion: state.version,
-            generation: currentSession.generation,
+            generation: target.generation,
             reason: "browser raw-key batch",
             ttlMilliseconds: 500,
           },
@@ -1100,11 +1230,11 @@ function App(): React.JSX.Element {
     if (Date.parse(state.guard.expiresAt) - Date.now() >= 200) return;
     if (state.guard.renewals < state.guard.maxRenewals) {
       state = await api<InteractionState>(
-        `/api/sessions/${encodeURIComponent(currentSession.id)}/interaction/guard`,
+        `/api/sessions/${encodeURIComponent(target.sessionId)}/interaction/guard`,
         {
           body: {
             expectedVersion: state.version,
-            generation: currentSession.generation,
+            generation: target.generation,
             guardId: state.guard.id,
             ttlMilliseconds: 500,
           },
@@ -1119,11 +1249,11 @@ function App(): React.JSX.Element {
     const released = latestInteraction.current;
     if (released === undefined) throw new Error("Interaction state unavailable after release");
     state = await api<InteractionState>(
-      `/api/sessions/${encodeURIComponent(currentSession.id)}/interaction/guard`,
+      `/api/sessions/${encodeURIComponent(target.sessionId)}/interaction/guard`,
       {
         body: {
           expectedVersion: released.version,
-          generation: currentSession.generation,
+          generation: target.generation,
           reason: "browser raw-key batch",
           ttlMilliseconds: 500,
         },
@@ -1206,16 +1336,32 @@ function App(): React.JSX.Element {
     return current;
   };
 
-  const sendControl = async (control: "CTRL_C" | "CTRL_D" | "CTRL_Z" | "ESC"): Promise<void> => {
+  const sendControl = async (control: RawControl, exactTarget?: RawInputTarget): Promise<void> => {
     try {
-      const current = requiredRunningSession();
-      await api(`/api/sessions/${encodeURIComponent(current.id)}/control`, {
+      if (
+        exactTarget !== undefined &&
+        !rawInputBatchCanSend({
+          activeTarget: rawInputTargetFromSession(latestSession.current),
+          armedTarget: rawInputTarget.current,
+          batchTarget: exactTarget,
+          focused: interactiveState.current,
+          rawMode: rawInputState.current,
+        })
+      ) {
+        setInputModeNotice(
+          `Raw control for ${rawInputTargetLabel(exactTarget)} was dropped and was not sent because raw focus or the active target changed.`,
+        );
+        return;
+      }
+      const target = exactTarget ?? rawInputTargetFromSession(requiredRunningSession());
+      if (target === undefined) throw new Error("No active Execution");
+      await api(`/api/sessions/${encodeURIComponent(target.sessionId)}/control`, {
         body: {
           bypassGuard: false,
           delivery: { control, mode: "TTY_CONTROL" },
-          generation: current.generation,
+          generation: target.generation,
           idempotencyKey: crypto.randomUUID(),
-          targetExecutionId: requiredExecution(current),
+          targetExecutionId: target.executionId,
         },
         method: "POST",
       });
@@ -1742,6 +1888,71 @@ function App(): React.JSX.Element {
     setInspectorOpen(true);
   };
 
+  const selectInputMode = (mode: InputMode): void => {
+    if (mode === "line") {
+      const previous = rawInputTarget.current;
+      const droppedPending = cancelPendingRawInput("Line input was selected");
+      setRawInput(false);
+      rawInputState.current = false;
+      rawInputTarget.current = undefined;
+      setInteractive(false);
+      interactiveState.current = false;
+      terminal.current?.blur();
+      releaseGuardAfterPendingInput();
+      if (!droppedPending) {
+        setInputModeNotice(
+          previous === undefined
+            ? "Line input is active. The local draft is retained and was not sent."
+            : `Line input is active for ${rawInputTargetLabel(activeRawInputTarget)}. The local draft is retained and was not sent.`,
+        );
+      }
+      return;
+    }
+
+    const target = rawInputTargetFromSession(latestSession.current);
+    if (target === undefined) {
+      setInputModeNotice("Raw keys require an active foreground Execution.");
+      return;
+    }
+    if (secureInputVisible || sensitiveInput?.status === "ACTIVE") {
+      setInputModeNotice(
+        "Raw keys are unavailable while protected input is active. Use the protected input control.",
+      );
+      return;
+    }
+    setRawInput(true);
+    rawInputState.current = true;
+    rawInputTarget.current = target;
+    pendingRawResetTarget.current = undefined;
+    setInteractive(false);
+    interactiveState.current = false;
+    terminal.current?.blur();
+    setInputModeNotice(
+      `Raw keys are armed only for ${rawInputTargetLabel(target)}. Click the terminal to focus it before sending keys.`,
+    );
+  };
+
+  const selectSession = (candidate: Session): void => {
+    if (candidate.id === selectedId) return;
+    const previous = rawInputTarget.current;
+    if (previous !== undefined || rawInputState.current) {
+      const droppedPending = cancelPendingRawInput("the selected Session changed");
+      setRawInput(false);
+      rawInputState.current = false;
+      rawInputTarget.current = undefined;
+      pendingRawResetTarget.current =
+        rawInputTargetFromSession(candidate) === undefined ? previous : undefined;
+      setInteractive(false);
+      interactiveState.current = false;
+      terminal.current?.blur();
+      releaseGuardAfterPendingInput();
+      setInputModeNotice(
+        `Raw keys reset to Line input because the Session changed. Previous: ${rawInputTargetLabel(previous)}. Selected: ${rawInputTargetLabel(rawInputTargetFromSession(candidate))}.${droppedPending ? " A pending raw key batch was dropped and was not sent." : ""}`,
+      );
+    }
+    setSelectedId(candidate.id);
+  };
+
   return (
     <main className="app-shell">
       <header className="masthead">
@@ -1813,7 +2024,7 @@ function App(): React.JSX.Element {
                   <button
                     aria-current={candidate.id === selectedId ? "page" : undefined}
                     className={candidate.id === selectedId ? "session-tab selected" : "session-tab"}
-                    onClick={() => setSelectedId(candidate.id)}
+                    onClick={() => selectSession(candidate)}
                     title={`${candidate.shell} · ${candidate.workspaceRoot} · ${candidate.status}`}
                     type="button"
                   >
@@ -1892,53 +2103,100 @@ function App(): React.JSX.Element {
               </button>
             </form>
           )}
-          <div className="status-strip" aria-label="Session status">
-            <span>
-              Session <strong>{session?.status ?? "NONE"}</strong>
-            </span>
-            <span>Workspace {session?.workspaceRoot ?? "—"}</span>
-            {checkpoint !== undefined && checkpoint.sessionId === session?.id && (
-              <span>cwd {checkpoint.cwd}</span>
-            )}
-            <span>
-              Input target:{" "}
-              {session?.activeExecutionId === undefined ? "shell" : "shell/active execution"}
-            </span>
-            <details className="diagnostics">
-              <summary>Diagnostics</summary>
-              <span>generation {session?.generation ?? "—"}</span>
-              <span>screen v{screen?.screenVersion ?? 0}</span>
+          <div className="terminal-toolbar">
+            <div className="status-strip" aria-label="Session status">
               <span>
-                geometry {screen?.columns ?? SCREEN_COLUMNS}×{screen?.rows ?? SCREEN_ROWS} v
-                {screen?.geometryVersion ?? 1}
+                Session <strong>{session?.status ?? "NONE"}</strong>
               </span>
-              <span>cursor {cursor}</span>
-              {session?.activeExecutionId !== undefined && (
-                <span>execution {session.activeExecutionId}</span>
+              <span>Workspace {session?.workspaceRoot ?? "—"}</span>
+              {checkpoint !== undefined && checkpoint.sessionId === session?.id && (
+                <span>cwd {checkpoint.cwd}</span>
               )}
-            </details>
-            {sensitiveInput?.status === "ACTIVE" && (
-              <button
-                aria-label={
-                  sensitiveInput.actor.id === bootstrap?.actor.id || session?.status === "READY"
-                    ? "Sensitive input protection is active; stop protecting output"
-                    : "Sensitive input protection is active in another Console session"
-                }
-                className="sensitive-indicator"
-                disabled={
-                  sensitiveFinishing ||
-                  (sensitiveInput.actor.id !== bootstrap?.actor.id && session?.status !== "READY")
-                }
-                onClick={() => void finishSecretInput("completed")}
-                title={
-                  sensitiveInput.actor.id === bootstrap?.actor.id || session?.status === "READY"
-                    ? "Sensitive input is protected. Click when the program can no longer echo it."
-                    : "Sensitive input is protected by the Console session that started it."
-                }
-                type="button"
+              <span>
+                Input target:{" "}
+                {session?.activeExecutionId === undefined ? "shell" : "shell/active execution"}
+              </span>
+              <details className="diagnostics">
+                <summary>Diagnostics</summary>
+                <span>generation {session?.generation ?? "—"}</span>
+                <span>screen v{screen?.screenVersion ?? 0}</span>
+                <span>
+                  geometry {screen?.columns ?? SCREEN_COLUMNS}×{screen?.rows ?? SCREEN_ROWS} v
+                  {screen?.geometryVersion ?? 1}
+                </span>
+                <span>cursor {cursor}</span>
+                {session?.activeExecutionId !== undefined && (
+                  <span>execution {session.activeExecutionId}</span>
+                )}
+              </details>
+              {sensitiveInput?.status === "ACTIVE" && (
+                <button
+                  aria-label={
+                    sensitiveInput.actor.id === bootstrap?.actor.id || session?.status === "READY"
+                      ? "Sensitive input protection is active; stop protecting output"
+                      : "Sensitive input protection is active in another Console session"
+                  }
+                  className="sensitive-indicator"
+                  disabled={
+                    sensitiveFinishing ||
+                    (sensitiveInput.actor.id !== bootstrap?.actor.id && session?.status !== "READY")
+                  }
+                  onClick={() => void finishSecretInput("completed")}
+                  title={
+                    sensitiveInput.actor.id === bootstrap?.actor.id || session?.status === "READY"
+                      ? "Sensitive input is protected. Click when the program can no longer echo it."
+                      : "Sensitive input is protected by the Console session that started it."
+                  }
+                  type="button"
+                >
+                  {sensitiveFinishing ? "…" : "***"}
+                </button>
+              )}
+            </div>
+            {session?.status === "RUNNING" && activeRawInputTarget !== undefined && (
+              <section
+                aria-label="Foreground input mode"
+                className="input-mode-bar"
+                data-testid="input-mode-bar"
               >
-                {sensitiveFinishing ? "…" : "***"}
-              </button>
+                <div className="input-mode-target">
+                  <strong>Foreground input</strong>
+                  <span>
+                    Target <code>{activeRawInputTarget.sessionId}</code> · generation{" "}
+                    <code>{activeRawInputTarget.generation}</code> · Execution{" "}
+                    <code>{activeRawInputTarget.executionId}</code>
+                  </span>
+                </div>
+                <div aria-label="Input mode" className="input-mode-switch" role="group">
+                  <button
+                    aria-pressed={!rawInput}
+                    onClick={() => selectInputMode("line")}
+                    type="button"
+                  >
+                    Line input
+                  </button>
+                  <button
+                    aria-pressed={rawInput}
+                    disabled={secureInputVisible || sensitiveInput?.status === "ACTIVE"}
+                    onClick={() => selectInputMode("raw")}
+                    type="button"
+                  >
+                    Raw keys
+                  </button>
+                </div>
+                <small className="input-mode-help">
+                  {rawInput
+                    ? interactive
+                      ? "Terminal focused. Raw keys use controlled Input or Control Actions for this exact target."
+                      : "Click the terminal to focus it. No key is sent while it is unfocused."
+                    : "Draft stays local until Enter. Empty return requires Raw keys."}
+                </small>
+                {inputModeNotice !== undefined && (
+                  <small className="input-mode-notice" role="status">
+                    {inputModeNotice}
+                  </small>
+                )}
+              </section>
             )}
           </div>
           {submissionIntent.status !== "idle" && (
@@ -2050,14 +2308,28 @@ function App(): React.JSX.Element {
               }}
               onBlur={() => {
                 setInteractive(false);
+                interactiveState.current = false;
+                const droppedPending = cancelPendingRawInput("the terminal lost explicit focus");
+                if (!droppedPending && rawInputTarget.current !== undefined) {
+                  setInputModeNotice(
+                    `Raw keys remain armed only for ${rawInputTargetLabel(rawInputTarget.current)}, but the terminal is not focused and no key will be sent.`,
+                  );
+                }
                 releaseGuardAfterPendingInput();
               }}
               onFocus={() => {
                 if (
                   session?.status === "RUNNING" &&
                   (rawInput || sensitiveInput?.status === "ACTIVE")
-                )
+                ) {
                   setInteractive(true);
+                  interactiveState.current = true;
+                  if (rawInput && rawInputTarget.current !== undefined) {
+                    setInputModeNotice(
+                      `Terminal is explicitly focused for Raw keys on ${rawInputTargetLabel(rawInputTarget.current)}.`,
+                    );
+                  }
+                }
               }}
               ref={terminalHost}
               style={
@@ -2153,6 +2425,10 @@ function App(): React.JSX.Element {
                       event.preventDefault();
                       if (editorValue.trim() !== "") {
                         event.currentTarget.closest("form")?.requestSubmit();
+                      } else if (foregroundLineVisible) {
+                        setInputModeNotice(
+                          "Line input does not send an empty return. Select Raw keys, click the terminal to focus it, then press Enter.",
+                        );
                       }
                     }}
                     ref={commandEditor}
@@ -2380,24 +2656,10 @@ function App(): React.JSX.Element {
             {inspectorView === "advanced" && (
               <>
                 <section aria-label="Advanced interaction settings">
-                  <label className="checkpoint-acknowledgement">
-                    <input
-                      type="checkbox"
-                      checked={rawInput}
-                      disabled={session?.status !== "RUNNING"}
-                      onChange={(event) => {
-                        setRawInput(event.currentTarget.checked);
-                        if (!event.currentTarget.checked) {
-                          setInteractive(false);
-                          releaseGuardAfterPendingInput();
-                        }
-                      }}
-                    />
-                    Send keys directly (TUI / raw mode)
-                  </label>
                   <p className="mode-note">
-                    By default, drafts stay local until Enter. Direct keys are for editors and TUIs
-                    and use the Human Guard.
+                    Foreground Line input / Raw keys is controlled in the main terminal area and is
+                    fenced to the displayed Execution target. This panel retains ownership policy,
+                    geometry, and diagnostic controls.
                   </p>
                   <div className="section-title">
                     <h2>Input ownership</h2>
@@ -2792,6 +3054,15 @@ function readResume(sessionId: string, generation: number): ResumeState | undefi
 function requiredExecution(session: Session): string {
   if (session.activeExecutionId === undefined) throw new Error("No active Execution");
   return session.activeExecutionId;
+}
+
+function rawInputTargetFromSession(session: Session | undefined): RawInputTarget | undefined {
+  if (session?.status !== "RUNNING" || session.activeExecutionId === undefined) return undefined;
+  return {
+    executionId: session.activeExecutionId,
+    generation: session.generation,
+    sessionId: session.id,
+  };
 }
 
 function actorName(actor: Actor): string {
