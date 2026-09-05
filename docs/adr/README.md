@@ -84,6 +84,9 @@ until Enter, allowing Agent submissions during editing; raw/TUI keys are an expl
 See also [ADR-0067](./0067-execution-lifetime-and-fatal-settlement.md): executions have no
 adapter-owned wall-clock lifetime, and fatal settlement preserves the write-acceptance boundary.
 
+See also [ADR-0068](./0068-runtime-capability-negotiation.md): running Runtime and Router
+processes report bounded protocol, build, and exact-owner feature capabilities.
+
 Statuses:
 
 - Proposed: evidence or owner decision is still required.
