@@ -326,10 +326,6 @@ export async function createHumanConsoleApp(
     const actor = actorForRequest(request, reply, actors, now);
     const { sessionId } = sessionParamsSchema.parse(request.params);
     const body = executeSchema.parse(request.body);
-    const session = await options.gateway.getSession(sessionId);
-    if (session.generation !== body.generation || session.status !== "READY") {
-      throw modeError(session, body.generation, "Execute requires READY command-composer mode");
-    }
     return reply.status(202).send(
       success(
         request,
@@ -398,7 +394,6 @@ export async function createHumanConsoleApp(
     const actor = actorForRequest(request, reply, actors, now);
     const { sessionId } = sessionParamsSchema.parse(request.params);
     const body = inputSchema.parse(request.body);
-    await requireRunningTarget(options.gateway, sessionId, body.generation, body.targetExecutionId);
     return reply.status(202).send(
       success(
         request,
@@ -480,7 +475,6 @@ export async function createHumanConsoleApp(
     const actor = actorForRequest(request, reply, actors, now);
     const { sessionId } = sessionParamsSchema.parse(request.params);
     const body = controlSchema.parse(request.body);
-    await requireRunningTarget(options.gateway, sessionId, body.generation, body.targetExecutionId);
     return reply.status(202).send(
       success(
         request,

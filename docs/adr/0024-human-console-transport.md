@@ -39,6 +39,25 @@ HTTP exposes bounded JSON resources for Session create/list/get/close, Execute, 
 - Console responses distinguish accepted Action state from Execution completion.
 - Runtime errors preserve code/details/retryability and add request id plus transport-level allowed-next-action hints.
 
+#### Idempotent replay ordering amendment (2026-09-05)
+
+For Execute, ordinary Input, and Control, the HTTP adapter authenticates the Console Actor,
+validates the bounded request body, and calls the Application operation. It does not fetch Session
+state first or decide READY/RUNNING, generation freshness, or target Execution freshness. Those
+mutable checks belong to the Application mutation lane.
+
+Within that lane, an exact accepted replay is resolved before current Session, Execution, policy,
+or Guard checks. The replay must match the same idempotency scope, request hash, action type, and
+the complete immutable Actor identity stored on the accepted Action. A matching replay returns the
+original Action/Execution fact without another PTY write even if the target later completed or the
+Session mode changed. A new key still faces current freshness and authorization checks. Reusing a
+key with a different payload is a conflict, while a different principal has a different
+idempotency scope and cannot read another principal's accepted fact.
+
+Runtime RPC grant verification remains an earlier transport authentication boundary. This ordering
+does not let a request-body Actor override the server-created Console Actor and does not turn the
+loopback Console cookie into remote multi-user authentication.
+
 ### WebSocket synchronization
 
 The WebSocket carries observation only. Its URL identifies Session and generation; credentials remain in the cookie. The first frame is a bounded synchronization bundle:

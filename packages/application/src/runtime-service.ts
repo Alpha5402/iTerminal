@@ -1404,12 +1404,16 @@ export class RuntimeService {
   }
 
   async #startExecuteLocked(request: ExecuteRequest): Promise<StartedExecution> {
-    this.#requireActorCapability(request.actor, "session.execute");
     validateExecuteCommand(request.command);
     await this.#flushDurable(request.sessionId);
     const requestHash = executeRequestHash(request);
     const scope = `${request.sessionId}:${request.actor.id}`;
-    const replay = this.#idempotentReplay(scope, request.idempotencyKey, requestHash);
+    const replay = this.#idempotentActorReplay(
+      scope,
+      request.idempotencyKey,
+      requestHash,
+      request.actor,
+    );
     if (replay !== undefined) {
       if (replay.type !== "execute") {
         throw new RuntimeError("IDEMPOTENCY_KEY_REUSED", "Idempotency key changed action type");
@@ -1422,6 +1426,8 @@ export class RuntimeService {
         started: this.#started.get(execution.id) ?? Promise.resolve(),
       };
     }
+
+    this.#requireActorCapability(request.actor, "session.execute");
 
     const session = this.#requireGeneration(request.sessionId, request.sessionGeneration);
     const sensitiveInput = this.#sensitiveInputs.get(session.id);
@@ -2319,7 +2325,12 @@ export class RuntimeService {
       ...(request.lineInput === undefined ? {} : { lineInput: request.lineInput }),
     });
     const scope = `${request.sessionId}:${request.actor.id}`;
-    const replay = this.#idempotentReplay(scope, request.idempotencyKey, requestHash);
+    const replay = this.#idempotentActorReplay(
+      scope,
+      request.idempotencyKey,
+      requestHash,
+      request.actor,
+    );
     if (replay !== undefined) {
       if (replay.type !== "input") {
         throw new RuntimeError("IDEMPOTENCY_KEY_REUSED", "Idempotency key changed action type");
@@ -2690,7 +2701,12 @@ export class RuntimeService {
       targetExecutionId: request.targetExecutionId,
     });
     const scope = `${request.sessionId}:${request.actor.id}`;
-    const replay = this.#idempotentReplay(scope, request.idempotencyKey, requestHash);
+    const replay = this.#idempotentActorReplay(
+      scope,
+      request.idempotencyKey,
+      requestHash,
+      request.actor,
+    );
     if (replay !== undefined) {
       if (replay.type !== "control") {
         throw new RuntimeError("IDEMPOTENCY_KEY_REUSED", "Idempotency key changed action type");
@@ -3751,6 +3767,31 @@ export class RuntimeService {
     requestHash: string,
   ): SessionAction | undefined {
     const action = this.store.getActionByIdempotency(scope, idempotencyKey);
+    if (action !== undefined && action.requestHash !== requestHash) {
+      throw new RuntimeError(
+        "IDEMPOTENCY_KEY_REUSED",
+        "Idempotency key was already used with a different request",
+        { actionId: action.id },
+      );
+    }
+    return action;
+  }
+
+  #idempotentActorReplay(
+    scope: string,
+    idempotencyKey: string,
+    requestHash: string,
+    actor: Actor,
+  ): SessionAction | undefined {
+    const action = this.store.getActionByIdempotency(scope, idempotencyKey);
+    if (action !== undefined && !sameActor(action.actor, actor)) {
+      throw new RuntimeError(
+        "ACTOR_IDENTITY_CONFLICT",
+        "Idempotent replay Actor does not match the accepted immutable identity",
+        { actorId: actor.id },
+      );
+    }
+    if (action !== undefined) this.#validateActor(actor);
     if (action !== undefined && action.requestHash !== requestHash) {
       throw new RuntimeError(
         "IDEMPOTENCY_KEY_REUSED",

@@ -10,7 +10,7 @@ import {
   type ShellExecutorFactory,
   type ShellExecutorLifecycleEvent,
 } from "@iterminal/application";
-import type { ShellKind } from "@iterminal/domain";
+import type { ControlDelivery, ShellKind } from "@iterminal/domain";
 import { MemoryRuntimeStore } from "@iterminal/runtime-memory";
 import { agentActor, createTestRuntime, humanActor } from "@iterminal/testkit";
 import { afterEach, describe, expect, it } from "vitest";
@@ -239,6 +239,107 @@ describe("M1 Action Runtime", () => {
     } finally {
       await runtime.closeSession(session.id, session.generation);
     }
+  });
+});
+
+describe("A04 HTTP/Application idempotency ordering", () => {
+  it("replays Execute/Input/Control facts before freshness without repeating executor writes", async () => {
+    const factory = new CountingExecutorFactory();
+    const runtime = new RuntimeService(new MemoryRuntimeStore(), factory);
+    const workspace = createWorkspace();
+    const session = await runtime.createSession({ shell: "zsh", workspaceRoot: workspace });
+    const executeRequest = {
+      actor: agentActor,
+      command: "fixture-interactive-command",
+      idempotencyKey: "a04-execute",
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+    } as const;
+
+    const first = await runtime.startExecute(executeRequest);
+    await first.started;
+    const executor = factory.latest();
+    const inputRequest = {
+      actor: agentActor,
+      data: "fixture input\n",
+      idempotencyKey: "a04-input",
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+      targetExecutionId: first.execution.id,
+    } as const;
+    const controlRequest = {
+      actor: agentActor,
+      delivery: { control: "ESC", mode: "TTY_CONTROL" },
+      idempotencyKey: "a04-control",
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+      targetExecutionId: first.execution.id,
+    } as const;
+    const input = await runtime.sendInput(inputRequest);
+    const control = await runtime.sendControl(controlRequest);
+    expect(executor.inputWrites).toEqual([inputRequest.data]);
+    expect(executor.controlWrites).toEqual([controlRequest.delivery]);
+
+    executor.complete();
+    await expect(first.completion).resolves.toMatchObject({ status: "COMPLETED" });
+    expect(runtime.getSession(session.id).status).toBe("READY");
+
+    const executeReplay = await runtime.startExecute(executeRequest);
+    const inputReplay = await runtime.sendInput(inputRequest);
+    const controlReplay = await runtime.sendControl(controlRequest);
+    expect(executeReplay.action.id).toBe(first.action.id);
+    expect(executeReplay.execution.id).toBe(first.execution.id);
+    expect(inputReplay.id).toBe(input.id);
+    expect(controlReplay.id).toBe(control.id);
+    expect(executor.executeCount).toBe(1);
+    expect(executor.inputWrites).toEqual([inputRequest.data]);
+    expect(executor.controlWrites).toEqual([controlRequest.delivery]);
+
+    await expect(
+      runtime.startExecute({ ...executeRequest, command: "changed-command" }),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
+    await expect(
+      runtime.sendInput({ ...inputRequest, data: "changed input\n" }),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
+    await expect(
+      runtime.sendControl({
+        ...controlRequest,
+        delivery: { control: "CTRL_C", mode: "TTY_CONTROL" },
+      }),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_REUSED" });
+
+    const forgedActor = { ...agentActor, principal: "forged-principal" };
+    await expect(
+      runtime.startExecute({ ...executeRequest, actor: forgedActor }),
+    ).rejects.toMatchObject({ code: "ACTOR_IDENTITY_CONFLICT" });
+    await expect(runtime.sendInput({ ...inputRequest, actor: forgedActor })).rejects.toMatchObject({
+      code: "ACTOR_IDENTITY_CONFLICT",
+    });
+    await expect(
+      runtime.sendControl({ ...controlRequest, actor: forgedActor }),
+    ).rejects.toMatchObject({ code: "ACTOR_IDENTITY_CONFLICT" });
+    const strippedActor = { ...agentActor, capabilities: ["session.execute"] as const };
+    await expect(
+      runtime.sendInput({ ...inputRequest, actor: strippedActor }),
+    ).rejects.toMatchObject({ code: "ACTOR_IDENTITY_CONFLICT" });
+    await expect(
+      runtime.sendControl({ ...controlRequest, actor: strippedActor }),
+    ).rejects.toMatchObject({ code: "ACTOR_IDENTITY_CONFLICT" });
+
+    const otherPrincipal = await runtime.startExecute({ ...executeRequest, actor: humanActor });
+    await otherPrincipal.started;
+    expect(otherPrincipal.action.id).not.toBe(first.action.id);
+    expect(otherPrincipal.execution.id).not.toBe(first.execution.id);
+    expect(executor.executeCount).toBe(2);
+    await expect(
+      runtime.sendInput({ ...inputRequest, idempotencyKey: "a04-stale-input" }),
+    ).rejects.toMatchObject({ code: "EXECUTION_CHANGED" });
+    await expect(
+      runtime.sendControl({ ...controlRequest, idempotencyKey: "a04-stale-control" }),
+    ).rejects.toMatchObject({ code: "EXECUTION_CHANGED" });
+    executor.complete();
+    await otherPrincipal.completion;
+    await runtime.closeSession(session.id, session.generation);
   });
 });
 
@@ -658,6 +759,84 @@ class FailureMatrixExecutor implements ShellExecutor {
   public close(): void {
     this.closeCount += 1;
   }
+}
+
+class CountingExecutorFactory implements ShellExecutorFactory {
+  #executor: CountingExecutor | undefined;
+
+  public create(options: CreateExecutorOptions): Promise<ShellExecutor> {
+    this.#executor = new CountingExecutor(options);
+    return Promise.resolve(this.#executor);
+  }
+
+  public latest(): CountingExecutor {
+    if (this.#executor === undefined) throw new Error("No counting executor was created");
+    return this.#executor;
+  }
+}
+
+class CountingExecutor implements ShellExecutor {
+  public readonly shellPid = 424_244;
+  public readonly shell: ShellKind;
+  public readonly controlWrites: ControlDelivery[] = [];
+  public readonly inputWrites: string[] = [];
+  public executeCount = 0;
+
+  readonly #options: CreateExecutorOptions;
+  #resolveExecution: ((result: ShellExecutionResult) => void) | undefined;
+
+  public constructor(options: CreateExecutorOptions) {
+    this.#options = options;
+    this.shell = options.shell;
+  }
+
+  public checkpoint(): Readonly<{
+    cwd: string;
+    filteredEnvironment: Readonly<Record<string, string>>;
+  }> {
+    return { cwd: this.#options.workspaceRoot, filteredEnvironment: {} };
+  }
+
+  public execute(
+    command: string,
+    callbacks: Readonly<{
+      onStarted: (observedCommand: string) => void;
+      onWriteAccepted?: () => void;
+    }>,
+  ): Promise<ShellExecutionResult> {
+    this.executeCount += 1;
+    callbacks.onWriteAccepted?.();
+    callbacks.onStarted(command);
+    return new Promise<ShellExecutionResult>((resolve) => {
+      this.#resolveExecution = resolve;
+    });
+  }
+
+  public complete(): void {
+    const resolve = this.#resolveExecution;
+    if (resolve === undefined) throw new Error("No counting execution is running");
+    this.#resolveExecution = undefined;
+    resolve({
+      cwd: this.#options.workspaceRoot,
+      exitCode: 0,
+      filteredEnvironment: {},
+      output: "",
+      outputTruncated: false,
+    });
+  }
+
+  public writeInput(data: string): void {
+    this.inputWrites.push(data);
+  }
+
+  public sendControl(delivery: ControlDelivery): void {
+    this.controlWrites.push(delivery);
+  }
+
+  public writeSecret(): void {}
+  public finishSensitiveOutput(): void {}
+  public resize(): void {}
+  public close(): void {}
 }
 
 async function waitFor(predicate: () => boolean, timeoutMilliseconds = 1_000): Promise<void> {
