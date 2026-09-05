@@ -8,6 +8,7 @@
     "@iterminal/application": "workspace:*",
     "@iterminal/domain": "workspace:*",
     "@iterminal/persistence-postgres": "workspace:*",
+    "@iterminal/protocol": "workspace:*",
     "@iterminal/runtime-rpc": "workspace:*"
   },
   "devDependencies": {

@@ -21,6 +21,34 @@ import {
 } from "./index.js";
 
 describe("UnixRuntimeClient delivery classification", () => {
+  it("negotiates and validates the live Runtime capability response", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-capabilities-"));
+    const server = await startRuntimeRpcServer({
+      gateway: {
+        ...stubGateway(),
+        getRuntimeCapabilities: () =>
+          Promise.resolve({
+            buildId: "runtime-test-1",
+            features: ["action.execute.v1", "runtime.capabilities.v1"],
+            protocolVersion: "1",
+          }),
+      },
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    try {
+      await expect(
+        new UnixRuntimeClient(server.socketPath).getRuntimeCapabilities(),
+      ).resolves.toEqual({
+        buildId: "runtime-test-1",
+        features: ["action.execute.v1", "runtime.capabilities.v1"],
+        protocolVersion: "1",
+      });
+    } finally {
+      await server.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
   it("marks a read failure retryable when the daemon is unavailable", async () => {
     const client = new UnixRuntimeClient(missingSocket("read"));
 
@@ -338,6 +366,41 @@ describe("UnixRuntimeClient delivery classification", () => {
 });
 
 describe("Runtime RPC signed grants", () => {
+  it("requires the explicit read operation grant for capability negotiation", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-capability-auth-"));
+    const secret = randomBytes(32);
+    const server = await startRuntimeRpcServer({
+      authentication: { audience: "runtime-rpc-test", secret },
+      gateway: {
+        ...stubGateway(),
+        getRuntimeCapabilities: () =>
+          Promise.resolve({
+            buildId: "auth-test",
+            features: ["runtime.capabilities.v1"],
+            protocolVersion: "1",
+          }),
+      },
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    const allowed = new UnixRuntimeClient(server.socketPath, {
+      authorization: signRuntimeRpcGrant(secret, exactAgentGrant(["runtime.capabilities"])),
+    });
+    const denied = new UnixRuntimeClient(server.socketPath, {
+      authorization: signRuntimeRpcGrant(secret, exactAgentGrant(["session.list"])),
+    });
+    try {
+      await expect(allowed.getRuntimeCapabilities()).resolves.toMatchObject({
+        buildId: "auth-test",
+      });
+      await expect(denied.getRuntimeCapabilities()).rejects.toMatchObject({
+        code: "POLICY_DENIED",
+      });
+    } finally {
+      await server.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
   it("keeps configured and verified bearer material out of ordinary serialization", () => {
     const secret = randomBytes(32);
     const token = signRuntimeRpcGrant(secret, exactAgentGrant(["session.list"]));

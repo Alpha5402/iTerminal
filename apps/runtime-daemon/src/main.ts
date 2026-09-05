@@ -9,6 +9,7 @@ import { configuredPostgresConnectionTarget } from "@iterminal/persistence-postg
 import { runtimeRpcAuthenticationFromEnvironment } from "@iterminal/runtime-rpc";
 
 const socketPath = process.env.ITERM_RUNTIME_SOCKET ?? defaultRuntimeSocketPath();
+const buildId = process.env.ITERM_BUILD_ID;
 const databaseUrl = configuredPostgresConnectionTarget({
   ...(process.env.ITERM_DATABASE_URL === undefined ? {} : { url: process.env.ITERM_DATABASE_URL }),
   ...(process.env.ITERM_DATABASE_URLS === undefined
@@ -45,6 +46,7 @@ const processGuardianTerminationGraceMilliseconds = optionalPositiveInteger(
 const rpcAuthentication = runtimeRpcAuthenticationFromEnvironment(process.env);
 const daemon = await startRuntimeDaemon({
   socketPath,
+  ...(buildId === undefined ? {} : { buildId }),
   ...(agentExecuteApproval === undefined ? {} : { agentExecuteApproval }),
   ...(actionRateLimitWindowMilliseconds === undefined ? {} : { actionRateLimitWindowMilliseconds }),
   ...(actorActionRateLimit === undefined ? {} : { actorActionRateLimit }),

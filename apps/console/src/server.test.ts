@@ -1,4 +1,4 @@
-import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
+import { ACTOR_CAPABILITY_PROFILES, RuntimeError } from "@iterminal/domain";
 import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
@@ -10,6 +10,7 @@ import { startRuntimeDaemon, type RuntimeDaemonHandle } from "@iterminal/runtime
 import {
   signRuntimeRpcGrant,
   UnixRuntimeClient,
+  type RuntimeGateway,
   type RuntimeRpcGrantClaims,
 } from "@iterminal/runtime-rpc";
 import { afterEach, describe, expect, it } from "vitest";
@@ -45,6 +46,94 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
     daemon = undefined;
     for (const fixture of fixtures.splice(0)) {
       await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
+  it("reports live compatible, incompatible, and legacy Runtime handshakes", async () => {
+    let revision = 0;
+    const gateway = {
+      getRuntimeCapabilities: () => {
+        revision += 1;
+        return Promise.resolve({
+          buildId: `console-runtime-${revision.toString()}`,
+          features:
+            revision === 1
+              ? (["runtime.capabilities.v1"] as const)
+              : (["action.execute.v1", "runtime.capabilities.v1"] as const),
+          protocolVersion: revision === 1 ? "1" : "2",
+        });
+      },
+      listSessions: () => Promise.resolve([]),
+    } as unknown as RuntimeGateway;
+    const app = await createHumanConsoleApp({ gateway, port: 30_005 });
+    const legacyApp = await createHumanConsoleApp({
+      gateway: { listSessions: () => Promise.resolve([]) } as unknown as RuntimeGateway,
+      port: 30_005,
+    });
+    const oldRpcApp = await createHumanConsoleApp({
+      gateway: {
+        getRuntimeCapabilities: () =>
+          Promise.reject(new RuntimeError("INVALID_REQUEST", "Unsupported Runtime RPC operation")),
+        listSessions: () => Promise.resolve([]),
+      } as unknown as RuntimeGateway,
+      port: 30_005,
+    });
+    try {
+      const compatible = await app.inject({
+        headers: { host: "127.0.0.1:30005", "x-iterminal-request": "console" },
+        method: "GET",
+        url: "/api/bootstrap",
+      });
+      expect(
+        injectedResult<{ readonly runtimeCompatibility: unknown }>(compatible).runtimeCompatibility,
+      ).toEqual({
+        capabilities: {
+          buildId: "console-runtime-1",
+          features: ["runtime.capabilities.v1"],
+          protocolVersion: "1",
+        },
+        status: "compatible",
+      });
+
+      const changed = await app.inject({
+        headers: { host: "127.0.0.1:30005", "x-iterminal-request": "console" },
+        method: "GET",
+        url: "/api/bootstrap",
+      });
+      expect(
+        injectedResult<{ readonly runtimeCompatibility: unknown }>(changed).runtimeCompatibility,
+      ).toEqual({
+        capabilities: {
+          buildId: "console-runtime-2",
+          features: ["action.execute.v1", "runtime.capabilities.v1"],
+          protocolVersion: "2",
+        },
+        status: "incompatible",
+      });
+
+      const legacy = await legacyApp.inject({
+        headers: { host: "127.0.0.1:30005", "x-iterminal-request": "console" },
+        method: "GET",
+        url: "/api/bootstrap",
+      });
+      expect(legacy.statusCode).toBe(200);
+      expect(injectedResult(legacy)).toMatchObject({
+        runtimeCompatibility: { status: "legacy" },
+        sessions: [],
+      });
+      const oldRpc = await oldRpcApp.inject({
+        headers: { host: "127.0.0.1:30005", "x-iterminal-request": "console" },
+        method: "GET",
+        url: "/api/bootstrap",
+      });
+      expect(oldRpc.statusCode).toBe(200);
+      expect(
+        injectedResult<{ readonly runtimeCompatibility: unknown }>(oldRpc).runtimeCompatibility,
+      ).toEqual({ status: "legacy" });
+    } finally {
+      await app.close();
+      await legacyApp.close();
+      await oldRpcApp.close();
     }
   });
 
@@ -501,6 +590,7 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
         "events.query",
         "execution.start",
         "execution.wait",
+        "runtime.capabilities",
         "session.close",
         "session.create",
         "session.get",
@@ -1053,6 +1143,14 @@ function requestBootstrap(server: HumanConsoleServerHandle, cookie?: string): Pr
       "x-iterminal-request": "console",
     },
   });
+}
+
+function injectedResult<T = unknown>(response: { json(): unknown }): T {
+  const body = response.json();
+  if (typeof body !== "object" || body === null || !("result" in body)) {
+    throw new Error("Injected Console response has no result");
+  }
+  return body.result as T;
 }
 
 async function requestResult<T>(

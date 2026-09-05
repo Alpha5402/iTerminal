@@ -1,12 +1,69 @@
 import type { RuntimeOwnerRecord, RuntimeOwnerRegistry } from "@iterminal/application";
 import type { Session } from "@iterminal/domain";
 import { RuntimeError } from "@iterminal/domain";
-import { UnixRuntimeClient } from "@iterminal/runtime-rpc";
+import { UnixRuntimeClient, type RuntimeGateway } from "@iterminal/runtime-rpc";
 import { describe, expect, it } from "vitest";
 
 import { CentralRuntimeRouterGateway } from "./server.js";
 
 describe("CentralRuntimeRouterGateway error classification", () => {
+  it("reports Router features separately from each exact target owner", async () => {
+    const secondOwner = { ...owner, endpoint: "/tmp/owner-route-2.sock", ownerId: "owner-route-2" };
+    const owners = new Map([
+      ["session-a", owner],
+      ["session-b", secondOwner],
+      ["session-legacy", owner],
+    ]);
+    const routes: RuntimeOwnerRegistry = {
+      ...routeRegistry(owner),
+      resolveSessionRoute: (sessionId) => {
+        const liveOwner = owners.get(sessionId);
+        return Promise.resolve(
+          liveOwner === undefined ? undefined : { liveOwner, ownerId: liveOwner.ownerId },
+        );
+      },
+    };
+    const gateway = new CentralRuntimeRouterGateway(
+      routes,
+      (endpoint) => {
+        if (endpoint === owner.endpoint) {
+          return new CapabilityClient("owner-a", ["action.execute.v1", "runtime.capabilities.v1"]);
+        }
+        return new CapabilityClient("owner-b", ["action.input.v1", "runtime.capabilities.v1"]);
+      },
+      {},
+      undefined,
+      { buildId: "router-a05" },
+    );
+
+    await expect(gateway.getRuntimeCapabilities()).resolves.toEqual({
+      buildId: "router-a05",
+      features: ["runtime.capabilities.v1", "runtime.owner-capabilities.v1"],
+      protocolVersion: "1",
+    });
+    await expect(gateway.getRuntimeCapabilities({ sessionId: "session-a" })).resolves.toEqual({
+      buildId: "owner-a",
+      features: ["action.execute.v1", "runtime.capabilities.v1"],
+      protocolVersion: "1",
+    });
+    await expect(gateway.getRuntimeCapabilities({ sessionId: "session-b" })).resolves.toEqual({
+      buildId: "owner-b",
+      features: ["action.input.v1", "runtime.capabilities.v1"],
+      protocolVersion: "1",
+    });
+
+    const legacyGateway = new CentralRuntimeRouterGateway(
+      routes,
+      () => ({ getRuntimeCapabilities: undefined }) as unknown as RuntimeGateway,
+    );
+    await expect(
+      legacyGateway.getRuntimeCapabilities({ sessionId: "session-legacy" }),
+    ).rejects.toMatchObject({
+      code: "INVALID_REQUEST",
+      message: "Target Runtime owner does not support capability negotiation",
+    });
+  });
+
   it("preserves an owner business RUNTIME_UNAVAILABLE response", async () => {
     const ownerFailure = new RuntimeError(
       "RUNTIME_UNAVAILABLE",
@@ -90,6 +147,25 @@ class WrongOwnerClient extends UnixRuntimeClient {
       shell: "zsh",
       status: "READY",
       workspaceRoot: "/tmp",
+    });
+  }
+}
+
+class CapabilityClient extends UnixRuntimeClient {
+  public constructor(
+    private readonly buildId: string,
+    private readonly features: readonly (
+      "action.execute.v1" | "action.input.v1" | "runtime.capabilities.v1"
+    )[],
+  ) {
+    super("/unused/capability-owner.sock");
+  }
+
+  public override getRuntimeCapabilities() {
+    return Promise.resolve({
+      buildId: this.buildId,
+      features: this.features,
+      protocolVersion: "1",
     });
   }
 }

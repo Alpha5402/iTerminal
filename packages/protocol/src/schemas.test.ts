@@ -9,6 +9,14 @@ import {
   validInputRequestFixture,
 } from "./fixtures.js";
 import { executeRequestSchema, inputRequestSchema } from "./schemas.js";
+import {
+  RUNTIME_PROTOCOL_VERSION,
+  defineRuntimeCapabilities,
+  executeTransportRequestSchema,
+  inputTransportRequestSchema,
+  runtimeCapabilitiesRequestSchema,
+  runtimeCapabilitiesSchema,
+} from "./transport.js";
 
 type Validate = ((value: unknown) => boolean) & { errors?: readonly unknown[] | null };
 const AjvConstructor = Ajv as unknown as {
@@ -46,5 +54,88 @@ describe("public Execute/Input request schemas", () => {
     // This schema only validates the request shape and cannot grant capabilities by itself.
     expect(executeRequestSchema.properties.actor).toBeDefined();
     expect(executeRequestSchema.required).toContain("actor");
+  });
+});
+
+describe("canonical transport schemas", () => {
+  it("shares actor-free Execute and Input fields across adapters", () => {
+    expect(
+      executeTransportRequestSchema.parse({
+        approvalId: "approval-1",
+        command: "printf ready",
+        generation: 3,
+        idempotencyKey: "execute-1",
+        sessionId: "session-1",
+      }),
+    ).toMatchObject({ generation: 3, sessionId: "session-1" });
+    expect(
+      inputTransportRequestSchema.parse({
+        data: "yes\n",
+        generation: 3,
+        idempotencyKey: "input-1",
+        lineInput: { expectedInputVersion: 1, expectedInteractionVersion: 2 },
+        sessionId: "session-1",
+        targetExecutionId: "execution-1",
+      }),
+    ).toMatchObject({ targetExecutionId: "execution-1" });
+    expect(() =>
+      executeTransportRequestSchema.parse({
+        actor: { id: "untrusted" },
+        command: "printf nope",
+        generation: 3,
+        idempotencyKey: "execute-2",
+        sessionId: "session-1",
+      }),
+    ).toThrow();
+  });
+
+  it("accepts unscoped and exact-owner capability requests", () => {
+    expect(runtimeCapabilitiesRequestSchema.parse({})).toEqual({});
+    expect(runtimeCapabilitiesRequestSchema.parse({ sessionId: "session-1" })).toEqual({
+      sessionId: "session-1",
+    });
+    expect(() => runtimeCapabilitiesRequestSchema.parse({ executionId: "execution-1" })).toThrow();
+  });
+
+  it("bounds capability responses and requires canonical features", () => {
+    expect(
+      defineRuntimeCapabilities({
+        buildId: "daemon-2026.09.05+1",
+        features: ["runtime.capabilities.v1", "action.execute.v1"],
+      }),
+    ).toEqual({
+      buildId: "daemon-2026.09.05+1",
+      features: ["action.execute.v1", "runtime.capabilities.v1"],
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+    });
+    expect(() =>
+      runtimeCapabilitiesSchema.parse({
+        buildId: "/private/runtime/token",
+        features: ["runtime.capabilities.v1"],
+        protocolVersion: "1",
+      }),
+    ).toThrow();
+    expect(() =>
+      runtimeCapabilitiesSchema.parse({
+        buildId: "daemon-1",
+        features: ["runtime.capabilities.v1", "action.execute.v1"],
+        protocolVersion: "1",
+      }),
+    ).toThrow();
+    expect(
+      runtimeCapabilitiesSchema.parse({
+        buildId: "future-owner",
+        features: ["action.lookup.v1", "runtime.capabilities.v1"],
+        protocolVersion: "1",
+      }).features,
+    ).toEqual(["action.lookup.v1", "runtime.capabilities.v1"]);
+    expect(() =>
+      runtimeCapabilitiesSchema.parse({
+        buildId: "daemon-1",
+        features: ["runtime.capabilities.v1"],
+        protocolVersion: "1",
+        socketPath: "/tmp/runtime.sock",
+      }),
+    ).toThrow();
   });
 });
