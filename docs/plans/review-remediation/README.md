@@ -44,7 +44,7 @@
 | ID                                   | 任务                              | 依赖                         | 建议 | 状态   |
 | ------------------------------------ | --------------------------------- | ---------------------------- | ---- | ------ |
 | [A01](01-correctness.md#a01)         | Shell 生命周期向 Application 传播 | 无                           | Sol  | 已验收 |
-| [A02](01-correctness.md#a02)         | 移除隐式执行寿命，核实失败清理    | A01                          | Sol  | 进行中 |
+| [A02](01-correctness.md#a02)         | 移除隐式执行寿命，核实失败清理    | A01                          | Sol  | 已验收 |
 | [A03](01-correctness.md#a03)         | 修复请求 schema 漂移              | 无                           | Luna | 已验收 |
 | [A04](01-correctness.md#a04)         | HTTP 与 Application 幂等顺序一致  | 无                           | Sol  | 未开始 |
 | [A05](01-correctness.md#a05)         | 协议与运行能力握手                | A03                          | Sol  | 未开始 |
@@ -61,7 +61,7 @@
 | [C03](03-console.md#c03)             | 输入上下文不确定的可操作解释      | C02                          | Luna | 未开始 |
 | [C04](03-console.md#c04)             | 保留屏幕颜色与单元格属性          | A05                          | Sol  | 未开始 |
 | [C05](03-console.md#c05)             | 有界滚动历史与选择行为            | C04                          | Sol  | 未开始 |
-| [C06](03-console.md#c06)             | 信息层级、布局与新会话目录        | 无                           | Luna | 未开始 |
+| [C06](03-console.md#c06)             | 信息层级、布局与新会话目录        | 无                           | Luna | 进行中 |
 | [D01](04-reliability.md#d01)         | 单 session 故障隔离               | A01                          | Sol  | 未开始 |
 | [D02](04-reliability.md#d02)         | 部分可用的会话发现                | A05                          | Sol  | 未开始 |
 | [D03](04-reliability.md#d03)         | Console/MCP 动态凭据提供器        | 无                           | Sol  | 未开始 |

@@ -81,6 +81,9 @@ foreground line input with input-context CAS, partial-input protection, and unch
 See also [ADR-0066](./0066-human-local-line-drafts.md): Human foreground drafts stay local
 until Enter, allowing Agent submissions during editing; raw/TUI keys are an explicit mode.
 
+See also [ADR-0067](./0067-execution-lifetime-and-fatal-settlement.md): executions have no
+adapter-owned wall-clock lifetime, and fatal settlement preserves the write-acceptance boundary.
+
 Statuses:
 
 - Proposed: evidence or owner decision is still required.
