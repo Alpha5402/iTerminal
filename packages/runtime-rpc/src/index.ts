@@ -110,6 +110,7 @@ export {
   DEFAULT_RUNTIME_RPC_AUDIENCE,
   authorizeRuntimeRpcGrant,
   parseRuntimeRpcSecret,
+  parseDeclaredRuntimeRpcGrantClaims,
   runtimeRpcAuthenticationFromEnvironment,
   runtimeRpcAuthorizationFromEnvironment,
   signRuntimeRpcGrant,
@@ -120,6 +121,8 @@ export {
   type RuntimeRpcGrantClaims,
   type VerifiedRuntimeRpcGrant,
 } from "./auth.js";
+
+export { readPrivateRuntimeRpcCredentialFile } from "./credential-file.js";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;

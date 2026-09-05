@@ -114,6 +114,10 @@ See also [ADR-0075](./0075-bounded-runtime-memory-and-terminal-cleanup.md): boun
 Action/Execution/Event history, preserve durable anti-replay, fail memory-only admission closed at
 capacity, and release settled Execute resources.
 
+See also [ADR-0076](./0076-request-scoped-dynamic-runtime-credentials.md): refresh Console and MCP
+Runtime grants from private server-side files per request while pinning Actor and operation scope
+and failing unavailable replacements closed without a stale-token fallback.
+
 Statuses:
 
 - Proposed: evidence or owner decision is still required.

@@ -188,6 +188,38 @@ export function verifyRuntimeRpcGrant(
   }
 }
 
+/**
+ * Parses the declaration carried by a grant without authenticating its signature.
+ * File-backed clients use this only to fail closed on local binding drift; the Runtime
+ * must still call verifyRuntimeRpcGrant before trusting any returned claim.
+ */
+export function parseDeclaredRuntimeRpcGrantClaims(token: string): RuntimeRpcGrantClaims {
+  try {
+    if (Buffer.byteLength(token, "utf8") > MAX_GRANT_BYTES) throw new Error("oversize");
+    const segments = token.split(".");
+    if (
+      segments.length !== 2 ||
+      segments[0] === undefined ||
+      segments[1] === undefined ||
+      !BASE64URL.test(segments[0]) ||
+      !BASE64URL.test(segments[1])
+    ) {
+      throw new Error("format");
+    }
+    const encodedClaims = Buffer.from(segments[0], "base64url");
+    const signature = Buffer.from(segments[1], "base64url");
+    if (
+      encodedClaims.toString("base64url") !== segments[0] ||
+      signature.toString("base64url") !== segments[1]
+    ) {
+      throw new Error("encoding");
+    }
+    return parseClaims(JSON.parse(encodedClaims.toString("utf8")));
+  } catch {
+    throw authorizationFailed();
+  }
+}
+
 export function authorizeRuntimeRpcGrant(
   grant: VerifiedRuntimeRpcGrant,
   operation: RuntimeOperation,

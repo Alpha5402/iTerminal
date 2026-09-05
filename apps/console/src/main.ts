@@ -1,26 +1,23 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
-import {
-  UnixRuntimeClient,
-  defaultRuntimeSocketPath,
-  runtimeRpcAuthorizationFromEnvironment,
-} from "@iterminal/runtime-rpc";
+import { UnixRuntimeClient, defaultRuntimeSocketPath } from "@iterminal/runtime-rpc";
 
+import { consoleRuntimeAuthorizationOptions } from "./credential-file.js";
 import { startHumanConsole } from "./server.js";
 
 const socketPath = process.env.ITERM_RUNTIME_SOCKET ?? defaultRuntimeSocketPath();
 const host = process.env.ITERM_CONSOLE_HOST ?? "127.0.0.1";
 const port = parsePort(process.env.ITERM_CONSOLE_PORT ?? "4173");
 const staticRoot = resolve(process.env.ITERM_CONSOLE_STATIC_ROOT ?? "dist/console-web");
-const runtimeRpcAuthorization = runtimeRpcAuthorizationFromEnvironment(process.env);
 if (!existsSync(resolve(staticRoot, "index.html"))) {
   throw new Error(`Human Console assets are missing at ${staticRoot}; run pnpm build:console`);
 }
 const consoleServer = await startHumanConsole({
-  gateway: new UnixRuntimeClient(socketPath, {
-    ...(runtimeRpcAuthorization === undefined ? {} : { authorization: runtimeRpcAuthorization }),
-  }),
+  gateway: new UnixRuntimeClient(
+    socketPath,
+    consoleRuntimeAuthorizationOptions(process.env, socketPath),
+  ),
   host,
   ...(process.env.ITERM_MCP_CONFIG_PATH === undefined
     ? {}

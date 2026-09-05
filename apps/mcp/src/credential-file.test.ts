@@ -95,6 +95,11 @@ describe("explicit MCP credential file", () => {
     const second = grant();
     await configuration(second);
     expect(await source()).toBe(second);
+    await configuration(grant({ operations: ["session.list"] }));
+    await expect(source()).rejects.toMatchObject({
+      code: "POLICY_DENIED",
+      message: "MCP credential replacement changed its authorization scope",
+    });
     expect(
       JSON.stringify(new UnixRuntimeClient(socketPath, { authorizationProvider: source })),
     ).toBe("{}");
@@ -124,16 +129,20 @@ describe("explicit MCP credential file", () => {
 
   it("refuses insecure files, symlinks, oversize and missing sources", async () => {
     const source = mcpFileAuthorization(path, socketPath, actor);
-    await expect(source()).rejects.toMatchObject({ code: "POLICY_DENIED" });
+    const unavailable = await source().catch((error: unknown) => error);
+    expect(unavailable).toMatchObject({ code: "RUNTIME_UNAVAILABLE", retryable: true });
+    expect(JSON.stringify(unavailable)).not.toContain(path);
     await configuration(grant());
     await chmod(path, 0o644);
     await expect(source()).rejects.toMatchObject({ code: "POLICY_DENIED" });
     await chmod(path, 0o600);
     const link = join(root, "link.json");
     await symlink(path, link);
-    await expect(mcpFileAuthorization(link, socketPath, actor)()).rejects.toMatchObject({
-      code: "POLICY_DENIED",
-    });
+    const linked = await mcpFileAuthorization(link, socketPath, actor)().catch(
+      (error: unknown) => error,
+    );
+    expect(linked).toMatchObject({ code: "POLICY_DENIED" });
+    expect(JSON.stringify(linked)).not.toContain(link);
     await writeFile(path, " ".repeat(64 * 1024 + 1));
     await expect(source()).rejects.toMatchObject({ code: "POLICY_DENIED" });
     expect(() => mcpFileAuthorization("relative.json", socketPath, actor)).toThrow(
