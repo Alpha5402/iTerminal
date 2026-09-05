@@ -52,7 +52,7 @@
 | [B01](02-observation-mcp.md#b01)     | 有权限、有界 Artifact 读取        | A05                          | Sol  | 已验收 |
 | [B02](02-observation-mcp.md#b02)     | 连续输出游标与分页                | B01                          | Sol  | 已验收 |
 | [B03](02-observation-mcp.md#b03)     | 有界、可取消的执行等待            | A05                          | Sol  | 已验收 |
-| [B04](02-observation-mcp.md#b04)     | Agent 紧凑执行观察视图            | A06、B02、B03                | Sol  | 进行中 |
+| [B04](02-observation-mcp.md#b04)     | Agent 紧凑执行观察视图            | A06、B02、B03                | Sol  | 已验收 |
 | [B05](02-observation-mcp.md#b05)     | 缩短 MCP 元信息                   | 无                           | Luna | 已验收 |
 | [B06](02-observation-mcp.md#b06)     | 历史查询的持久层回退与过期契约    | A06、B02                     | Sol  | 未开始 |
 | [B07](02-observation-mcp.md#b07)     | 有界内存与完成态资源释放          | B03、B06                     | Sol  | 未开始 |
