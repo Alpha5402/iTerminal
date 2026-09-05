@@ -90,6 +90,10 @@ processes report bounded protocol, build, and exact-owner feature capabilities.
 See also [ADR-0069](./0069-action-lookup-by-request-identity.md): reconcile accepted Actions by
 exact authenticated request identity without replaying a mutation or disclosing payloads.
 
+See also [ADR-0070](./0070-bounded-scoped-artifact-read.md): read already-sanitized Artifact bytes
+through an exact database-owned Session scope, bounded byte ranges, non-disclosing misses, and an
+explicit UTF-8 text-boundary contract.
+
 Statuses:
 
 - Proposed: evidence or owner decision is still required.

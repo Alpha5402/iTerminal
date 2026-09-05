@@ -74,9 +74,10 @@ describeDatabase("M10.4 durable Human secret input", () => {
       shell: "zsh",
       workspaceRoot: workspace,
     });
+    const rawSensitiveOutput = "RAW_SENSITIVE_OUTPUT_SENTINEL";
     const started = await rpc.startExecute({
       actor: human,
-      command: `IFS= read -r ITERM_SECRET; printf 'ECHO:%s\\n' "$ITERM_SECRET"; sleep 30`,
+      command: `IFS= read -r ITERM_SECRET; printf 'ECHO:%s\\n' "$ITERM_SECRET"; python3 -c 'import os; os.write(1, (b"RAW_" + b"SENSITIVE_" + b"OUTPUT_" + b"SENTINEL") * 1000)'; sleep 30`,
       idempotencyKey: "m10-secret-reader",
       sessionGeneration: session.generation,
       sessionId: session.id,
@@ -153,6 +154,30 @@ describeDatabase("M10.4 durable Human secret input", () => {
     expect(JSON.stringify(durable.rows[0])).not.toContain(secret);
     expect(JSON.stringify(durable.rows[0])).not.toContain("SECOND_SECRET_MUST_NOT_WRITE");
     expect(JSON.stringify(durable.rows[0])).not.toContain("AGENT_INTERFERENCE_MUST_NOT_WRITE");
+    expect(durable.rows[0]?.artifact_content).not.toContain(rawSensitiveOutput);
+    expect(durable.rows[0]?.event_payloads).not.toContain(rawSensitiveOutput);
+
+    const sensitiveArtifactRefs = await pool.query<{
+      artifact_refs: string;
+      artifact_rows: string;
+    }>(
+      `SELECT
+         count(*) FILTER (WHERE event.payload ? 'artifactRef')::text AS artifact_refs,
+         (SELECT count(*)::text FROM artifacts WHERE execution_id = $2) AS artifact_rows
+       FROM session_events event
+       WHERE event.session_id = $1 AND event.execution_id = $2
+         AND event.event_type = 'terminal.pty_output'`,
+      [session.id, started.execution.id],
+    );
+    expect(sensitiveArtifactRefs.rows[0]).toEqual({ artifact_refs: "0", artifact_rows: "0" });
+    await expect(
+      rpc.readArtifact({
+        artifactId: "art_raw_sensitive_output",
+        generation: session.generation,
+        offsetBytes: 0,
+        sessionId: session.id,
+      }),
+    ).resolves.toMatchObject({ kind: "not_found" });
 
     const finished = await rpc.finishSensitiveInput({
       actor: human,

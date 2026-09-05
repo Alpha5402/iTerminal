@@ -137,9 +137,10 @@ describeDatabase("PostgresObservationRepository", () => {
     });
   });
 
-  it("moves large output to an artifact and bounds every read", async () => {
+  it("reads exact scoped byte ranges without changing the Event shape", async () => {
     const session = await createSession(runtime);
-    const content = `HEAD-${"x".repeat(100_000)}-TAIL`;
+    const otherSession = await createSession(runtime);
+    const content = `${"a".repeat(8_190)}中文🙂${"x".repeat(100_000)}-TAIL`;
     const written = await observation.appendOutput({
       createdAt: new Date(),
       data: content,
@@ -150,14 +151,66 @@ describeDatabase("PostgresObservationRepository", () => {
     expect(written.artifactRef).toBeDefined();
     expect(written.byteCount).toBe(Buffer.byteLength(content));
     expect(written.tailPreview.endsWith("-TAIL")).toBe(true);
-    const first = await observation.readArtifact(written.artifactRef ?? "missing", 0, 1_000_000);
-    expect(first).toMatchObject({ byteSize: Buffer.byteLength(content), truncated: true });
-    expect(Buffer.from(String(first?.contentBase64), "base64")).toHaveLength(64 * 1024);
+    const artifactId = written.artifactRef ?? "missing";
+    const first = await observation.readArtifact({
+      artifactId,
+      generation: 1,
+      offsetBytes: 0,
+      sessionId: session,
+    });
+    expect(first).toMatchObject({
+      eof: false,
+      nextOffset: 8 * 1024,
+      offsetBytes: 0,
+      returnedBytes: 8 * 1024,
+      totalBytes: Buffer.byteLength(content),
+    });
+    expect(first).not.toHaveProperty("sha256");
+    if (first.kind !== "found") throw new Error("Expected retained Artifact content");
+    expect(Buffer.from(first.contentBase64, "base64")).toHaveLength(8 * 1024);
+    const maximum = await observation.readArtifact({
+      artifactId,
+      generation: 1,
+      maxBytes: 64 * 1024,
+      offsetBytes: 0,
+      sessionId: session,
+    });
+    expect(maximum).toMatchObject({ kind: "found", returnedBytes: 64 * 1024 });
     const eventPage = await observation.queryEvents({ generation: 1, sessionId: session });
     expect(eventPage.events[0]?.payload).not.toHaveProperty("data");
     expect(eventPage.events[0]?.payload).toMatchObject({ artifactRef: written.artifactRef });
+
+    const crossSession = await observation.readArtifact({
+      artifactId,
+      generation: 1,
+      offsetBytes: 0,
+      sessionId: otherSession,
+    });
+    const missing = await observation.readArtifact({
+      artifactId: "art_missing",
+      generation: 1,
+      offsetBytes: 0,
+      sessionId: otherSession,
+    });
+    expect(crossSession).toMatchObject({ kind: "not_found", sessionId: otherSession });
+    expect({ ...crossSession, artifactId: "same" }).toEqual({ ...missing, artifactId: "same" });
+
     await expect(
-      observation.readArtifact(written.artifactRef ?? "missing", -1),
+      observation.readArtifact({
+        artifactId,
+        generation: 1,
+        maxBytes: 64 * 1024 + 1,
+        offsetBytes: 0,
+        sessionId: session,
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    await expect(
+      observation.readArtifact({
+        artifactId,
+        generation: 1,
+        offsetBytes: Number.MAX_SAFE_INTEGER,
+        sessionId: session,
+      }),
     ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
     await expect(
       observation.appendOutput({
@@ -168,6 +221,69 @@ describeDatabase("PostgresObservationRepository", () => {
         sessionId: session,
       }),
     ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+  });
+
+  it("losslessly reassembles 7 KiB and 1 MiB UTF-8 fixtures and classifies expiry", async () => {
+    const session = await createSession(runtime);
+    const sevenKiB =
+      "七🙂".repeat(512) + "x".repeat(7 * 1024 - Buffer.byteLength("七🙂".repeat(512)));
+    const oneMiB =
+      "a".repeat(8_190) + "中文🙂" + "b".repeat(1024 * 1024 - 8_190 - Buffer.byteLength("中文🙂"));
+
+    for (const [label, content] of [
+      ["seven-kib", sevenKiB],
+      ["one-mib", oneMiB],
+    ] as const) {
+      expect(Buffer.byteLength(content)).toBe(label === "seven-kib" ? 7 * 1024 : 1024 * 1024);
+      const written = await observation.appendOutput({
+        createdAt: new Date(),
+        data: content,
+        generation: 1,
+        inlineThresholdBytes: 1,
+        sessionId: session,
+      });
+      const artifactId = written.artifactRef ?? "missing";
+      const chunks: Buffer[] = [];
+      let offsetBytes = 0;
+      for (;;) {
+        const page = await observation.readArtifact({
+          artifactId,
+          generation: 1,
+          ...(label === "seven-kib" ? {} : { maxBytes: 8 * 1024 }),
+          offsetBytes,
+          sessionId: session,
+        });
+        if (page.kind !== "found") throw new Error(`Expected ${label} Artifact page`);
+        chunks.push(Buffer.from(page.contentBase64, "base64"));
+        expect(page.nextOffset).toBe(page.offsetBytes + page.returnedBytes);
+        offsetBytes = page.nextOffset;
+        if (page.eof) break;
+      }
+      expect(Buffer.concat(chunks)).toEqual(Buffer.from(content, "utf8"));
+
+      const eof = await observation.readArtifact({
+        artifactId,
+        generation: 1,
+        offsetBytes: Buffer.byteLength(content),
+        sessionId: session,
+      });
+      expect(eof).toMatchObject({ eof: true, kind: "found", returnedBytes: 0 });
+
+      if (label === "seven-kib") {
+        await pool.query(
+          "UPDATE artifacts SET expires_at = now() - interval '1 second' WHERE id = $1",
+          [artifactId],
+        );
+        await expect(
+          observation.readArtifact({
+            artifactId,
+            generation: 1,
+            offsetBytes: 0,
+            sessionId: session,
+          }),
+        ).resolves.toMatchObject({ kind: "expired" });
+      }
+    }
   });
 
   it("serializes concurrent Artifact admission, commits cleanup, and keeps exact usage", async () => {

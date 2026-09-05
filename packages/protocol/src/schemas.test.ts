@@ -13,6 +13,8 @@ import {
   RUNTIME_PROTOCOL_VERSION,
   actionLookupResultSchema,
   actionLookupTransportRequestSchema,
+  artifactReadResultSchema,
+  artifactReadTransportRequestSchema,
   defineRuntimeCapabilities,
   executeTransportRequestSchema,
   inputTransportRequestSchema,
@@ -60,6 +62,67 @@ describe("public Execute/Input request schemas", () => {
 });
 
 describe("canonical transport schemas", () => {
+  it("bounds Artifact byte-range requests and verifies response arithmetic", () => {
+    expect(
+      artifactReadTransportRequestSchema.parse({
+        artifactId: "art-1",
+        generation: 2,
+        sessionId: "session-1",
+      }),
+    ).toEqual({
+      artifactId: "art-1",
+      generation: 2,
+      offsetBytes: 0,
+      sessionId: "session-1",
+    });
+    expect(() =>
+      artifactReadTransportRequestSchema.parse({
+        artifactId: "art-1",
+        generation: 2,
+        maxBytes: 64 * 1024 + 1,
+        sessionId: "session-1",
+      }),
+    ).toThrow();
+    expect(
+      artifactReadResultSchema.parse({
+        artifactId: "art-1",
+        contentBase64: Buffer.from("hello", "utf8").toString("base64"),
+        contentType: "application/octet-stream",
+        eof: true,
+        generation: 2,
+        kind: "found",
+        nextOffset: 5,
+        offsetBytes: 0,
+        returnedBytes: 5,
+        sessionId: "session-1",
+        totalBytes: 5,
+      }),
+    ).not.toHaveProperty("sha256");
+    for (const invalid of [
+      { contentBase64: "AAAA", returnedBytes: 1 },
+      { nextOffset: 4 },
+      { eof: false },
+      { contentBase64: "not base64!" },
+    ]) {
+      expect(() =>
+        artifactReadResultSchema.parse({
+          artifactId: "art-1",
+          contentBase64: Buffer.from("hello", "utf8").toString("base64"),
+          contentType: "application/octet-stream",
+          eof: true,
+          generation: 2,
+          kind: "found",
+          nextOffset: 5,
+          offsetBytes: 0,
+          returnedBytes: 5,
+          sessionId: "session-1",
+          totalBytes: 5,
+          ...invalid,
+        }),
+      ).toThrow();
+    }
+  });
+
   it("bounds Action lookup identity and projected results without payload fingerprints", () => {
     expect(
       actionLookupTransportRequestSchema.parse({

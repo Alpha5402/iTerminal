@@ -75,6 +75,8 @@ describeDatabase("M10.5/M10.6 durable Artifact storage and PTY output coalescing
     });
     await daemon.waitUntilReady();
     const rpc = new UnixRuntimeClient(daemon.socketPath);
+    const capabilities = await rpc.getRuntimeCapabilities();
+    expect(capabilities.features).toContain("artifact.read.v1");
     const session = await rpc.createSession({
       idempotencyKey: "m10-artifact-session",
       shell: "zsh",
@@ -263,6 +265,61 @@ describeDatabase("M10.5/M10.6 durable Artifact storage and PTY output coalescing
     expect(Number.parseInt(observed.max_artifact_bytes, 10)).toBeLessThanOrEqual(8192);
     expect(observed.missing_artifacts).toBe("0");
 
+    const retained = await pool.query<{ content: Buffer; id: string }>(
+      `SELECT artifact.id, artifact.content
+         FROM artifacts artifact
+         JOIN session_events event ON event.payload->>'artifactRef' = artifact.id
+        WHERE event.execution_id = $1
+        ORDER BY event.event_sequence ASC
+        LIMIT 1`,
+      [started.execution.id],
+    );
+    const retainedArtifact = retained.rows[0];
+    if (retainedArtifact === undefined) throw new Error("Expected one retained Artifact fixture");
+    const read = await rpc.readArtifact({
+      artifactId: retainedArtifact.id,
+      generation: session.generation,
+      offsetBytes: 0,
+      sessionId: session.id,
+    });
+    if (read.kind !== "found")
+      throw new Error("Expected the retained Artifact through Runtime RPC");
+    expect(Buffer.from(read.contentBase64, "base64")).toEqual(retainedArtifact.content);
+    expect(read).not.toHaveProperty("sha256");
+
+    const other = await rpc.createSession({
+      idempotencyKey: "m10-output-other-session",
+      shell: "zsh",
+      workspaceRoot: workspace,
+    });
+    const crossSession = await rpc.readArtifact({
+      artifactId: retainedArtifact.id,
+      generation: other.generation,
+      offsetBytes: 0,
+      sessionId: other.id,
+    });
+    const missing = await rpc.readArtifact({
+      artifactId: "art_missing",
+      generation: other.generation,
+      offsetBytes: 0,
+      sessionId: other.id,
+    });
+    expect({ ...crossSession, artifactId: "same" }).toEqual({ ...missing, artifactId: "same" });
+
+    await pool.query(
+      "UPDATE artifacts SET expires_at = now() - interval '1 second' WHERE id = $1",
+      [retainedArtifact.id],
+    );
+    await expect(
+      rpc.readArtifact({
+        artifactId: retainedArtifact.id,
+        generation: session.generation,
+        offsetBytes: 0,
+        sessionId: session.id,
+      }),
+    ).resolves.toMatchObject({ kind: "expired" });
+
+    await rpc.closeSession(other.id, other.generation);
     await rpc.closeSession(session.id, session.generation);
   }, 30_000);
 });

@@ -8,6 +8,7 @@ export const RUNTIME_FEATURES = Object.freeze([
   "action.execute.v1",
   "action.input.v1",
   "action.lookup.v1",
+  "artifact.read.v1",
   "runtime.capabilities.v1",
   "runtime.owner-capabilities.v1",
 ] as const);
@@ -60,6 +61,89 @@ export const actionLookupTransportRequestSchema = z.strictObject({
   idempotencyKey: idempotencyKeyTransportSchema,
   sessionId: sessionIdTransportSchema,
 });
+
+export const artifactReadTransportRequestSchema = z.strictObject({
+  artifactId: z.string().min(1).max(256),
+  generation: sessionGenerationTransportSchema,
+  maxBytes: z
+    .number()
+    .int()
+    .positive()
+    .max(64 * 1024)
+    .optional(),
+  offsetBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).default(0),
+  sessionId: sessionIdTransportSchema,
+});
+
+const artifactReadIdentitySchema = z.strictObject({
+  artifactId: z.string().min(1).max(256),
+  generation: sessionGenerationTransportSchema,
+  sessionId: sessionIdTransportSchema,
+});
+
+const artifactReadFoundSchema = artifactReadIdentitySchema
+  .extend({
+    contentBase64: z
+      .string()
+      .max(Math.ceil((64 * 1024) / 3) * 4)
+      .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
+    contentType: z.string().min(1).max(256),
+    eof: z.boolean(),
+    kind: z.literal("found"),
+    nextOffset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    offsetBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    returnedBytes: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(64 * 1024),
+    totalBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  })
+  .superRefine((result, context) => {
+    const padding = result.contentBase64.endsWith("==")
+      ? 2
+      : result.contentBase64.endsWith("=")
+        ? 1
+        : 0;
+    const decodedBytes = (result.contentBase64.length / 4) * 3 - padding;
+    if (decodedBytes !== result.returnedBytes) {
+      context.addIssue({
+        code: "custom",
+        message: "contentBase64 length must match returnedBytes",
+      });
+    }
+    if (result.nextOffset !== result.offsetBytes + result.returnedBytes) {
+      context.addIssue({
+        code: "custom",
+        message: "nextOffset must follow the returned byte range",
+      });
+    }
+    if (
+      result.nextOffset > result.totalBytes ||
+      result.eof !== (result.nextOffset === result.totalBytes)
+    ) {
+      context.addIssue({ code: "custom", message: "eof must match the known total byte range" });
+    }
+  });
+
+export const artifactReadResultSchema = z.union([
+  artifactReadFoundSchema,
+  artifactReadIdentitySchema.extend({
+    kind: z.literal("not_found"),
+    message: z.string().min(1).max(512),
+  }),
+  artifactReadIdentitySchema.extend({
+    expiredAt: z.iso.datetime({ offset: true }),
+    kind: z.literal("expired"),
+    message: z.string().min(1).max(512),
+  }),
+  artifactReadIdentitySchema.extend({
+    kind: z.literal("unavailable"),
+    message: z.string().min(1).max(512),
+    reason: z.enum(["durability_unavailable", "owner_route_unavailable"]),
+    retryable: z.literal(true),
+  }),
+]);
 
 const actionLookupIdentitySchema = z.strictObject({
   generation: sessionGenerationTransportSchema,
@@ -138,6 +222,8 @@ export type ExecuteTransportRequest = z.output<typeof executeTransportRequestSch
 export type InputTransportRequest = z.output<typeof inputTransportRequestSchema>;
 export type ActionLookupTransportRequest = z.output<typeof actionLookupTransportRequestSchema>;
 export type ActionLookupResult = z.output<typeof actionLookupResultSchema>;
+export type ArtifactReadTransportRequest = z.output<typeof artifactReadTransportRequestSchema>;
+export type ArtifactReadResult = z.output<typeof artifactReadResultSchema>;
 export type RuntimeCapabilitiesRequest = z.output<typeof runtimeCapabilitiesRequestSchema>;
 
 export function defineRuntimeCapabilities(input: {

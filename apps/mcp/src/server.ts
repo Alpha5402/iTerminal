@@ -8,6 +8,7 @@ import {
 } from "@iterminal/domain";
 import {
   actionLookupTransportRequestSchema,
+  artifactReadTransportRequestSchema,
   executeTransportRequestSchema,
   inputTransportRequestSchema,
   runtimeCapabilitiesRequestSchema,
@@ -95,6 +96,29 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
           idempotencyKey: input.idempotencyKey,
           sessionId: input.sessionId,
         }),
+      ),
+  );
+
+  server.registerTool(
+    "artifact_read",
+    {
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      description:
+        "Read a bounded byte range from a retained, already-sanitized Artifact in one exact Session generation. Base64 is lossless and authoritative; text is included only when the returned range is complete UTF-8. If textStatus is unaligned_utf8, concatenate the base64 bytes across ranges before decoding. Defaults to 8 KiB and allows at most 64 KiB per read.",
+      inputSchema: artifactReadTransportRequestSchema,
+      title: "Read retained Artifact bytes",
+    },
+    async (input) =>
+      call(async () =>
+        artifactMcpView(
+          await gateway.readArtifact({
+            artifactId: input.artifactId,
+            generation: input.generation,
+            ...(input.maxBytes === undefined ? {} : { maxBytes: input.maxBytes }),
+            offsetBytes: input.offsetBytes,
+            sessionId: input.sessionId,
+          }),
+        ),
       ),
   );
 
@@ -623,5 +647,23 @@ async function call(work: () => Promise<unknown>): Promise<CallToolResult> {
       content: [{ text: JSON.stringify({ error: normalized }), type: "text" }],
       isError: true,
     };
+  }
+}
+
+export function artifactMcpView(
+  result: Awaited<ReturnType<RuntimeGateway["readArtifact"]>>,
+): Awaited<ReturnType<RuntimeGateway["readArtifact"]>> &
+  Readonly<{ text?: string; textStatus?: "complete" | "unaligned_utf8" }> {
+  if (result.kind !== "found") return result;
+  try {
+    return {
+      ...result,
+      text: new TextDecoder("utf-8", { fatal: true }).decode(
+        Buffer.from(result.contentBase64, "base64"),
+      ),
+      textStatus: "complete",
+    };
+  } catch {
+    return { ...result, textStatus: "unaligned_utf8" };
   }
 }

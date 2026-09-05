@@ -13,6 +13,7 @@ const LOCAL_GRANT_TTL_SECONDS = 24 * 60 * 60;
 
 const MCP_OPERATIONS = [
   "action.lookup",
+  "artifact.read",
   "approval.get",
   "approval.list",
   "approval.request",

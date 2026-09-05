@@ -1,7 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import type { Actor } from "@iterminal/domain";
-import type { SessionFence } from "@iterminal/application";
+import {
+  DEFAULT_ARTIFACT_READ_BYTES,
+  MAX_ARTIFACT_READ_BYTES,
+  type ArtifactReadRequest,
+  type DurableArtifactReadResult,
+  type SessionFence,
+} from "@iterminal/application";
 import { RuntimeError } from "@iterminal/domain";
 import type { Pool, PoolClient } from "pg";
 
@@ -12,7 +18,6 @@ import { maintainEventRetention, type EventRetentionMaintenanceResult } from "./
 
 const MAX_EVENT_LIMIT = 500;
 const MAX_SEARCH_LIMIT = 50;
-const MAX_ARTIFACT_READ_BYTES = 64 * 1024;
 const DEFAULT_INLINE_BYTES = 4 * 1024;
 const DEFAULT_TAIL_BYTES = 2 * 1024;
 
@@ -498,44 +503,79 @@ export class PostgresObservationRepository {
     return outcome.result;
   }
 
-  public async readArtifact(
-    artifactId: string,
-    offset = 0,
-    requestedLimit = MAX_ARTIFACT_READ_BYTES,
-  ): Promise<Readonly<Record<string, unknown>> | undefined> {
-    if (!Number.isSafeInteger(offset) || offset < 0) {
+  public async readArtifact(request: ArtifactReadRequest): Promise<DurableArtifactReadResult> {
+    const identity = {
+      artifactId: request.artifactId,
+      generation: request.generation,
+      sessionId: request.sessionId,
+    };
+    if (!Number.isSafeInteger(request.offsetBytes) || request.offsetBytes < 0) {
       throw new RuntimeError(
         "INVALID_REQUEST",
         "Artifact offset must be a non-negative safe integer",
       );
     }
-    const limit = bounded(requestedLimit, MAX_ARTIFACT_READ_BYTES);
+    const limit = request.maxBytes ?? DEFAULT_ARTIFACT_READ_BYTES;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_ARTIFACT_READ_BYTES) {
+      throw new RuntimeError(
+        "INVALID_REQUEST",
+        `Artifact maxBytes must be between 1 and ${MAX_ARTIFACT_READ_BYTES.toString()}`,
+      );
+    }
     const result = await this.#pool.query<{
       byte_size: string;
-      sha256: string;
+      chunk: Buffer | null;
       content_type: string;
-      chunk: Buffer;
+      expired: boolean;
+      expires_at: Date;
     }>(
-      `SELECT byte_size, sha256, content_type,
-              substring(content FROM $2 + 1 FOR $3) AS chunk
-         FROM artifacts WHERE id = $1 AND expires_at > now()`,
-      [artifactId, offset, limit],
+      `SELECT byte_size::text, content_type, expires_at, expires_at <= now() AS expired,
+              CASE WHEN expires_at > now()
+                   THEN substring(
+                     content
+                     FROM LEAST($4::bigint, byte_size)::integer + 1
+                     FOR $5::integer
+                   )
+                   ELSE NULL
+               END AS chunk
+         FROM artifacts
+        WHERE id = $1 AND session_id = $2 AND session_generation = $3`,
+      [request.artifactId, request.sessionId, request.generation, request.offsetBytes, limit],
     );
     const row = result.rows[0];
     if (row === undefined) {
-      return undefined;
+      return {
+        ...identity,
+        kind: "not_found",
+        message: "Artifact is not available in the requested Session generation",
+      };
     }
-    const byteSize = Number.parseInt(row.byte_size, 10);
-    const nextOffset = offset + row.chunk.length;
+    const byteSize = safeNonnegativeInteger(row.byte_size, "Artifact byte size");
+    if (row.expired) {
+      return {
+        ...identity,
+        expiredAt: row.expires_at.toISOString(),
+        kind: "expired",
+        message: "Artifact retention has expired",
+      };
+    }
+    if (request.offsetBytes > byteSize) {
+      throw new RuntimeError("INVALID_REQUEST", "Artifact offset exceeds the retained byte range", {
+        offsetBytes: request.offsetBytes,
+      });
+    }
+    const chunk = row.chunk ?? Buffer.alloc(0);
+    const nextOffset = request.offsetBytes + chunk.length;
     return {
-      artifactId,
-      byteSize,
-      contentBase64: row.chunk.toString("base64"),
+      ...identity,
+      contentBase64: chunk.toString("base64"),
       contentType: row.content_type,
-      offset,
-      sha256: row.sha256,
-      truncated: nextOffset < byteSize,
-      ...(nextOffset < byteSize ? { nextOffset } : {}),
+      eof: nextOffset >= byteSize,
+      kind: "found",
+      nextOffset,
+      offsetBytes: request.offsetBytes,
+      returnedBytes: chunk.length,
+      totalBytes: byteSize,
     };
   }
 
