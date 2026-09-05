@@ -24,9 +24,12 @@ class PostgresEndpointRejectedError extends Error {
 }
 
 class PostgresEndpointUnavailableError extends Error {
-  public constructor() {
+  public readonly details: Readonly<{ reason: "durability_timeout" }> | undefined;
+
+  public constructor(reason?: "durability_timeout") {
     super("PostgreSQL endpoint is unavailable or not a writable primary");
     this.name = "PostgresEndpointUnavailableError";
+    this.details = reason === undefined ? undefined : { reason };
   }
 }
 
@@ -244,5 +247,12 @@ function asError(error: unknown): Error {
 function endpointUnavailable(error: unknown): PostgresEndpointUnavailableError {
   return error instanceof PostgresEndpointUnavailableError
     ? error
-    : new PostgresEndpointUnavailableError();
+    : new PostgresEndpointUnavailableError(
+        isPostgresQueryTimeout(error) ? "durability_timeout" : undefined,
+      );
+}
+
+function isPostgresQueryTimeout(error: unknown): boolean {
+  if (isErrorWithCode(error) && error.code === "57014") return true;
+  return error instanceof Error && error.message.toLowerCase().includes("query read timeout");
 }

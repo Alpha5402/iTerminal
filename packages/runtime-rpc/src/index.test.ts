@@ -360,6 +360,71 @@ describe("UnixRuntimeClient delivery classification", () => {
     }
   });
 
+  it("round-trips compacted exact-scope history and enforces its distinct grant", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-history-lookup-"));
+    const secret = randomBytes(32);
+    const lookupActor = {
+      capabilities: ACTOR_CAPABILITY_PROFILES.agent,
+      client: "test-mcp",
+      id: "agent-rpc-test",
+      principal: "local-agent-test",
+      type: "agent",
+    } as const;
+    let calls = 0;
+    const server = await startRuntimeRpcServer({
+      authentication: { audience: "runtime-rpc-test", secret },
+      gateway: {
+        ...stubGateway(),
+        lookupHistory: (request) => {
+          calls += 1;
+          return Promise.resolve({
+            fact: {
+              acceptedAt: new Date(0).toISOString(),
+              actionId: "action-history-rpc",
+              actionStatus: "UNKNOWN",
+              actionType: "execute",
+              executionId: "execution-history-rpc",
+              executionStatus: "UNKNOWN",
+              targetType: "action",
+            },
+            generation: request.generation,
+            kind: "compacted",
+            retention: { expiredAt: new Date(1).toISOString(), state: "expired" },
+            sessionId: request.sessionId,
+            target: request.target,
+          });
+        },
+      },
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    const allowed = new UnixRuntimeClient(server.socketPath, {
+      authorization: signRuntimeRpcGrant(secret, exactAgentGrant(["history.lookup"])),
+    });
+    const denied = new UnixRuntimeClient(server.socketPath, {
+      authorization: signRuntimeRpcGrant(secret, exactAgentGrant(["action.lookup"])),
+    });
+    const request = {
+      actor: lookupActor,
+      generation: 3,
+      sessionId: "session-rpc",
+      target: { idempotencyKey: "history-rpc", type: "action" as const },
+    };
+    try {
+      await expect(allowed.lookupHistory(request)).resolves.toMatchObject({
+        kind: "compacted",
+        retention: { state: "expired" },
+      });
+      await expect(denied.lookupHistory(request)).rejects.toMatchObject({ code: "POLICY_DENIED" });
+      await expect(
+        allowed.lookupHistory({ ...request, actor: { ...lookupActor, principal: "forged" } }),
+      ).rejects.toMatchObject({ code: "POLICY_DENIED" });
+      expect(calls).toBe(1);
+    } finally {
+      await server.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
   it("negotiates and validates the live Runtime capability response", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-capabilities-"));
     const server = await startRuntimeRpcServer({

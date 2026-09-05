@@ -24,6 +24,8 @@ import {
   type InputRequest,
   type FinishSensitiveInputRequest,
   type GetSensitiveInputRequest,
+  type HistoryLookupRequest,
+  type HistoryLookupResult,
   type ListApprovalsRequest,
   type RequestExecuteApprovalRequest,
   type ReleaseInteractionGuardRequest,
@@ -121,6 +123,7 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
         "execution.observe.v1",
         "execution.output.read.v1",
         "execution.wait.v2",
+        "history.lookup.v1",
         "runtime.capabilities.v1",
         "runtime.owner-capabilities.v1",
       ],
@@ -145,6 +148,48 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
           mayStillBeInFlight: true,
           message:
             "No accepted Action is currently observable; the original request may still be in flight, so do not generate a replacement idempotency key",
+        };
+      }
+      if (
+        error instanceof RuntimeError &&
+        (error.code === "RUNTIME_UNAVAILABLE" || error.code === "OWNER_ROUTE_UNAVAILABLE")
+      ) {
+        return {
+          ...identity,
+          kind: "unavailable",
+          message: "The exact Runtime owner route is temporarily unavailable",
+          reason: "owner_route_unavailable",
+          retryable: true,
+        };
+      }
+      throw error;
+    }
+  }
+
+  public async lookupHistory(request: HistoryLookupRequest): Promise<HistoryLookupResult> {
+    const identity = {
+      generation: request.generation,
+      sessionId: request.sessionId,
+      target: request.target,
+    };
+    try {
+      return await this.#withSession(request.sessionId, "history.lookup", (client) => {
+        if (client.lookupHistory === undefined) {
+          throw new RuntimeError(
+            "RUNTIME_UNAVAILABLE",
+            "Target Runtime owner does not support durable history lookup",
+            { reason: "owner_capability_missing" },
+            true,
+          );
+        }
+        return client.lookupHistory(request);
+      });
+    } catch (error) {
+      if (error instanceof RuntimeError && error.code === "SESSION_NOT_FOUND") {
+        return {
+          ...identity,
+          kind: "not_found",
+          message: "No retained historical fact matches the exact Actor and Session scope",
         };
       }
       if (

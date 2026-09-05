@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { PostgresRuntimeRepository } from "./postgres-runtime-repository.js";
+import { PostgresRuntimeDurability } from "./postgres-runtime-durability.js";
 import { PostgresStorageMaintenanceRepository } from "./storage-maintenance.js";
 
 const databaseUrl = process.env.ITERM_DATABASE_URL;
@@ -12,6 +13,7 @@ describeDatabase("PostgresStorageMaintenanceRepository", () => {
   const databaseTarget = databaseUrl ?? "postgresql://localhost/iterminal_test";
   const maintenance = new PostgresStorageMaintenanceRepository(databaseTarget);
   const runtime = new PostgresRuntimeRepository(databaseTarget);
+  const history = new PostgresRuntimeDurability(databaseTarget);
   const pool = new Pool({ connectionString: databaseUrl });
 
   beforeAll(async () => {
@@ -41,6 +43,7 @@ describeDatabase("PostgresStorageMaintenanceRepository", () => {
   afterAll(async () => {
     await maintenance.close();
     await runtime.close();
+    await history.close();
     await pool.end();
   });
 
@@ -80,7 +83,7 @@ describeDatabase("PostgresStorageMaintenanceRepository", () => {
          ('action-eligible', 'session-stale', 1, 'agent-retention', 'execute', 1,
           'eligible-key', 'eligible-hash', '{"command":"eligible"}', 'COMPLETED', $1, $1),
          ('action-input', 'session-stale', 1, 'agent-retention', 'input', 2,
-          'input-key', 'input-hash', '{}', 'COMPLETED', $1, $1),
+          'input-key', 'input-hash', '{}', 'DELIVERED', $1, $1),
          ('action-event-pinned', 'session-stale', 1, 'agent-retention', 'execute', 3,
           'event-key', 'event-hash', '{"command":"event"}', 'COMPLETED', $1, $1),
          ('action-live', 'session-live', 1, 'agent-retention', 'execute', 1,
@@ -169,6 +172,40 @@ describeDatabase("PostgresStorageMaintenanceRepository", () => {
     await expectCounts({ actions: 2, approvals: 1, inbox: 2, outbox: 2 });
     expect(await ids("actions")).toEqual(["action-event-pinned", "action-live"]);
     expect(await ids("executions")).toEqual(["execution-event-pinned", "execution-live"]);
+    expect(await count("action_history_tombstones")).toBe(2);
+    expect(
+      await history.lookupHistory({
+        actor: agent("agent-retention"),
+        generation: 1,
+        sessionId: "session-stale",
+        target: { executionId: "execution-eligible", type: "execution" },
+      }),
+    ).toMatchObject({
+      fact: { executionId: "execution-eligible", executionStatus: "COMPLETED" },
+      kind: "compacted",
+      retention: { state: "expired" },
+    });
+    expect(
+      await history.lookupHistory({
+        actor: agent("agent-retention"),
+        generation: 2,
+        sessionId: "session-stale",
+        target: { executionId: "execution-eligible", type: "execution" },
+      }),
+    ).toBeUndefined();
+    await expect(
+      history.lookupHistory({
+        actor: { ...agent("agent-retention"), principal: "changed-principal" },
+        generation: 1,
+        sessionId: "session-stale",
+        target: { executionId: "execution-eligible", type: "execution" },
+      }),
+    ).rejects.toMatchObject({ code: "ACTOR_IDENTITY_CONFLICT" });
+    await expect(
+      pool.query(
+        "DELETE FROM session_generations WHERE session_id='session-stale' AND generation=1",
+      ),
+    ).rejects.toMatchObject({ code: "23503" });
 
     const liveReplay = await runtime.acceptExecute({
       acceptedAt: new Date("2026-08-31T12:01:00.000Z"),
@@ -199,7 +236,10 @@ describeDatabase("PostgresStorageMaintenanceRepository", () => {
         requestHash: "eligible-hash",
         sessionId: "session-stale",
       }),
-    ).rejects.toMatchObject({ code: "SESSION_GENERATION_CHANGED" });
+    ).rejects.toMatchObject({
+      code: "IDEMPOTENCY_KEY_REUSED",
+      details: { reason: "history_expired" },
+    });
     await expectCounts({ actions: 2, approvals: 1, inbox: 2, outbox: 2 });
   });
 
@@ -230,6 +270,51 @@ describeDatabase("PostgresStorageMaintenanceRepository", () => {
     } finally {
       await competitor.close();
     }
+  });
+
+  it("does not delete a source Action when an idempotency tombstone conflicts", async () => {
+    const old = "2026-08-20T00:00:00.000Z";
+    await pool.query(
+      `INSERT INTO actors (id, actor_type, principal, client, capabilities, created_at)
+       VALUES ('agent-conflict', 'agent', 'agent-conflict', 'test', $1, $2)`,
+      [ACTOR_CAPABILITY_PROFILES.agent, old],
+    );
+    await pool.query(
+      `INSERT INTO sessions
+         (id, current_generation, status, shell, workspace_root, owner_id, created_at, updated_at)
+       VALUES ('session-conflict', 1, 'CLOSED', 'zsh', '/tmp', 'owner-retention', $1, $1)`,
+      [old],
+    );
+    await pool.query(
+      `INSERT INTO session_generations
+         (session_id, generation, owner_id, integration_version, status,
+          next_event_sequence, started_at, closed_at)
+       VALUES ('session-conflict', 1, 'owner-retention', 'test', 'CLOSED', 0, $1, $1)`,
+      [old],
+    );
+    await pool.query(
+      `INSERT INTO action_history_tombstones
+         (session_id, session_generation, actor_id, idempotency_key, request_hash,
+          action_id, action_kind, action_status, accepted_at, compacted_at)
+       VALUES ('session-conflict', 1, 'agent-conflict', 'conflict-key', 'other-hash',
+          'action-other', 'input', 'DELIVERED', $1, $1)`,
+      [old],
+    );
+    await pool.query(
+      `INSERT INTO actions
+         (id, session_id, session_generation, actor_id, kind, action_sequence,
+          idempotency_key, request_hash, payload, status, accepted_at, updated_at)
+       VALUES ('action-source', 'session-conflict', 1, 'agent-conflict', 'input', 1,
+          'conflict-key', 'source-hash', '{"data":"x","targetExecutionId":"e"}',
+          'DELIVERED', $1, $1)`,
+      [old],
+    );
+
+    expect(
+      await maintenance.maintainDurableFacts(new Date("2026-08-31T12:00:00.000Z")),
+    ).toMatchObject({ deletedActions: 0 });
+    expect(await ids("actions")).toEqual(["action-source"]);
+    expect(await count("action_history_tombstones")).toBe(1);
   });
 
   it("reports exact PostgreSQL allocation with healthy, warning, and critical states", async () => {
@@ -265,6 +350,35 @@ describeDatabase("PostgresStorageMaintenanceRepository", () => {
     expect(BigInt(critical.usedBytes)).toBeGreaterThan(1n);
   });
 
+  it("surfaces a PostgreSQL history statement timeout instead of returning a miss", async () => {
+    await pool.query(
+      `INSERT INTO actors (id, actor_type, principal, client, capabilities)
+       VALUES ('agent-timeout', 'agent', 'agent-timeout', 'test', $1)`,
+      [ACTOR_CAPABILITY_PROFILES.agent],
+    );
+    const locker = await pool.connect();
+    const timed = new PostgresRuntimeDurability(databaseTarget, {
+      poolMax: 1,
+      statementTimeoutMilliseconds: 50,
+    });
+    try {
+      await locker.query("BEGIN");
+      await locker.query("LOCK TABLE actions IN ACCESS EXCLUSIVE MODE");
+      await expect(
+        timed.lookupHistory({
+          actor: agent("agent-timeout"),
+          generation: 1,
+          sessionId: "session-timeout",
+          target: { idempotencyKey: "timeout-key", type: "action" },
+        }),
+      ).rejects.toMatchObject({ details: { reason: "durability_timeout" } });
+    } finally {
+      await locker.query("ROLLBACK");
+      locker.release();
+      await timed.close();
+    }
+  });
+
   async function expectCounts(expected: {
     actions: number;
     approvals: number;
@@ -277,7 +391,9 @@ describeDatabase("PostgresStorageMaintenanceRepository", () => {
     expect(await count("outbox")).toBe(expected.outbox);
   }
 
-  async function count(table: "actions" | "approvals" | "consumer_inbox" | "outbox") {
+  async function count(
+    table: "action_history_tombstones" | "actions" | "approvals" | "consumer_inbox" | "outbox",
+  ) {
     const result = await pool.query<{ count: string }>(`SELECT count(*) FROM ${table}`);
     return Number(result.rows[0]?.count ?? "0");
   }

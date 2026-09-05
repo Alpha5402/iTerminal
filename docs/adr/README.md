@@ -106,6 +106,10 @@ See also [ADR-0073](./0073-compact-execution-observation.md): compose one bounde
 immediate durable output read into an exact-scope compact Agent observation without exposing
 internal Action or Execution records.
 
+See also [ADR-0074](./0074-durable-history-and-idempotency-tombstones.md): add exact-scope durable
+Action/Execution history, transactional retention tombstones, and pre-side-effect durable Action
+replay checks without reconstructing live PTY state.
+
 Statuses:
 
 - Proposed: evidence or owner decision is still required.

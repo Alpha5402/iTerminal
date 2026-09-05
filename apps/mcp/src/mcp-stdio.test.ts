@@ -54,6 +54,7 @@ describe("M4 stdio MCP bridge", () => {
       "execution_output_read",
       "execution_wait",
       "execution_wait_v2",
+      "history_lookup",
       "input",
       "interaction_get",
       "runtime_capabilities",
@@ -91,6 +92,14 @@ describe("M4 stdio MCP bridge", () => {
     expect(capabilities.features).not.toContain("artifact.read.v1");
     expect(capabilities.features).not.toContain("execution.output.read.v1");
     expect(capabilities.features).not.toContain("execution.observe.v1");
+    expect(capabilities.features).not.toContain("history.lookup.v1");
+    expect(
+      await callTool<HistoryLookupResult>(first, "history_lookup", {
+        generation: 1,
+        sessionId: "session-no-durable-history",
+        target: { idempotencyKey: "missing-history", type: "action" },
+      }),
+    ).toMatchObject({ kind: "unavailable", reason: "durability_unavailable" });
     expect(
       await callTool<ArtifactReadResult>(first, "artifact_read", {
         artifactId: "art-no-durable-reader",
@@ -639,6 +648,10 @@ type ActionLookupResult = {
   readonly executionStatus?: string;
   readonly kind: string;
   readonly mayStillBeInFlight?: boolean;
+};
+type HistoryLookupResult = {
+  readonly kind: string;
+  readonly reason?: string;
 };
 
 type ArtifactReadResult = {

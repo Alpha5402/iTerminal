@@ -23,6 +23,8 @@ import {
   executionWaitV2ResultSchema,
   executionWaitV2TransportRequestSchema,
   executeTransportRequestSchema,
+  historyLookupResultSchema,
+  historyLookupTransportRequestSchema,
   inputTransportRequestSchema,
   runtimeCapabilitiesRequestSchema,
   runtimeCapabilitiesSchema,
@@ -68,6 +70,52 @@ describe("public Execute/Input request schemas", () => {
 });
 
 describe("canonical transport schemas", () => {
+  it("binds durable history facts to exact targets and terminal tombstones", () => {
+    const request = historyLookupTransportRequestSchema.parse({
+      generation: 2,
+      sessionId: "session-history",
+      target: { executionId: "execution-history", type: "execution" },
+    });
+    const fact = {
+      acceptedAt: new Date(0).toISOString(),
+      actionId: "action-history",
+      actionStatus: "COMPLETED" as const,
+      executionId: "execution-history",
+      executionStatus: "COMPLETED" as const,
+      targetType: "execution" as const,
+    };
+    expect(
+      historyLookupResultSchema.parse({
+        fact,
+        generation: request.generation,
+        kind: "compacted",
+        retention: { expiredAt: new Date(1).toISOString(), state: "expired" },
+        sessionId: request.sessionId,
+        target: request.target,
+      }),
+    ).toMatchObject({ kind: "compacted", retention: { state: "expired" } });
+    expect(() =>
+      historyLookupResultSchema.parse({
+        fact: { ...fact, executionId: "execution-other" },
+        generation: request.generation,
+        kind: "full",
+        sessionId: request.sessionId,
+        source: "durable",
+        target: request.target,
+      }),
+    ).toThrow();
+    expect(() =>
+      historyLookupResultSchema.parse({
+        fact: { ...fact, actionStatus: "RUNNING", executionStatus: "RUNNING" },
+        generation: request.generation,
+        kind: "compacted",
+        retention: { expiredAt: new Date(1).toISOString(), state: "expired" },
+        sessionId: request.sessionId,
+        target: request.target,
+      }),
+    ).toThrow();
+  });
+
   it("bounds Execution wait v2 and defines completed as terminal, not successful", () => {
     expect(executionWaitV2TransportRequestSchema.parse({ executionId: "execution-1" })).toEqual({
       executionId: "execution-1",
