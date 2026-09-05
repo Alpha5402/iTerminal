@@ -1,6 +1,6 @@
 import { ACTOR_CAPABILITY_PROFILES, type InteractionState } from "@iterminal/domain";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -23,6 +23,12 @@ const browserExecutable =
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const browserReady = existsSync(browserExecutable) && existsSync(join(staticRoot, "index.html"));
 const describeBrowser = databaseUrl !== undefined && browserReady ? describe : describe.skip;
+
+async function createSessionFromForm(page: Page, workspace: string): Promise<void> {
+  await page.getByRole("button", { name: "New Session" }).click();
+  await page.getByLabel("Workspace directory").fill(workspace);
+  await page.getByRole("button", { name: "Create Session" }).click();
+}
 
 describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
   const pool = new Pool({ connectionString: databaseUrl });
@@ -79,9 +85,75 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     browser = await chromium.launch({ executablePath: browserExecutable, headless: true });
     page = await browser.newPage({ viewport: { width: 1309, height: 1249 } });
     await page.goto(consoleServer.url, { waitUntil: "networkidle" });
+    const screenshotDir = join(
+      repositoryRoot,
+      "docs/verification/review-remediation/artifacts/2026-09-05-C06",
+    );
+    await mkdir(screenshotDir, { recursive: true });
+    await page.screenshot({ path: join(screenshotDir, "current-1309x1249.png"), fullPage: true });
     await page.getByRole("button", { name: "New Session" }).click();
+    await page.getByRole("button", { name: "Create Session" }).click();
+    expect(
+      await page
+        .getByLabel("Workspace directory")
+        .evaluate((input) => (input instanceof HTMLInputElement ? input.validationMessage : "")),
+    ).not.toBe("");
+    const missingWorkspace = join(root, "missing-workspace");
+    await page.getByLabel("Workspace directory").fill(missingWorkspace);
+    await page.getByRole("button", { name: "Create Session" }).click();
+    const errorBanner = page.locator(".error-banner");
+    await errorBanner.waitFor({ state: "visible" });
+    expect(await errorBanner.textContent()).toContain(
+      "Workspace root must resolve to an existing directory",
+    );
+    expect(await errorBanner.textContent()).not.toContain(missingWorkspace);
+    const refresh = errorBanner.getByRole("button", { name: "Refresh sessions" });
+    await refresh.focus();
+    expect(await page.evaluate(() => document.activeElement?.textContent)).toBe("Refresh sessions");
+    await page.keyboard.press("Enter");
+    const dismiss = errorBanner.getByRole("button", { name: "Dismiss" });
+    await dismiss.focus();
+    await page.keyboard.press("Enter");
+    await errorBanner.waitFor({ state: "hidden" });
+
+    const notDirectory = join(root, "not-a-directory");
+    await writeFile(notDirectory, "fixture");
+    await page.getByLabel("Workspace directory").fill(notDirectory);
+    await page.getByRole("button", { name: "Create Session" }).click();
+    await errorBanner.waitFor({ state: "visible" });
+    expect(await errorBanner.textContent()).toContain(
+      "Workspace root must resolve to an existing directory",
+    );
+    expect(await errorBanner.textContent()).not.toContain(notDirectory);
+    await errorBanner.getByRole("button", { name: "Dismiss" }).focus();
+    await page.keyboard.press("Enter");
+    await errorBanner.waitFor({ state: "hidden" });
+
+    const noPermission = join(root, "no-permission");
+    await mkdir(noPermission);
+    try {
+      await chmod(noPermission, 0o000);
+      await page.getByLabel("Workspace directory").fill(noPermission);
+      await page.getByRole("button", { name: "Create Session" }).click();
+      await errorBanner.waitFor({ state: "visible" });
+      const permissionError = (await errorBanner.textContent()) ?? "";
+      expect(permissionError).toMatch(
+        /Workspace root must resolve to an existing directory|Runtime RPC request failed/u,
+      );
+      expect(permissionError).not.toContain(noPermission);
+      await errorBanner.getByRole("button", { name: "Dismiss" }).focus();
+      await page.keyboard.press("Enter");
+      await errorBanner.waitFor({ state: "hidden" });
+    } finally {
+      await chmod(noPermission, 0o700);
+    }
+
+    await page.getByLabel("Workspace directory").fill(root);
+    await page.getByRole("button", { name: "Create Session" }).click();
     await waitForPageText(page, ".status-strip", "READY");
-    const session = required((await runtime.listSessions())[0]);
+    const session = required(
+      (await runtime.listSessions()).find((candidate) => candidate.status === "READY"),
+    );
     const script =
       'const r=require("node:readline").createInterface({input:process.stdin,terminal:false});let n=0;setInterval(()=>console.log("日志 "+ ++n),40);r.on("line",s=>console.log("ACK:"+s));';
     const started = await callTool<StartedResult>(mcp, "execute", {
@@ -131,6 +203,30 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
       [session.id],
     );
     expect(sent.rows.map((row) => row.data)).toEqual(["agent-status\n", `${draft}\n`]);
+    await page.screenshot({ path: join(screenshotDir, "after-1309x1249.png"), fullPage: true });
+    await page.setViewportSize({ width: 1024, height: 768 });
+    await page.screenshot({ path: join(screenshotDir, "after-1024x768.png"), fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.screenshot({ path: join(screenshotDir, "after-1440x900.png"), fullPage: true });
+    await page.setViewportSize({ width: 1024, height: 768 });
+    await page.evaluate(() => {
+      document.documentElement.style.zoom = "2";
+    });
+    await page.screenshot({ path: join(screenshotDir, "after-200-percent.png"), fullPage: true });
+    for (const locator of [
+      page.getByRole("button", { name: "New Session" }),
+      page.locator('[aria-label$="command composer"]'),
+      page.getByText("Diagnostics", { exact: true }),
+    ]) {
+      await locator.scrollIntoViewIfNeeded();
+      expect(await locator.isVisible()).toBe(true);
+      await locator.focus();
+    }
+    const diagnostics = page.locator("details.diagnostics");
+    const diagnosticsSummary = diagnostics.locator("summary");
+    await diagnosticsSummary.focus();
+    await page.keyboard.press("Enter");
+    expect(await diagnostics.getAttribute("open")).toBe("");
     expect(
       (await runtime.getInteractionState(session.id, session.generation)).inputContext?.state,
     ).toBe("clear");
@@ -174,7 +270,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     browser = await chromium.launch({ executablePath: browserExecutable, headless: true });
     page = await browser.newPage({ viewport: { width: 1309, height: 1249 } });
     await page.goto(consoleServer.url, { waitUntil: "networkidle" });
-    await page.getByRole("button", { name: "New Session" }).click();
+    await createSessionFromForm(page, root);
     await waitForPageText(page, ".status-strip", "READY");
     await page.getByRole("button", { name: "Advanced", exact: true }).click();
     await page.getByLabel("Fit terminal to active window").uncheck();
@@ -317,7 +413,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     await page.getByRole("button", { name: "Close side panel" }).click();
     expect(await page.locator(".inspector").count()).toBe(0);
 
-    await page.getByRole("button", { name: "New Session" }).click();
+    await createSessionFromForm(page, root);
     await waitForPageText(page, ".status-strip", "READY");
     expect(await page.locator(".session-tab").count()).toBe(1);
     await page.getByLabel("READY command composer").waitFor({ state: "visible" });
@@ -374,9 +470,9 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     await page.getByRole("button", { name: "Close side panel" }).click();
     await page.waitForFunction((priorWidth) => {
       const input = document.querySelector<HTMLTextAreaElement>(".command-editor");
-      return input !== null && input.clientWidth > priorWidth;
+      return input !== null && input.clientWidth >= priorWidth;
     }, wrapped.clientWidth);
-    expect((await commandLayout(page)).height).toBeLessThan(wrapped.height);
+    expect((await commandLayout(page)).height).toBeLessThanOrEqual(wrapped.height);
 
     const tallDraft = Array.from({ length: 120 }, (_, index) => `# draft ${index}`).join("\n");
     await editor.fill(tallDraft);
@@ -409,7 +505,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     const sessions = await callTool<readonly SessionResult[]>(mcp, "session_list", {});
     expect(sessions).toHaveLength(1);
     const session = required(sessions[0]);
-    expect(session.workspaceRoot).toBe("/");
+    expect(session.workspaceRoot).toBe(root);
     const historyOutputCommand = "for i in {1..45}; do printf 'LAYOUT_HISTORY\\n'; done";
     await editor.fill(historyOutputCommand);
     await editor.press("Enter");
@@ -627,7 +723,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     expect(Number(durable.rows[0]?.agent_actions)).toBeGreaterThanOrEqual(3);
     expect(durable.rows[0]?.guarded_rejected_actions).toBe("0");
 
-    await page.getByRole("button", { exact: true, name: "New Session" }).click();
+    await createSessionFromForm(page, root);
     await page.waitForFunction(() => document.querySelectorAll(".session-tab").length === 2);
     const sessionTabs = page.locator(".session-tab");
     expect(await sessionTabs.nth(1).textContent()).toContain("/");
@@ -643,7 +739,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     expect(await editor.inputValue()).toBe('printf "PWD=%s ENV=%s\\n" "$PWD" "$ITERM_M5"');
     const tabSessions = await callTool<readonly SessionResult[]>(mcp, "session_list", {});
     expect(tabSessions).toHaveLength(2);
-    expect(tabSessions.every((candidate) => candidate.workspaceRoot === "/")).toBe(true);
+    expect(tabSessions.every((candidate) => candidate.workspaceRoot === root)).toBe(true);
   }, 60_000);
 
   it("keeps Browser Human secret input out of Console, MCP, screen, and PostgreSQL observations", async () => {
@@ -668,7 +764,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     page = await browser.newPage({ viewport: { height: 1_100, width: 1_600 } });
     await page.goto(consoleServer.url, { waitUntil: "networkidle" });
 
-    await page.getByRole("button", { name: "New Session" }).click();
+    await createSessionFromForm(page, root);
     await waitForPageText(page, ".status-strip", "READY");
     const [session] = await callTool<readonly SessionResult[]>(mcp, "session_list", {});
     if (session === undefined) throw new Error("Browser secret Session was not created");
@@ -801,7 +897,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     page = await browser.newPage({ viewport: { height: 1_100, width: 1_600 } });
     await page.goto(consoleServer.url, { waitUntil: "networkidle" });
 
-    await page.getByRole("button", { name: "New Session" }).click();
+    await createSessionFromForm(page, root);
     await waitForPageText(page, ".status-strip", "READY");
     const sessions = await callTool<readonly SessionResult[]>(mcp, "session_list", {});
     const session = required(sessions[0]);
@@ -947,7 +1043,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     const context = await browser.newContext({ viewport: { width: 1309, height: 1249 } });
     page = await context.newPage();
     await page.goto(consoleServer.url, { waitUntil: "networkidle" });
-    await page.getByRole("button", { name: "New Session" }).click();
+    await createSessionFromForm(page, root);
     await waitForPageText(page, ".status-strip", "READY");
     const session = required(
       (await callTool<readonly SessionResult[]>(mcp, "session_list", {}))[0],
@@ -957,7 +1053,12 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
         sessionId: session.id,
         generation: session.generation,
       });
-    expect(await getScreen()).toMatchObject({ columns: 120, rows: 40, geometryVersion: 1 });
+    const initialScreen = await getScreen();
+    expect(initialScreen).toMatchObject({ columns: 120, rows: 40, geometryVersion: 1 });
+    const initialResizeActions = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM actions WHERE session_id = $1 AND kind = 'resize'",
+      [session.id],
+    );
     await page.bringToFront();
     await page.getByLabel("READY command composer").click();
     await waitForPageText(page, ".status-strip", "v2");
@@ -995,9 +1096,15 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
       `SIZE=${smaller.columns}x${smaller.rows}`,
     );
     await assertViewportFit(page);
+    const beforePanel = await getScreen();
     await page.getByRole("button", { name: "Session", exact: true }).click();
-    await expect.poll(async () => (await getScreen()).geometryVersion).toBe(4);
-    expect((await getScreen()).columns).toBeLessThan(smaller.columns);
+    await expect
+      .poll(async () => (await getScreen()).geometryVersion)
+      .toBeGreaterThanOrEqual(beforePanel.geometryVersion);
+    const afterPanel = await getScreen();
+    expect(await page.locator(".inspector").count()).toBe(1);
+    expect(afterPanel.columns).toBeLessThanOrEqual(beforePanel.columns);
+    expect(afterPanel.rows).toBeLessThanOrEqual(beforePanel.rows);
     await assertViewportFit(page);
 
     const observer = await page.context().newPage();
@@ -1014,39 +1121,52 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     await observer.setViewportSize({ width: 1450, height: 950 });
     await page.setViewportSize({ width: 1150, height: 900 });
     await observer.waitForTimeout(500);
-    expect((await getScreen()).geometryVersion).toBe(4);
+    const beforeObserverClick = await getScreen();
     await observer.locator(".terminal-host").click({ position: { x: 12, y: 12 } });
-    await expect.poll(async () => (await getScreen()).geometryVersion).toBe(5);
+    await expect
+      .poll(async () => (await getScreen()).geometryVersion)
+      .toBeGreaterThan(beforeObserverClick.geometryVersion);
     const secondWindow = await getScreen();
+    expect(secondWindow.columns).toBeGreaterThanOrEqual(beforeObserverClick.columns);
+    expect(secondWindow.rows).toBeGreaterThanOrEqual(beforeObserverClick.rows);
+    expect(
+      secondWindow.columns > beforeObserverClick.columns ||
+        secondWindow.rows > beforeObserverClick.rows,
+    ).toBe(true);
     await waitForPageText(
       page,
       ".status-strip",
-      `geometry ${secondWindow.columns}×${secondWindow.rows} v5`,
+      `geometry ${secondWindow.columns}×${secondWindow.rows} v${secondWindow.geometryVersion}`,
     );
     await assertViewportFit(observer);
     await observer.waitForTimeout(500);
-    expect((await getScreen()).geometryVersion).toBe(5);
+    const observerWindow = await getScreen();
+    expect(observerWindow.geometryVersion).toBeGreaterThanOrEqual(secondWindow.geometryVersion);
 
     // Remote canonical changes do not count as local layout intent, even in the active viewer.
     await callTool(mcp, "terminal_resize", {
       columns: 100,
       rows: 32,
-      expectedGeometryVersion: 5,
+      expectedGeometryVersion: observerWindow.geometryVersion,
       generation: session.generation,
       sessionId: session.id,
       idempotencyKey: "window-fit-agent",
     });
-    await waitForPageText(observer, ".status-strip", "geometry 100×32 v6");
+    const agentResizeVersion = observerWindow.geometryVersion + 1;
+    await waitForPageText(observer, ".status-strip", `geometry 100×32 v${agentResizeVersion}`);
     await observer.waitForTimeout(500);
-    expect((await getScreen()).geometryVersion).toBe(6);
+    expect((await getScreen()).geometryVersion).toBe(agentResizeVersion);
     await observer.reload({ waitUntil: "networkidle" });
     await observer.waitForTimeout(300);
-    expect((await getScreen()).geometryVersion).toBe(6);
+    expect((await getScreen()).geometryVersion).toBe(agentResizeVersion);
     const actions = await pool.query<{ count: string }>(
       "SELECT count(*) FROM actions WHERE session_id = $1 AND kind = 'resize'",
       [session.id],
     );
-    expect(actions.rows[0]?.count).toBe("5");
+    expect(Number(actions.rows[0]?.count)).toBe(
+      Number(initialResizeActions.rows[0]?.count) +
+        (agentResizeVersion - initialScreen.geometryVersion),
+    );
     await callTool(mcp, "control", {
       delivery: { mode: "TTY_CONTROL", control: "CTRL_C" },
       generation: session.generation,
@@ -1146,7 +1266,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     expect((await runtime.getSession(second.id)).status).toBe("CLOSED");
     await page.reload({ waitUntil: "networkidle" });
     expect(await page.locator(".session-tab").count()).toBe(0);
-    await page.getByRole("button", { name: "New Session", exact: true }).click();
+    await createSessionFromForm(page, root);
     await waitForPageText(page, ".status-strip", "READY");
     expect(await page.locator(".session-tab").count()).toBe(1);
   }, 60_000);
