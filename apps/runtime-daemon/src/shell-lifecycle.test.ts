@@ -21,6 +21,14 @@ const agent: Actor = {
   type: "agent",
 };
 
+const human: Actor = {
+  capabilities: ACTOR_CAPABILITY_PROFILES.human,
+  client: "a02-shell-lifecycle-test",
+  id: "human-a02-shell-lifecycle",
+  principal: "local-a02-shell-lifecycle",
+  type: "human",
+};
+
 afterEach(async () => {
   for (const daemon of daemons.splice(0)) await daemon.close().catch(() => undefined);
   for (const fixture of fixtures.splice(0)) {
@@ -77,7 +85,77 @@ describe("A01 real PTY Shell lifecycle", () => {
   });
 });
 
-async function createFixtureRuntime(label: string): Promise<
+describe("A02 real PTY execution lifetime", () => {
+  it("keeps a sleep observable and controllable after a bounded observation timeout", async () => {
+    const { daemon, sessionId, generation } = await createFixtureRuntime("observation-timeout");
+    const sleeping = await daemon.runtime.startExecute({
+      actor: agent,
+      command: "sleep 30",
+      idempotencyKey: "a02-observation-timeout",
+      sessionGeneration: generation,
+      sessionId,
+    });
+    await sleeping.started;
+
+    const observation = await daemon.runtime.waitForScreen({
+      condition: { executionId: sleeping.execution.id, type: "execution_exit" },
+      generation,
+      sessionId,
+      timeoutMilliseconds: 25,
+    });
+
+    expect(observation).toMatchObject({ matched: false, reason: "timeout" });
+    expect(daemon.runtime.getExecution(sleeping.execution.id).status).toBe("RUNNING");
+    const control = await daemon.runtime.sendControl({
+      actor: human,
+      delivery: { control: "CTRL_C", mode: "TTY_CONTROL" },
+      idempotencyKey: "a02-control-after-observation-timeout",
+      sessionGeneration: generation,
+      sessionId,
+      targetExecutionId: sleeping.execution.id,
+    });
+    expect(control.status).toBe("DELIVERED");
+    await expect(sleeping.completion).resolves.toMatchObject({
+      exitCode: 130,
+      status: "INTERRUPTED",
+    });
+    expect(daemon.runtime.getSession(sessionId).status).toBe("READY");
+  }, 20_000);
+
+  it("releases its fixture Shell when Application fails after accepting the dispatch write", async () => {
+    const { daemon, sessionId, generation, shellPid } = await createFixtureRuntime(
+      "fatal-after-write",
+      {
+        afterExecutionWrite: () => {
+          throw new Error("Injected fatal after dispatch write");
+        },
+      },
+    );
+    const execution = await daemon.runtime.startExecute({
+      actor: agent,
+      command: "sleep 30",
+      idempotencyKey: "a02-fatal-after-write",
+      sessionGeneration: generation,
+      sessionId,
+    });
+
+    await expect(execution.completion).rejects.toMatchObject({ code: "DELIVERY_UNKNOWN" });
+    await waitFor(() => daemon.runtime.getSession(sessionId).status === "BROKEN");
+    await waitFor(() => !processExists(shellPid));
+
+    expect(daemon.runtime.getExecution(execution.execution.id)).toMatchObject({
+      status: "UNKNOWN",
+    });
+    const events = await daemon.runtime.queryEvents(sessionId, generation, 0, 500);
+    expect(events.events.filter((event) => event.type === "execution.unknown")).toHaveLength(1);
+    expect(events.events.filter((event) => event.type === "execution.failed")).toHaveLength(0);
+  }, 20_000);
+});
+
+async function createFixtureRuntime(
+  label: string,
+  hooks?: Readonly<{ afterExecutionWrite?: () => void }>,
+): Promise<
   Readonly<{
     daemon: RuntimeDaemonHandle;
     generation: number;
@@ -92,6 +170,7 @@ async function createFixtureRuntime(label: string): Promise<
   await mkdir(workspace);
   const daemon = await startRuntimeDaemon({
     ...(databaseUrl === undefined ? {} : { databaseUrl }),
+    ...(hooks === undefined ? {} : { hooks }),
     ownerId: `owner-a01-${label}-${randomUUID()}`,
     socketPath: join(root, "runtime.sock"),
   });
@@ -107,6 +186,15 @@ async function createFixtureRuntime(label: string): Promise<
   const shellPid = ready?.payload.shellPid;
   if (typeof shellPid !== "number") throw new Error("Fixture Shell PID was not observed");
   return { daemon, generation: session.generation, sessionId: session.id, shellPid };
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return typeof error === "object" && error !== null && "code" in error && error.code === "EPERM";
+  }
 }
 
 function killFixtureShell(shellPid: number): void {

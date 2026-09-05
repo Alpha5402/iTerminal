@@ -35,6 +35,7 @@ export interface ShellExecutionResult {
 
 export interface ShellExecuteCallbacks {
   readonly onStarted: (observedCommand: string) => void;
+  readonly onWriteAccepted?: () => void;
 }
 
 export interface ShellExecutorLifecycleEvent {

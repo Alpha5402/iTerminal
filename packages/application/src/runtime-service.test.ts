@@ -374,6 +374,136 @@ describe("A01 Shell lifecycle", () => {
   });
 });
 
+describe("A02 fatal execution settlement", () => {
+  it("marks a definite pre-write adapter rejection FAILED and releases its executor", async () => {
+    const factory = new FailureMatrixExecutorFactory("before_write_failure");
+    const runtime = new RuntimeService(new MemoryRuntimeStore(), factory);
+    const session = await runtime.createSession({
+      shell: "zsh",
+      workspaceRoot: createWorkspace(),
+    });
+    const started = await runtime.startExecute({
+      actor: agentActor,
+      command: "printf 'not-written\n'",
+      idempotencyKey: "a02-before-write",
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+    });
+
+    await expect(started.started).rejects.toThrow("Fixture rejected before write");
+    await expect(started.completion).rejects.toThrow("Fixture rejected before write");
+    expect(runtime.getExecution(started.execution.id).status).toBe("FAILED");
+    expect(runtime.getSession(session.id).status).toBe("BROKEN");
+    expect(factory.latest().closeCount).toBe(1);
+    const events = await runtime.queryEvents(session.id, session.generation, 0, 500);
+    expect(events.events.filter((event) => event.type === "execution.failed")).toHaveLength(1);
+    expect(events.events.filter((event) => event.type === "execution.unknown")).toHaveLength(0);
+  });
+
+  it("marks an accepted write without completion UNKNOWN and releases its executor", async () => {
+    const factory = new FailureMatrixExecutorFactory("after_write_failure");
+    const runtime = new RuntimeService(new MemoryRuntimeStore(), factory);
+    const session = await runtime.createSession({
+      shell: "zsh",
+      workspaceRoot: createWorkspace(),
+    });
+    const started = await runtime.startExecute({
+      actor: agentActor,
+      command: "printf 'delivery-uncertain\n'",
+      idempotencyKey: "a02-after-write",
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+    });
+
+    await expect(started.started).rejects.toMatchObject({ code: "DELIVERY_UNKNOWN" });
+    await expect(started.completion).rejects.toMatchObject({ code: "DELIVERY_UNKNOWN" });
+    const execution = runtime.getExecution(started.execution.id);
+    expect(execution.status).toBe("UNKNOWN");
+    expect(execution.exitCode).toBeUndefined();
+    expect(runtime.getSession(session.id).status).toBe("BROKEN");
+    expect(factory.latest().closeCount).toBe(1);
+    const events = await runtime.queryEvents(session.id, session.generation, 0, 500);
+    expect(events.events.filter((event) => event.type === "execution.unknown")).toHaveLength(1);
+    expect(events.events.filter((event) => event.type === "execution.failed")).toHaveLength(0);
+  });
+
+  it("settles a pre-start accepted write in external dispatch without deadlocking", async () => {
+    const factory = new FailureMatrixExecutorFactory("after_write_failure");
+    const runtime = new RuntimeService(new MemoryRuntimeStore(), factory, {
+      executionDispatch: "external",
+    });
+    const session = await runtime.createSession({
+      shell: "zsh",
+      workspaceRoot: createWorkspace(),
+    });
+    const admitted = await runtime.startExecute({
+      actor: agentActor,
+      command: "printf 'external-delivery-uncertain\n'",
+      idempotencyKey: "a02-external-after-write",
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+    });
+
+    await expect(runtime.dispatchExecution(admitted.execution.id)).rejects.toMatchObject({
+      code: "DELIVERY_UNKNOWN",
+    });
+    await expect(admitted.completion).rejects.toMatchObject({ code: "DELIVERY_UNKNOWN" });
+    expect(runtime.getExecution(admitted.execution.id).status).toBe("UNKNOWN");
+    expect(runtime.getSession(session.id).status).toBe("BROKEN");
+    expect(factory.latest().closeCount).toBe(1);
+  });
+
+  it("keeps a real completion result and the executor writable for the next action", async () => {
+    const factory = new FailureMatrixExecutorFactory("completion");
+    const runtime = new RuntimeService(new MemoryRuntimeStore(), factory);
+    const session = await runtime.createSession({
+      shell: "zsh",
+      workspaceRoot: createWorkspace(),
+    });
+
+    const completed = await runtime.execute({
+      actor: agentActor,
+      command: "true",
+      idempotencyKey: "a02-completed",
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+    });
+
+    expect(completed.status).toBe("COMPLETED");
+    expect(completed.exitCode).toBe(0);
+    expect(runtime.getSession(session.id).status).toBe("READY");
+    expect(factory.latest().closeCount).toBe(0);
+    await runtime.closeSession(session.id, session.generation);
+  });
+
+  it("preserves an observed completion through external dispatch", async () => {
+    const factory = new FailureMatrixExecutorFactory("completion");
+    const runtime = new RuntimeService(new MemoryRuntimeStore(), factory, {
+      executionDispatch: "external",
+    });
+    const session = await runtime.createSession({
+      shell: "zsh",
+      workspaceRoot: createWorkspace(),
+    });
+    const admitted = await runtime.startExecute({
+      actor: agentActor,
+      command: "true",
+      idempotencyKey: "a02-external-completed",
+      sessionGeneration: session.generation,
+      sessionId: session.id,
+    });
+
+    const dispatched = await runtime.dispatchExecution(admitted.execution.id);
+    await expect(dispatched.completion).resolves.toMatchObject({
+      exitCode: 0,
+      status: "COMPLETED",
+    });
+    expect(runtime.getSession(session.id).status).toBe("READY");
+    expect(factory.latest().closeCount).toBe(0);
+    await runtime.closeSession(session.id, session.generation);
+  });
+});
+
 function createWorkspace(): string {
   const workspace = mkdtempSync(join(tmpdir(), "iterminal-m1-test-"));
   mkdirSync(join(workspace, "packages", "web"), { recursive: true });
@@ -456,6 +586,78 @@ class LifecycleExecutor implements ShellExecutor {
   public sendControl(): void {}
   public resize(): void {}
   public close(): void {}
+}
+
+type FailureMatrixMode = "before_write_failure" | "after_write_failure" | "completion";
+
+class FailureMatrixExecutorFactory implements ShellExecutorFactory {
+  #executor: FailureMatrixExecutor | undefined;
+
+  public constructor(private readonly mode: FailureMatrixMode) {}
+
+  public create(options: CreateExecutorOptions): Promise<ShellExecutor> {
+    this.#executor = new FailureMatrixExecutor(options, this.mode);
+    return Promise.resolve(this.#executor);
+  }
+
+  public latest(): FailureMatrixExecutor {
+    if (this.#executor === undefined) throw new Error("No failure-matrix executor was created");
+    return this.#executor;
+  }
+}
+
+class FailureMatrixExecutor implements ShellExecutor {
+  public readonly shellPid = 424_243;
+  public readonly shell: ShellKind;
+  public closeCount = 0;
+
+  public constructor(
+    private readonly options: CreateExecutorOptions,
+    private readonly mode: FailureMatrixMode,
+  ) {
+    this.shell = options.shell;
+  }
+
+  public checkpoint(): Readonly<{
+    cwd: string;
+    filteredEnvironment: Readonly<Record<string, string>>;
+  }> {
+    return { cwd: this.options.workspaceRoot, filteredEnvironment: {} };
+  }
+
+  public execute(
+    command: string,
+    callbacks: Readonly<{
+      onStarted: (observedCommand: string) => void;
+      onWriteAccepted?: () => void;
+    }>,
+  ): Promise<ShellExecutionResult> {
+    if (this.mode === "before_write_failure") {
+      return Promise.reject(new Error("Fixture rejected before write"));
+    }
+    callbacks.onWriteAccepted?.();
+    if (this.mode === "after_write_failure") {
+      return Promise.reject(new Error("Fixture rejected after write"));
+    }
+    callbacks.onStarted(command);
+    return Promise.resolve({
+      cwd: this.options.workspaceRoot,
+      exitCode: 0,
+      filteredEnvironment: {},
+      output: "",
+      outputTruncated: false,
+    });
+  }
+
+  public writeInput(): void {}
+  public writeSecret(): void {}
+  public finishSensitiveOutput(): void {}
+  public sendControl(): void {}
+  public resize(): void {}
+
+  public close(): void {
+    this.closeCount += 1;
+  }
 }
 
 async function waitFor(predicate: () => boolean, timeoutMilliseconds = 1_000): Promise<void> {
