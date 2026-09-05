@@ -64,7 +64,7 @@
 | [C06](03-console.md#c06)             | 信息层级、布局与新会话目录        | 无                           | Luna | 已验收 |
 | [D01](04-reliability.md#d01)         | 单 session 故障隔离               | A01                          | Sol  | 进行中 |
 | [D02](04-reliability.md#d02)         | 部分可用的会话发现                | A05                          | Sol  | 未开始 |
-| [D03](04-reliability.md#d03)         | Console/MCP 动态凭据提供器        | 无                           | Sol  | 进行中 |
+| [D03](04-reliability.md#d03)         | Console/MCP 动态凭据提供器        | 无                           | Sol  | 已验收 |
 | [D04](04-reliability.md#d04)         | 本地 supervisor 自动续期          | D03                          | Sol  | 未开始 |
 | [D05](04-reliability.md#d05)         | 明确各 Agent 身份                 | D04                          | Luna | 未开始 |
 | [D06](04-reliability.md#d06)         | CLI 接入共享 daemon               | A05、B03                     | Sol  | 未开始 |
