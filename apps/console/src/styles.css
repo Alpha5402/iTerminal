@@ -851,6 +851,65 @@ textarea {
   color: #fca5a5;
 }
 
+.submission-intent {
+  position: fixed;
+  z-index: 8;
+  pointer-events: none;
+  right: 1rem;
+  top: 5.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  width: min(48rem, calc(100vw - 2rem));
+  padding: 0.8rem;
+  border: 1px solid #0369a1;
+  border-radius: 10px;
+  background: #071b2a;
+  box-shadow: 0 1rem 3rem #000;
+}
+
+.submission-intent button {
+  pointer-events: auto;
+}
+
+.submission-intent div {
+  display: grid;
+  min-width: 0;
+  gap: 0.2rem;
+}
+
+.submission-intent span,
+.submission-intent small {
+  overflow-wrap: anywhere;
+  color: #bae6fd;
+}
+
+.submission-uncertain {
+  border-color: #d97706;
+  background: #291707;
+}
+
+.submission-uncertain span,
+.submission-uncertain small {
+  color: #fde68a;
+}
+
+.submission-accepted {
+  border-color: #0f766e;
+  background: #06211e;
+}
+
+.submission-rejected {
+  border-color: #be123c;
+  background: #2a0a14;
+}
+
+.submission-rejected span,
+.submission-rejected small {
+  color: #fda4af;
+}
+
 .error-banner {
   position: fixed;
   right: 1rem;
