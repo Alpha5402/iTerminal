@@ -346,6 +346,153 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     });
   }, 60_000);
 
+  it("explains untracked input and fences recovery controls", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "iterminal-c03-short-")));
+    fixtures.push(root);
+    const fixture = join(root, "raw.cjs");
+    await writeFile(
+      fixture,
+      'process.stdin.setRawMode(true); process.stdin.resume(); process.stdin.on("data", d => { const s=d.toString(); if(s.includes("\\u001b[B")){ process.stdout.write("ARROW_UNKNOWN"); setTimeout(()=>process.stdout.write("\\nAUTONOMOUS_LINE"),250); } if(s.includes("\\u0003")){ process.stdout.write("\\nCTRL_C_SEEN"); process.exit(130); } });',
+    );
+    daemon = await startRuntimeDaemon({
+      databaseUrl: databaseUrl ?? "",
+      ownerId: "c03-short",
+      socketPath: join(root, "runtime.sock"),
+    });
+    await daemon.waitUntilReady();
+    const runtime = new UnixRuntimeClient(daemon.socketPath);
+    consoleServer = await startHumanConsole({ gateway: runtime, port: 0, staticRoot });
+    mcp = await connectAgent(daemon.socketPath);
+    browser = await chromium.launch({ executablePath: browserExecutable, headless: true });
+    page = await browser.newPage({ viewport: { width: 1309, height: 1249 } });
+    await page.goto(consoleServer.url, { waitUntil: "networkidle" });
+    await createSessionFromForm(page, root);
+    await waitForPageText(page, ".status-strip", "READY");
+    const sessions = await callTool<readonly SessionResult[]>(mcp, "session_list", {});
+    const session = sessions[0];
+    if (session === undefined) throw new Error("short C03 session missing");
+    await page.getByLabel("READY command composer").fill(`node ${fixture}`);
+    await page.getByLabel("READY command composer").press("Enter");
+    await waitForPageText(page, ".status-strip", "RUNNING");
+    await page.getByRole("button", { name: "Raw keys" }).click();
+    await page.locator(".terminal-host").click();
+    await page.keyboard.press("ArrowDown");
+    await waitForPageText(page, '[role="alert"]', "Raw Input, Control, or Secret input");
+    const expectedExecution = required((await runtime.getSession(session.id)).activeExecutionId);
+    const before = await runtime.getInteractionState(session.id, session.generation);
+    await waitForPageText(page, '[data-testid="browser-terminal-output"]', "AUTONOMOUS_LINE");
+    const after = await runtime.getInteractionState(session.id, session.generation);
+    expect(after.inputContext).toEqual(before.inputContext);
+    await page.getByRole("button", { name: "Line input" }).click();
+    const editor = page.getByLabel("Foreground command composer");
+    await editor.fill("kept draft");
+    const count = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM actions WHERE session_id=$1 AND kind='input'",
+      [session.id],
+    );
+    await editor.evaluate((form) => form.closest("form")?.requestSubmit());
+    expect(await editor.inputValue()).toBe("kept draft");
+    const countAfter = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM actions WHERE session_id=$1 AND kind='input'",
+      [session.id],
+    );
+    expect(countAfter.rows[0]?.count).toBe(count.rows[0]?.count);
+    await page.getByRole("button", { name: "Interrupt (Ctrl-C)" }).click();
+    await waitForPageText(page, ".control-outcome", "Control Action");
+    await waitForPageText(page, '[data-testid="browser-terminal-output"]', "CTRL_C_SEEN");
+    const controls = await pool.query<{ id: string; status: string; target_execution_id: string }>(
+      "SELECT id,status,payload->>'targetExecutionId' AS target_execution_id FROM actions WHERE session_id=$1 AND kind='control' ORDER BY action_sequence DESC LIMIT 1",
+      [session.id],
+    );
+    expect(controls.rows[0]?.status).toBe("DELIVERED");
+    expect(controls.rows[0]?.target_execution_id).toBe(expectedExecution);
+    await waitForPageText(page, ".control-outcome", controls.rows[0]?.id ?? "missing-control-id");
+    await waitForPageText(page, ".status-strip", "READY");
+    let deliveryPosts = 0;
+    let deliveryBody:
+      | {
+          generation?: number;
+          idempotencyKey?: string;
+          targetExecutionId?: string;
+        }
+      | undefined;
+    let lookupCalls = 0;
+    let lookupUrl = "";
+    let lookupBody: { generation?: number; idempotencyKey?: string } | undefined;
+    await page.route("**/api/sessions/*/input", async (route) => {
+      deliveryPosts += 1;
+      deliveryBody = JSON.parse(route.request().postData() ?? "{}") as typeof deliveryBody;
+      await route.fulfill({
+        contentType: "application/json",
+        status: 503,
+        body: JSON.stringify({
+          error: {
+            allowedNextActions: ["check_action"],
+            code: "DELIVERY_UNKNOWN",
+            details: {},
+            message: "Input delivery is uncertain; check the exact Action.",
+            requestId: "c03-delivery-unknown",
+            retryable: false,
+          },
+        }),
+      });
+    });
+    await page.route("**/api/sessions/*/actions/lookup", async (route) => {
+      lookupCalls += 1;
+      lookupUrl = route.request().url();
+      lookupBody = JSON.parse(route.request().postData() ?? "{}") as typeof lookupBody;
+      await route.fulfill({
+        contentType: "application/json",
+        status: 200,
+        body: JSON.stringify({
+          result: {
+            generation: session.generation,
+            idempotencyKey: deliveryBody?.idempotencyKey,
+            kind: "not_found",
+            mayStillBeInFlight: true,
+            message: "The Action may still be in flight.",
+            sessionId: session.id,
+          },
+        }),
+      });
+    });
+    await page.getByLabel("READY command composer").fill("cat");
+    await page.getByLabel("READY command composer").press("Enter");
+    await waitForPageText(page, ".status-strip", "RUNNING");
+    const deliveryExecution = required((await runtime.getSession(session.id)).activeExecutionId);
+    expect(deliveryExecution).not.toBe(expectedExecution);
+    expect(await page.getByRole("status").filter({ hasText: expectedExecution }).count()).toBe(0);
+    await page.getByRole("button", { name: "Line input" }).click();
+    const deliveryEditor = page.getByLabel("Foreground command composer");
+    await deliveryEditor.fill("delivery draft");
+    await deliveryEditor.evaluate((form) => form.closest("form")?.requestSubmit());
+    await waitForPageText(page, '[role="alert"]', "may not have reached the PTY");
+    expect(await deliveryEditor.inputValue()).toBe("delivery draft");
+    expect(deliveryPosts).toBe(1);
+    await deliveryEditor.evaluate((form) => form.closest("form")?.requestSubmit());
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(deliveryPosts).toBe(1);
+    await page.getByRole("button", { name: "Check result" }).click();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(lookupCalls).toBe(1);
+    await waitForPageText(page, '[data-testid="submission-intent"]', "may still be in flight");
+    expect(lookupUrl).toContain(`/api/sessions/${session.id}/actions/lookup`);
+    expect(lookupBody?.idempotencyKey).toBe(deliveryBody?.idempotencyKey);
+    expect(lookupBody?.generation).toBe(deliveryBody?.generation);
+    expect(deliveryBody?.generation).toBe(session.generation);
+    expect(deliveryBody?.targetExecutionId).toBe(deliveryExecution);
+    expect(await deliveryEditor.inputValue()).toBe("delivery draft");
+    const cleanupControl = await callTool<{ readonly status: string }>(mcp, "control", {
+      delivery: { control: "CTRL_C", mode: "TTY_CONTROL" },
+      generation: session.generation,
+      idempotencyKey: "c03-short-cleanup-control",
+      sessionId: session.id,
+      targetExecutionId: deliveryExecution,
+    });
+    expect(cleanupControl.status).toBe("DELIVERED");
+    await callTool(mcp, "execution_wait", { executionId: deliveryExecution });
+  }, 60_000);
+
   it("fences explicit line and raw modes to the focused current Execution", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "iterminal-input-modes-")));
     fixtures.push(root);
@@ -373,6 +520,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
         '  const data = chunk.toString("utf8");',
         '  if (data.includes("\\u001b[B")) process.stdout.write("\\rMENU:1");',
         '  if (data.includes("\\t")) process.stdout.write("\\r\\nTAB_SEEN");',
+        '  if (data.includes("\\u0003")) { process.stdout.write("\\r\\nCTRL_C_SEEN"); process.exit(130); }',
         '  if (data.includes("q")) {',
         '    process.stdout.write("\\u001b[?1049lMENU_EXIT\\n");',
         "    process.exit(0);",
@@ -483,7 +631,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
       "SELECT count(*) FROM actions WHERE session_id=$1",
       [lineSession.id],
     );
-    await page.getByRole("button", { name: "Raw keys" }).click();
+    await modeBar.getByRole("button", { name: "Raw keys" }).click();
     expect(await editor.count()).toBe(0);
     await page.getByRole("button", { name: "Line input" }).click();
     await editor.waitFor({ state: "visible" });
@@ -495,7 +643,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     expect(actionsAfterSwitch.rows[0]?.count).toBe(actionsBeforeSwitch.rows[0]?.count);
     await editor.fill("");
 
-    await page.getByRole("button", { name: "Raw keys" }).click();
+    await modeBar.getByRole("button", { name: "Raw keys" }).click();
     const beforeExplicitFocus = await pool.query<{ count: string }>(
       "SELECT count(*) FROM actions WHERE session_id=$1 AND kind='input'",
       [lineSession.id],
@@ -539,6 +687,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     const sessionTabs = page.locator(".session-tab");
     await sessionTabs.nth(0).click();
     await waitForPageText(page, '[data-testid="input-mode-bar"]', node.execution.id);
+    await modeBar.getByRole("button", { name: "Raw keys" }).click();
 
     let releaseGuard!: () => void;
     const guardRelease = new Promise<void>((resolveGuard) => {
@@ -558,7 +707,6 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
       await guardRelease;
       await route.continue();
     });
-    await page.getByRole("button", { name: "Raw keys" }).click();
     await page.locator(".terminal-host").click();
     await page.keyboard.type("Z");
     await guardStarted;
@@ -580,11 +728,10 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     await page.unroute(`**/api/sessions/${lineSession.id}/input`);
     await page.unroute(`**/api/sessions/${lineSession.id}/interaction/guard`);
 
-    await editor.fill("quit");
-    await editor.press("Enter");
+    await page.getByRole("button", { name: "Interrupt (Ctrl-C)" }).click();
+    await waitForPageText(page, ".control-outcome", node.execution.id);
     await callTool(mcp, "execution_wait", { executionId: node.execution.id });
     await waitForPageText(page, ".status-strip", "READY");
-    await page.getByTestId("submission-intent").getByRole("button", { name: "Dismiss" }).click();
     const menu = await callTool<StartedResult>(mcp, "execute", {
       command: `${JSON.stringify(process.execPath)} ${JSON.stringify(menuFixture)}`,
       generation: lineSession.generation,
@@ -641,13 +788,20 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     await page.locator(".terminal-host").click();
     await page.keyboard.press("ArrowDown");
     await waitForPageText(page, '[data-testid="browser-terminal-output"]', "MENU:1");
+    await waitForPageText(page, '[role="alert"]', "Raw Input, Control, or Secret input");
+    await page.locator(".terminal-host").click();
+    console.log("C03-R3");
     await page.keyboard.press("Tab");
     await waitForPageText(page, '[data-testid="browser-terminal-output"]', "TAB_SEEN");
+    await waitForPageText(page, '[role="alert"]', "Raw Input, Control, or Secret input");
     await page.screenshot({
       path: join(screenshotDir, "raw-menu-focused-target.png"),
       fullPage: true,
     });
+    await page.locator(".terminal-host").click();
+    console.log("C03-R4");
     await page.keyboard.type("q");
+    console.log("C03-R5");
     await callTool(mcp, "execution_wait", { executionId: menu.execution.id });
     await waitForPageText(page, ".status-strip", "READY");
     expect(await page.getByTestId("input-mode-bar").count()).toBe(0);
@@ -1168,6 +1322,11 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     fixtures.push(root);
     const workspace = join(root, "workspace");
     await mkdir(workspace, { recursive: true });
+    const secretFixture = join(root, "secret.cjs");
+    await writeFile(
+      secretFixture,
+      'process.stdin.setRawMode(true); process.stdin.resume(); process.stdout.write("Password:"); let seen=false; process.stdin.on("data", d => { const s=d.toString(); if (s.includes("\\u0003")) { process.stdout.write("\\nSECRET_CTRL_C_SEEN\\n"); process.exit(130); } if (!seen && s.length > 0) { seen=true; process.stdout.write("\\nECHO:[redacted]\\n"); } });',
+    );
     daemon = await startRuntimeDaemon({
       databaseUrl: databaseUrl ?? "",
       ownerId: "owner-m10-secret-browser",
@@ -1194,11 +1353,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
       [],
     );
 
-    await page
-      .getByLabel("READY command composer")
-      .fill(
-        `printf 'Password:'; IFS= read -r ITERM_SECRET; printf 'ECHO:%s\\n' "$ITERM_SECRET"; sleep 30`,
-      );
+    await page.getByLabel("READY command composer").fill(`node ${secretFixture}`);
     await page.getByLabel("READY command composer").press("Enter");
     await waitForPageText(page, ".status-strip", "RUNNING");
     await waitForPageText(page, '[data-testid="screen-reader-output"]', "Password:");
@@ -1228,6 +1383,7 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     const secret = "BROWSER_SECRET_SENTINEL_752c";
     await page.getByLabel("Human-only secret input").fill(secret);
     await page.getByLabel("Human-only secret input").press("Enter");
+    await waitForPageText(page, '[role="alert"]', "Raw Input, Control, or Secret input");
     await page
       .getByRole("button", {
         name: "Sensitive input protection is active; stop protecting output",
@@ -1259,9 +1415,6 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     expect(blockedInput.isError).toBe(true);
     expect(textContent(blockedInput)).toContain('"code":"SENSITIVE_INPUT_ACTIVE"');
 
-    await page.locator(".terminal-host").click();
-    await page.keyboard.press("Control+C");
-    await waitForPageText(page, ".status-strip", "READY");
     await page
       .getByRole("button", {
         name: "Sensitive input protection is active; stop protecting output",
@@ -1272,6 +1425,13 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
         name: "Sensitive input protection is active; stop protecting output",
       })
       .waitFor({ state: "detached" });
+    await waitForPageText(page, ".status-strip", "RUNNING");
+    await waitForPageText(page, '[role="alert"]', "Raw Input, Control, or Secret input");
+
+    await page.getByRole("button", { name: "Interrupt (Ctrl-C)" }).click();
+    await waitForPageText(page, '[role="status"]', "Control Action");
+    await waitForPageText(page, '[data-testid="browser-terminal-output"]', "SECRET_CTRL_C_SEEN");
+    await waitForPageText(page, ".status-strip", "READY");
     await page.getByLabel("READY command composer").fill("printf 'VISIBLE_AFTER_SECRET\\n'");
     await page.getByLabel("READY command composer").press("Enter");
     await waitForPageText(page, '[data-testid="screen-reader-output"]', "VISIBLE_AFTER_SECRET");
