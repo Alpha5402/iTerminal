@@ -37,6 +37,16 @@ export interface ShellExecuteCallbacks {
   readonly onStarted: (observedCommand: string) => void;
 }
 
+export interface ShellExecutorLifecycleEvent {
+  readonly executorId: string;
+  readonly reason: "executor_failure" | "shell_process_exit";
+  readonly sessionGeneration: number;
+  readonly sessionId: string;
+  readonly type: "exited";
+  readonly exitCode?: number;
+  readonly signal?: number;
+}
+
 export interface ShellExecutor {
   readonly shellPid: number;
   readonly shell: ShellKind;
@@ -55,9 +65,13 @@ export interface ShellExecutor {
 
 export interface CreateExecutorOptions {
   readonly checkpointEnvironmentKeys: readonly string[];
+  readonly executorId: string;
   readonly initialCwd?: string;
   readonly initialEnvironment?: Readonly<Record<string, string>>;
+  readonly onLifecycle: (event: ShellExecutorLifecycleEvent) => void;
   readonly shell: ShellKind;
+  readonly sessionGeneration: number;
+  readonly sessionId: string;
   readonly workspaceRoot: string;
   readonly onOutput: (data: string) => void;
 }

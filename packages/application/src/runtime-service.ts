@@ -75,6 +75,7 @@ import type {
   ShellExecutionResult,
   ShellExecutor,
   ShellExecutorFactory,
+  ShellExecutorLifecycleEvent,
   TerminalScreenProjection,
   TerminalScreenProjectionFactory,
 } from "./ports.js";
@@ -366,6 +367,10 @@ type IdempotentCreateSessionRequest = Omit<CreateSessionRequest, "idempotencyKey
 
 export class RuntimeService {
   readonly #executors = new Map<string, ShellExecutor>();
+  readonly #executorIdentities = new Map<
+    string,
+    Readonly<{ executorId: string; generation: number }>
+  >();
   readonly #screens = new Map<string, TerminalScreenProjection>();
   readonly #completions = new Map<string, Promise<Execution>>();
   readonly #started = new Map<string, Promise<void>>();
@@ -1676,7 +1681,12 @@ export class RuntimeService {
 
     const result = shellCompletion.then(
       (completed) => this.#finishDispatchedExecution(state, completed),
-      (error: unknown) => this.#failDispatchedExecution(state, error),
+      (error: unknown) =>
+        execution.status === "RUNNING"
+          ? this.#withMutationLock(execution.sessionId, () =>
+              this.#failDispatchedExecution(state, error),
+            )
+          : this.#failDispatchedExecution(state, error),
     );
     void result.then(state.completion.resolve, state.completion.reject);
     await state.started.promise;
@@ -2846,8 +2856,7 @@ export class RuntimeService {
         activeExecutionState === undefined ? undefined : executionVersion(activeExecutionState);
       this.#markActiveDispatchUnknown(session, "Session closed before Execution outcome");
       this.#markSensitiveInputUnknown(sessionId);
-      this.#executors.get(sessionId)?.close();
-      this.#executors.delete(sessionId);
+      this.#detachExecutor(sessionId);
       this.#screens.get(sessionId)?.dispose();
       this.#screens.delete(sessionId);
       const closed = this.store.closeSession(sessionId, generation);
@@ -2964,7 +2973,7 @@ export class RuntimeService {
       });
   }
 
-  async #launchSession(
+  #launchSession(
     session: Session,
     options: Readonly<{
       additionalReadyEvents?: readonly DurableSessionEvent[];
@@ -2972,7 +2981,20 @@ export class RuntimeService {
       initialEnvironment?: Readonly<Record<string, string>>;
     }> = {},
   ): Promise<Session> {
+    return this.#withMutationLock(session.id, () => this.#launchSessionLocked(session, options));
+  }
+
+  async #launchSessionLocked(
+    session: Session,
+    options: Readonly<{
+      additionalReadyEvents?: readonly DurableSessionEvent[];
+      initialCwd?: string;
+      initialEnvironment?: Readonly<Record<string, string>>;
+    }>,
+  ): Promise<Session> {
     const { generation, id: sessionId } = session;
+    const executorId = `executor_${randomUUID()}`;
+    let startupLifecycle: ShellExecutorLifecycleEvent | undefined;
     try {
       const screen = this.#screenProjectionFactory?.create({
         sessionGeneration: generation,
@@ -2981,15 +3003,27 @@ export class RuntimeService {
       if (screen !== undefined) this.#screens.set(sessionId, screen);
       const executor = await this.executorFactory.create({
         checkpointEnvironmentKeys: this.#checkpointEnvironmentKeys,
+        executorId,
         ...(options.initialCwd === undefined ? {} : { initialCwd: options.initialCwd }),
         ...(options.initialEnvironment === undefined
           ? {}
           : { initialEnvironment: options.initialEnvironment }),
+        onLifecycle: (event) => {
+          startupLifecycle ??= event;
+          this.#queueExecutorLifecycle(event);
+        },
         onOutput: (data) => this.#recordOutput(sessionId, generation, data),
         shell: session.shell,
+        sessionGeneration: generation,
+        sessionId,
         workspaceRoot: session.workspaceRoot,
       });
+      if (startupLifecycle !== undefined) {
+        executor.close();
+        throw new Error("Shell Executor exited before Session startup completed");
+      }
       this.#executors.set(sessionId, executor);
+      this.#executorIdentities.set(sessionId, { executorId, generation });
       const checkpoint = await this.#buildCheckpoint(session, executor.checkpoint(), 1);
       this.#checkpoints.set(sessionId, checkpoint);
       this.#checkpointInvalid.delete(sessionId);
@@ -3021,8 +3055,7 @@ export class RuntimeService {
       }
       return ready;
     } catch (error) {
-      this.#executors.get(sessionId)?.close();
-      this.#executors.delete(sessionId);
+      this.#detachExecutor(sessionId, executorId);
       this.#screens.get(sessionId)?.dispose();
       this.#screens.delete(sessionId);
       this.#checkpoints.delete(sessionId);
@@ -3964,8 +3997,7 @@ export class RuntimeService {
     this.#clearPtyOutput(session.id);
     this.#markActiveDispatchUnknown(session, reason);
     this.#markSensitiveInputUnknown(session.id);
-    this.#executors.get(session.id)?.close();
-    this.#executors.delete(session.id);
+    this.#detachExecutor(session.id);
     this.#screens.get(session.id)?.dispose();
     this.#screens.delete(session.id);
     if (session.status !== "CLOSED" && session.status !== "BROKEN") {
@@ -4021,6 +4053,95 @@ export class RuntimeService {
     );
     dispatch?.started.reject(failure);
     dispatch?.completion.reject(failure);
+  }
+
+  #queueExecutorLifecycle(event: ShellExecutorLifecycleEvent): void {
+    void this.#withMutationLock(event.sessionId, () => this.#handleExecutorLifecycle(event)).catch(
+      (error: unknown) => this.#tripDurability(event.sessionId, error),
+    );
+  }
+
+  async #handleExecutorLifecycle(event: ShellExecutorLifecycleEvent): Promise<void> {
+    const identity = this.#executorIdentities.get(event.sessionId);
+    if (
+      identity === undefined ||
+      identity.executorId !== event.executorId ||
+      identity.generation !== event.sessionGeneration
+    ) {
+      return;
+    }
+    const session = this.store.getSession(event.sessionId);
+    if (session === undefined || session.generation !== event.sessionGeneration) return;
+
+    await this.#flushDurable(event.sessionId);
+    this.#detachExecutor(event.sessionId, event.executorId);
+    this.#screens.get(event.sessionId)?.dispose();
+    this.#screens.delete(event.sessionId);
+    this.#markSensitiveInputUnknown(event.sessionId);
+    if (session.status === "CLOSED" || session.status === "BROKEN") return;
+
+    const activeExecutionState =
+      session.activeExecutionId === undefined
+        ? undefined
+        : this.store.getExecution(session.activeExecutionId);
+    const activeExecution =
+      activeExecutionState === undefined || isExecutionTerminal(activeExecutionState.status)
+        ? undefined
+        : executionVersion(activeExecutionState);
+    const reason =
+      event.reason === "shell_process_exit"
+        ? "Persistent Shell process exited"
+        : "Shell Executor failed";
+    this.#markActiveDispatchUnknown(session, reason);
+    const broken = this.store.breakSession(session.id, session.generation);
+    const lifecyclePayload = {
+      reason: event.reason,
+      ...(event.exitCode === undefined ? {} : { exitCode: event.exitCode }),
+      ...(event.signal === undefined ? {} : { signal: event.signal }),
+    };
+    const events: DurableSessionEvent[] = [];
+    if (activeExecutionState !== undefined && activeExecution !== undefined) {
+      events.push(
+        this.#eventDraft(
+          broken,
+          "execution.unknown",
+          lifecyclePayload,
+          this.store.getAction(activeExecutionState.actionId),
+          activeExecutionState,
+        ),
+      );
+    }
+    events.push(this.#eventDraft(broken, "session.broken", lifecyclePayload));
+    try {
+      await this.#enqueueDurable(session.id, 0, () =>
+        this.#durability?.markSessionBroken(
+          this.#requireSessionFence(broken),
+          broken,
+          events,
+          reason,
+          activeExecution,
+        ),
+      );
+      if (activeExecutionState !== undefined && activeExecution !== undefined) {
+        activeExecutionState.version += 1;
+      }
+      for (const lifecycleEvent of events) {
+        this.store.appendEvent(session.id, session.generation, lifecycleEvent);
+      }
+      this.#sessionLeases.delete(session.id);
+    } catch (error) {
+      if (isDurabilityFatal(error)) this.#tripDurability(session.id, error);
+      throw error;
+    }
+  }
+
+  #detachExecutor(sessionId: string, expectedExecutorId?: string): void {
+    const identity = this.#executorIdentities.get(sessionId);
+    if (expectedExecutorId !== undefined && identity?.executorId !== expectedExecutorId) return;
+    this.#executorIdentities.delete(sessionId);
+    const executor = this.#executors.get(sessionId);
+    this.#executors.delete(sessionId);
+    executor?.close();
   }
 
   async #withMutationLock<T>(sessionId: string, work: () => Promise<T>): Promise<T> {

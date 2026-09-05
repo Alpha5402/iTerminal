@@ -21,8 +21,12 @@ describe("M10.11 hostile PTY barrier input", () => {
     const observed: string[] = [];
     const executor = await new PtyShellExecutorFactory().create({
       checkpointEnvironmentKeys: [],
+      executorId: "hostile-barrier-executor",
+      onLifecycle: () => undefined,
       onOutput: (data) => observed.push(data),
       shell: "zsh",
+      sessionGeneration: 1,
+      sessionId: "hostile-barrier-session",
       workspaceRoot: workspace,
     });
     try {

@@ -30,8 +30,12 @@ describe("PTY Process Guardian", () => {
     });
     const executor = await new PtyShellExecutorFactory(guardian).create({
       checkpointEnvironmentKeys: [],
+      executorId: "guardian-executor",
+      onLifecycle: () => undefined,
       onOutput: () => undefined,
       shell: "zsh",
+      sessionGeneration: 1,
+      sessionId: "guardian-session",
       workspaceRoot: workspace,
     });
     try {
