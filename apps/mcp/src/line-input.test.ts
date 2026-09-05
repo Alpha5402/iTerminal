@@ -15,6 +15,7 @@ import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { describe, expect, it } from "vitest";
+import { lineInputRequestFixture } from "../../../packages/protocol/src/fixtures.js";
 
 const databaseUrl = process.env.ITERM_DATABASE_URL;
 const human: Actor = {
@@ -98,6 +99,32 @@ describe.each([false, true])("foreground line input, durable=%s", (durable) => {
           await new Promise((done) => setTimeout(done, 10));
         }
         const before = await call<InteractionState>("interaction_get", identity);
+        const adapterInput = {
+          sessionId: session.id,
+          generation: session.generation,
+          targetExecutionId: started.execution.id,
+          data: lineInputRequestFixture.data,
+          idempotencyKey: "adapter-input",
+        };
+        const invalidUnknown = await client.callTool({
+          name: "input",
+          arguments: { ...adapterInput, unexpected: true },
+        });
+        expect(invalidUnknown.isError).toBe(true);
+        expect(JSON.stringify(invalidUnknown)).toContain("unexpected");
+        const invalidLineInput = await client.callTool({
+          name: "input",
+          arguments: {
+            ...adapterInput,
+            lineInput: { expectedInputVersion: -1, expectedInteractionVersion: 1 },
+          },
+        });
+        expect(invalidLineInput.isError).toBe(true);
+        const invalidGeneration = await client.callTool({
+          name: "input",
+          arguments: { ...adapterInput, generation: 0, idempotencyKey: "bad-generation" },
+        });
+        expect(invalidGeneration.isError).toBe(true);
         const screen = await call<TerminalScreenSnapshot>("screen_get", identity);
         // Simulate a delayed approval while ~60 asynchronous output chunks advance the screen.
         await new Promise((done) => setTimeout(done, 1200));
@@ -116,8 +143,9 @@ describe.each([false, true])("foreground line input, durable=%s", (durable) => {
         expect(JSON.stringify(stale)).toContain("SCREEN_CHANGED");
         const input = {
           ...target,
-          data: "/miner 状态\n",
+          data: adapterInput.data,
           lineInput: {
+            ...lineInputRequestFixture.lineInput,
             expectedInputVersion: before.inputContext?.version,
             expectedInteractionVersion: before.version,
           },
@@ -175,7 +203,7 @@ describe.each([false, true])("foreground line input, durable=%s", (durable) => {
             .map((event) => event.payload.data ?? "")
             .join("");
           if (output.includes("ACK:second")) {
-            expect(output.match(/ACK:\/miner 状态/g)).toHaveLength(1);
+            expect(output.match(/ACK:\/status/g)).toHaveLength(1);
             expect(output).toContain("ACK:human-half");
             break;
           }

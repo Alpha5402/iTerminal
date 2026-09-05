@@ -33,6 +33,7 @@ export const executeRequestSchema = {
       required: ["id", "type", "principal", "client", "capabilities"],
       type: "object",
     },
+    approvalId: { maxLength: 256, minLength: 1, type: "string" },
     command: { type: "string" },
     idempotencyKey: { minLength: 1, type: "string" },
     sessionGeneration: { minimum: 1, type: "integer" },
@@ -52,6 +53,15 @@ export const inputRequestSchema = {
     sessionGeneration: { minimum: 1, type: "integer" },
     sessionId: { minLength: 1, type: "string" },
     targetExecutionId: { minLength: 1, type: "string" },
+    lineInput: {
+      additionalProperties: false,
+      properties: {
+        expectedInputVersion: { minimum: 0, type: "integer" },
+        expectedInteractionVersion: { minimum: 1, type: "integer" },
+      },
+      required: ["expectedInputVersion", "expectedInteractionVersion"],
+      type: "object",
+    },
   },
   required: [
     "sessionId",
