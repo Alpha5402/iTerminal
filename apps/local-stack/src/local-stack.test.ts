@@ -59,7 +59,16 @@ describe("local stack credential bootstrap", () => {
         ITERM_RUNTIME_SOCKET: runtimeSocketPath,
       },
     });
-    expect(configuration.mcpServers.iterminal.env.ITERM_RPC_GRANT).toBeTypeOf("string");
+    const grantToken = configuration.mcpServers.iterminal.env.ITERM_RPC_GRANT;
+    expect(grantToken).toBeTypeOf("string");
+    if (grantToken === undefined) throw new Error("MCP runtime grant was not written");
+    const [encodedGrant] = grantToken.split(".");
+    const grantClaims = JSON.parse(
+      Buffer.from(encodedGrant ?? "", "base64url").toString("utf8"),
+    ) as {
+      operations?: unknown;
+    };
+    expect(grantClaims.operations).toEqual(expect.arrayContaining(["artifact.read"]));
     expect(await permissions(stateRoot)).toBe(0o700);
     expect(await permissions(join(stateRoot, "credentials"))).toBe(0o700);
     expect(await permissions(credentials.mcpConfigPath)).toBe(0o600);
@@ -145,6 +154,12 @@ describeDatabase("M10.13 durable local stack", () => {
       shell: "zsh",
       workspaceRoot,
     });
+    const missingArtifact = await callTool<ArtifactReadResult>(client, "artifact_read", {
+      artifactId: "art_local_stack_missing",
+      generation: session.generation,
+      sessionId: session.id,
+    });
+    expect(missingArtifact).toMatchObject({ kind: "not_found" });
     const started = await callTool<StartedResult>(client, "execute", {
       command: "printf 'local-stack-mcp\\n'",
       generation: session.generation,
@@ -237,4 +252,8 @@ type StartedResult = {
 type ExecutionResult = {
   readonly output?: string;
   readonly status: string;
+};
+
+type ArtifactReadResult = {
+  readonly kind: "not_found";
 };

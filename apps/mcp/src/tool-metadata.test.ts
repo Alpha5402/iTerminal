@@ -5,6 +5,7 @@ import { createMcpServer, MCP_INSTRUCTIONS } from "./server.js";
 
 const baselineToolNames = new Set([
   "action_lookup",
+  "artifact_read",
   "runtime_capabilities",
   "session_create",
   "session_get",

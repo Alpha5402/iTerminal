@@ -158,6 +158,49 @@ export interface RuntimeStore {
 
 export type DurableSessionEvent = Omit<SessionEvent, "sequence">;
 
+export const DEFAULT_ARTIFACT_READ_BYTES = 8 * 1024;
+export const MAX_ARTIFACT_READ_BYTES = 64 * 1024;
+
+export interface ArtifactReadRequest {
+  readonly artifactId: string;
+  readonly generation: number;
+  readonly maxBytes?: number;
+  readonly offsetBytes: number;
+  readonly sessionId: string;
+}
+
+interface ArtifactReadIdentity {
+  readonly artifactId: string;
+  readonly generation: number;
+  readonly sessionId: string;
+}
+
+export interface ArtifactReadFound extends ArtifactReadIdentity {
+  readonly contentBase64: string;
+  readonly contentType: string;
+  readonly eof: boolean;
+  readonly kind: "found";
+  readonly nextOffset: number;
+  readonly offsetBytes: number;
+  readonly returnedBytes: number;
+  readonly totalBytes: number;
+}
+
+export type DurableArtifactReadResult =
+  | ArtifactReadFound
+  | (ArtifactReadIdentity & Readonly<{ kind: "not_found"; message: string }>)
+  | (ArtifactReadIdentity & Readonly<{ expiredAt: string; kind: "expired"; message: string }>);
+
+export type ArtifactReadResult =
+  | DurableArtifactReadResult
+  | (ArtifactReadIdentity &
+      Readonly<{
+        kind: "unavailable";
+        message: string;
+        reason: "durability_unavailable" | "owner_route_unavailable";
+        retryable: true;
+      }>);
+
 export interface ActionLookupRequest {
   readonly actor: Actor;
   readonly generation: number;
@@ -350,6 +393,7 @@ export interface RuntimeOwnerRegistry {
 
 export interface RuntimeDurability {
   lookupAction(request: ActionLookupRequest): Promise<ActionLookupFound | undefined>;
+  readArtifact?(request: ArtifactReadRequest): Promise<DurableArtifactReadResult>;
   requestApproval(
     fence: SessionFence,
     input: DurableApprovalRequest,

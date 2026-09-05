@@ -6,6 +6,8 @@ import {
   type AcquireInteractionGuardRequest,
   type ActionLookupRequest,
   type ActionLookupResult,
+  type ArtifactReadRequest,
+  type ArtifactReadResult,
   type ControlRequest,
   type BeginSecretInputRequest,
   type CreateSessionRequest,
@@ -107,7 +109,12 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
   ) {
     this.#capabilities = defineRuntimeCapabilities({
       ...(options.buildId === undefined ? {} : { buildId: options.buildId }),
-      features: ["action.lookup.v1", "runtime.capabilities.v1", "runtime.owner-capabilities.v1"],
+      features: [
+        "action.lookup.v1",
+        "artifact.read.v1",
+        "runtime.capabilities.v1",
+        "runtime.owner-capabilities.v1",
+      ],
     });
   }
 
@@ -129,6 +136,40 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
           mayStillBeInFlight: true,
           message:
             "No accepted Action is currently observable; the original request may still be in flight, so do not generate a replacement idempotency key",
+        };
+      }
+      if (
+        error instanceof RuntimeError &&
+        (error.code === "RUNTIME_UNAVAILABLE" || error.code === "OWNER_ROUTE_UNAVAILABLE")
+      ) {
+        return {
+          ...identity,
+          kind: "unavailable",
+          message: "The exact Runtime owner route is temporarily unavailable",
+          reason: "owner_route_unavailable",
+          retryable: true,
+        };
+      }
+      throw error;
+    }
+  }
+
+  public async readArtifact(request: ArtifactReadRequest): Promise<ArtifactReadResult> {
+    try {
+      return await this.#withSession(request.sessionId, "artifact.read", (client) =>
+        client.readArtifact(request),
+      );
+    } catch (error) {
+      const identity = {
+        artifactId: request.artifactId,
+        generation: request.generation,
+        sessionId: request.sessionId,
+      };
+      if (error instanceof RuntimeError && error.code === "SESSION_NOT_FOUND") {
+        return {
+          ...identity,
+          kind: "not_found",
+          message: "Artifact is not available in the requested Session generation",
         };
       }
       if (

@@ -1,6 +1,8 @@
 import type {
   ActionLookupRequest,
   ActionLookupResult,
+  ArtifactReadRequest,
+  ArtifactReadResult,
   RuntimeOwnerRecord,
   RuntimeOwnerRegistry,
 } from "@iterminal/application";
@@ -32,7 +34,11 @@ describe("CentralRuntimeRouterGateway error classification", () => {
       routes,
       (endpoint) => {
         if (endpoint === owner.endpoint) {
-          return new CapabilityClient("owner-a", ["action.execute.v1", "runtime.capabilities.v1"]);
+          return new CapabilityClient("owner-a", [
+            "action.execute.v1",
+            "artifact.read.v1",
+            "runtime.capabilities.v1",
+          ]);
         }
         return new CapabilityClient("owner-b", ["action.input.v1", "runtime.capabilities.v1"]);
       },
@@ -43,12 +49,17 @@ describe("CentralRuntimeRouterGateway error classification", () => {
 
     await expect(gateway.getRuntimeCapabilities()).resolves.toEqual({
       buildId: "router-a05",
-      features: ["action.lookup.v1", "runtime.capabilities.v1", "runtime.owner-capabilities.v1"],
+      features: [
+        "action.lookup.v1",
+        "artifact.read.v1",
+        "runtime.capabilities.v1",
+        "runtime.owner-capabilities.v1",
+      ],
       protocolVersion: "1",
     });
     await expect(gateway.getRuntimeCapabilities({ sessionId: "session-a" })).resolves.toEqual({
       buildId: "owner-a",
-      features: ["action.execute.v1", "runtime.capabilities.v1"],
+      features: ["action.execute.v1", "artifact.read.v1", "runtime.capabilities.v1"],
       protocolVersion: "1",
     });
     await expect(gateway.getRuntimeCapabilities({ sessionId: "session-b" })).resolves.toEqual({
@@ -164,6 +175,45 @@ describe("CentralRuntimeRouterGateway error classification", () => {
     await expect(denied.lookupAction(request)).rejects.toMatchObject({ code: "POLICY_DENIED" });
   });
 
+  it("routes Artifact reads by the claimed Session while preserving non-disclosing misses", async () => {
+    const request = {
+      artifactId: "art-routed",
+      generation: 7,
+      offsetBytes: 0,
+      sessionId: "session-routed",
+    };
+    let calls = 0;
+    const routed = new CentralRuntimeRouterGateway(
+      routeRegistry(owner),
+      () =>
+        new ArtifactClient((received) => {
+          calls += 1;
+          expect(received).toEqual(request);
+          return Promise.resolve({
+            artifactId: received.artifactId,
+            contentBase64: "eA==",
+            contentType: "application/octet-stream",
+            eof: true,
+            generation: received.generation,
+            kind: "found",
+            nextOffset: 1,
+            offsetBytes: 0,
+            returnedBytes: 1,
+            sessionId: received.sessionId,
+            totalBytes: 1,
+          });
+        }),
+    );
+    await expect(routed.readArtifact(request)).resolves.toMatchObject({ kind: "found" });
+    expect(calls).toBe(1);
+
+    const absent = new CentralRuntimeRouterGateway(
+      { ...routeRegistry(owner), resolveSessionRoute: () => Promise.resolve(undefined) },
+      () => new ArtifactClient(() => Promise.reject(new Error("must not dispatch"))),
+    );
+    await expect(absent.readArtifact(request)).resolves.toMatchObject({ kind: "not_found" });
+  });
+
   it("rejects a Session returned under a conflicting owner identity", async () => {
     const gateway = new CentralRuntimeRouterGateway(
       routeRegistry(owner),
@@ -240,7 +290,7 @@ class CapabilityClient extends UnixRuntimeClient {
   public constructor(
     private readonly buildId: string,
     private readonly features: readonly (
-      "action.execute.v1" | "action.input.v1" | "runtime.capabilities.v1"
+      "action.execute.v1" | "action.input.v1" | "artifact.read.v1" | "runtime.capabilities.v1"
     )[],
   ) {
     super("/unused/capability-owner.sock");
@@ -252,6 +302,18 @@ class CapabilityClient extends UnixRuntimeClient {
       features: this.features,
       protocolVersion: "1",
     });
+  }
+}
+
+class ArtifactClient extends UnixRuntimeClient {
+  public constructor(
+    private readonly read: (request: ArtifactReadRequest) => Promise<ArtifactReadResult>,
+  ) {
+    super("/unused/artifact-read-owner.sock");
+  }
+
+  public override readArtifact(request: ArtifactReadRequest): Promise<ArtifactReadResult> {
+    return this.read(request);
   }
 }
 

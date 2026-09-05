@@ -65,6 +65,8 @@ import type {
   ActionLookupFound,
   ActionLookupRequest,
   ActionLookupResult,
+  ArtifactReadRequest,
+  ArtifactReadResult,
   DurableSessionEvent,
   DurableForkAdmission,
   DurableOwnerRecoveryResult,
@@ -82,6 +84,7 @@ import type {
   TerminalScreenProjection,
   TerminalScreenProjectionFactory,
 } from "./ports.js";
+import { MAX_ARTIFACT_READ_BYTES } from "./ports.js";
 import { classifyTerminalState } from "./terminal-state.js";
 
 const DEFAULT_EVENT_LIMIT = 100;
@@ -545,6 +548,39 @@ export class RuntimeService {
         ...identity,
         kind: "unavailable",
         message: "Durable Action lookup is temporarily unavailable",
+        reason: "durability_unavailable",
+        retryable: true,
+      };
+    }
+  }
+
+  public async readArtifact(request: ArtifactReadRequest): Promise<ArtifactReadResult> {
+    validateSessionId(request.sessionId);
+    validateGeneration(request.generation);
+    validateArtifactId(request.artifactId);
+    validateArtifactReadRange(request.offsetBytes, request.maxBytes);
+    const identity = {
+      artifactId: request.artifactId,
+      generation: request.generation,
+      sessionId: request.sessionId,
+    };
+    if (this.#durability?.readArtifact === undefined) {
+      return {
+        ...identity,
+        kind: "unavailable",
+        message: "Durable Artifact reading is not configured",
+        reason: "durability_unavailable",
+        retryable: true,
+      };
+    }
+    try {
+      return await this.#durability.readArtifact(request);
+    } catch (error) {
+      if (error instanceof RuntimeError && error.code === "INVALID_REQUEST") throw error;
+      return {
+        ...identity,
+        kind: "unavailable",
+        message: "Durable Artifact reading is temporarily unavailable",
         reason: "durability_unavailable",
         retryable: true,
       };
@@ -4788,6 +4824,33 @@ function validateSessionId(value: string): void {
 
 function validateGeneration(value: number): void {
   requirePositiveInteger(value, "generation");
+}
+
+function validateArtifactId(value: string): void {
+  if (value.length < 1 || value.length > 256 || value.includes("\0")) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      "artifactId must contain 1 to 256 non-NUL characters",
+    );
+  }
+}
+
+function validateArtifactReadRange(offsetBytes: number, maxBytes: number | undefined): void {
+  if (!Number.isSafeInteger(offsetBytes) || offsetBytes < 0) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      "Artifact offsetBytes must be a non-negative safe integer",
+    );
+  }
+  if (
+    maxBytes !== undefined &&
+    (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_ARTIFACT_READ_BYTES)
+  ) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      `Artifact maxBytes must be between 1 and ${MAX_ARTIFACT_READ_BYTES.toString()}`,
+    );
+  }
 }
 
 function checkpointView(

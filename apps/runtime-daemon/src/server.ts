@@ -348,6 +348,7 @@ export async function startRuntimeDaemon(options: {
         ? {}
         : { authentication: options.rpcAuthentication }),
       gateway: new LocalRuntimeGateway(runtime, {
+        artifactRead: options.runtime === undefined && durability !== undefined,
         ...(options.buildId === undefined ? {} : { buildId: options.buildId }),
       }),
       isReady,

@@ -9,6 +9,8 @@ import { Client } from "@modelcontextprotocol/client";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { artifactMcpView } from "./server.js";
+
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const clients: Client[] = [];
 let fixtureRoot = "";
@@ -43,6 +45,7 @@ describe("M4 stdio MCP bridge", () => {
       "approval_get",
       "approval_list",
       "approval_request",
+      "artifact_read",
       "control",
       "events_query",
       "execute",
@@ -81,6 +84,14 @@ describe("M4 stdio MCP bridge", () => {
       ],
       protocolVersion: "1",
     });
+    expect(capabilities.features).not.toContain("artifact.read.v1");
+    expect(
+      await callTool<ArtifactReadResult>(first, "artifact_read", {
+        artifactId: "art-no-durable-reader",
+        generation: 1,
+        sessionId: "session-no-durable-reader",
+      }),
+    ).toMatchObject({ kind: "unavailable", reason: "durability_unavailable" });
 
     const session = await callTool<SessionResult>(first, "session_create", {
       idempotencyKey: "mcp-stdio-session-create",
@@ -387,6 +398,41 @@ describe("M4 stdio MCP bridge", () => {
       sessionId: session.id,
     });
   }, 40_000);
+
+  it("marks UTF-8 boundary splits instead of replacing or dropping text", () => {
+    const completeBytes = Buffer.from("中文🙂", "utf8");
+    const complete = artifactMcpView({
+      artifactId: "art-complete",
+      contentBase64: completeBytes.toString("base64"),
+      contentType: "application/octet-stream",
+      eof: true,
+      generation: 1,
+      kind: "found",
+      nextOffset: completeBytes.length,
+      offsetBytes: 0,
+      returnedBytes: completeBytes.length,
+      sessionId: "session-utf8",
+      totalBytes: completeBytes.length,
+    });
+    expect(complete).toMatchObject({ text: "中文🙂", textStatus: "complete" });
+
+    const splitBytes = completeBytes.subarray(0, 2);
+    const split = artifactMcpView({
+      artifactId: "art-split",
+      contentBase64: splitBytes.toString("base64"),
+      contentType: "application/octet-stream",
+      eof: false,
+      generation: 1,
+      kind: "found",
+      nextOffset: splitBytes.length,
+      offsetBytes: 0,
+      returnedBytes: splitBytes.length,
+      sessionId: "session-utf8",
+      totalBytes: completeBytes.length,
+    });
+    expect(split).toMatchObject({ textStatus: "unaligned_utf8" });
+    expect(split).not.toHaveProperty("text");
+  });
 });
 
 async function connectClient(name: string): Promise<Client> {
@@ -483,6 +529,11 @@ type ActionLookupResult = {
   readonly executionStatus?: string;
   readonly kind: string;
   readonly mayStillBeInFlight?: boolean;
+};
+
+type ArtifactReadResult = {
+  readonly kind: string;
+  readonly reason?: string;
 };
 
 type ExecutionResult = {

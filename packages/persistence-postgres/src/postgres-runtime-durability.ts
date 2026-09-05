@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import type {
   ActionLookupFound,
   ActionLookupRequest,
+  ArtifactReadRequest,
+  DurableArtifactReadResult,
   DurableApprovalDecision,
   DurableApprovalMutationResult,
   DurableApprovalRequest,
@@ -181,6 +183,10 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
     } finally {
       client.release();
     }
+  }
+
+  public readArtifact(request: ArtifactReadRequest): Promise<DurableArtifactReadResult> {
+    return this.#observation.readArtifact(request);
   }
 
   public requestApproval(
