@@ -92,6 +92,9 @@ importers:
       '@iterminal/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@iterminal/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
       '@iterminal/runtime-rpc':
         specifier: workspace:*
         version: link:../../packages/runtime-rpc
@@ -209,6 +212,9 @@ importers:
       '@iterminal/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@iterminal/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
       '@iterminal/runtime-rpc':
         specifier: workspace:*
         version: link:../../packages/runtime-rpc
@@ -313,6 +319,9 @@ importers:
       '@iterminal/persistence-postgres':
         specifier: workspace:*
         version: link:../../packages/persistence-postgres
+      '@iterminal/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
       '@iterminal/runtime-rpc':
         specifier: workspace:*
         version: link:../../packages/runtime-rpc
@@ -382,7 +391,14 @@ importers:
         specifier: ^8.15.5
         version: 8.23.1
 
-  packages/protocol: {}
+  packages/protocol:
+    dependencies:
+      '@iterminal/domain':
+        specifier: workspace:*
+        version: link:../domain
+      zod:
+        specifier: 4.5.4
+        version: 4.5.4
 
   packages/queue-rabbitmq:
     dependencies:
@@ -426,6 +442,9 @@ importers:
       '@iterminal/observability':
         specifier: workspace:*
         version: link:../observability
+      '@iterminal/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       zod:
         specifier: 4.5.4
         version: 4.5.4

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { createMcpServer, MCP_INSTRUCTIONS } from "./server.js";
 
 const baselineToolNames = new Set([
+  "runtime_capabilities",
   "session_create",
   "session_get",
   "session_checkpoint",

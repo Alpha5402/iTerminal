@@ -60,6 +60,15 @@ import {
   isCanonicalActorCapabilities,
 } from "@iterminal/domain";
 import { operationalErrorMessage } from "@iterminal/observability";
+import {
+  defineRuntimeCapabilities,
+  executeTransportRequestSchema,
+  inputTransportRequestSchema,
+  runtimeCapabilitiesRequestSchema,
+  runtimeCapabilitiesSchema,
+  type RuntimeCapabilities,
+  type RuntimeCapabilitiesRequest,
+} from "@iterminal/protocol";
 import * as z from "zod/v4";
 
 import {
@@ -226,25 +235,12 @@ const operationSchemas = {
   }),
   "execution.get": z.strictObject({ executionId: z.string().min(1).max(256) }),
   "execution.dispatch": z.strictObject({ executionId: z.string().min(1).max(256) }),
-  "execution.start": sessionIdentitySchema.extend({
+  "execution.start": executeTransportRequestSchema.extend({
     actor: actorSchema,
-    approvalId: z.string().min(1).max(256).optional(),
-    command: z.string().max(256 * 1024),
-    idempotencyKey: z.string().min(1).max(256),
   }),
   "execution.wait": z.strictObject({ executionId: z.string().min(1).max(256) }),
-  "input.send": sessionIdentitySchema.extend({
+  "input.send": inputTransportRequestSchema.extend({
     actor: actorSchema,
-    data: z.string().max(64 * 1024),
-    expectedScreenVersion: z.number().int().nonnegative().optional(),
-    lineInput: z
-      .strictObject({
-        expectedInputVersion: z.number().int().nonnegative(),
-        expectedInteractionVersion: z.number().int().positive(),
-      })
-      .optional(),
-    idempotencyKey: z.string().min(1).max(256),
-    targetExecutionId: z.string().min(1).max(256),
   }),
   "secret.input.begin": sessionIdentitySchema.extend({
     actor: actorSchema,
@@ -343,6 +339,7 @@ const operationSchemas = {
   }),
   "session.get": z.strictObject({ sessionId: z.string().min(1).max(256) }),
   "session.list": z.strictObject({}),
+  "runtime.capabilities": runtimeCapabilitiesRequestSchema,
 } as const;
 
 export type RuntimeOperation = keyof typeof operationSchemas;
@@ -357,6 +354,7 @@ export interface StartedExecutionView {
 }
 
 export interface RuntimeGateway {
+  getRuntimeCapabilities?(request?: RuntimeCapabilitiesRequest): Promise<RuntimeCapabilities>;
   requestExecuteApproval(request: RequestExecuteApprovalRequest): Promise<Approval>;
   getApproval(request: GetApprovalRequest): Promise<Approval>;
   listApprovals(request: ListApprovalsRequest): Promise<readonly Approval[]>;
@@ -401,7 +399,21 @@ export interface RuntimeGateway {
 }
 
 export class LocalRuntimeGateway implements RuntimeGateway {
-  public constructor(private readonly runtime: RuntimeService) {}
+  readonly #capabilities: RuntimeCapabilities;
+
+  public constructor(
+    private readonly runtime: RuntimeService,
+    options: Readonly<{ readonly buildId?: string }> = {},
+  ) {
+    this.#capabilities = defineRuntimeCapabilities({
+      ...(options.buildId === undefined ? {} : { buildId: options.buildId }),
+      features: ["action.execute.v1", "action.input.v1", "runtime.capabilities.v1"],
+    });
+  }
+
+  public getRuntimeCapabilities(): Promise<RuntimeCapabilities> {
+    return Promise.resolve(this.#capabilities);
+  }
 
   public requestExecuteApproval(request: RequestExecuteApprovalRequest): Promise<Approval> {
     return this.runtime.requestExecuteApproval(request);
@@ -710,6 +722,12 @@ export class UnixRuntimeClient implements RuntimeGateway {
         ? {}
         : { ttlMilliseconds: request.ttlMilliseconds }),
     });
+  }
+
+  public async getRuntimeCapabilities(
+    request: RuntimeCapabilitiesRequest = {},
+  ): Promise<RuntimeCapabilities> {
+    return runtimeCapabilitiesSchema.parse(await this.#request("runtime.capabilities", request));
   }
 
   public getApproval(request: GetApprovalRequest): Promise<Approval> {
@@ -1191,6 +1209,16 @@ async function dispatch(
   signal: AbortSignal,
 ): Promise<unknown> {
   switch (operation) {
+    case "runtime.capabilities": {
+      const request = operationSchemas[operation].parse(input);
+      if (gateway.getRuntimeCapabilities === undefined) {
+        throw new RuntimeError(
+          "INVALID_REQUEST",
+          "Runtime capability negotiation is not supported by this service",
+        );
+      }
+      return runtimeCapabilitiesSchema.parse(await gateway.getRuntimeCapabilities(request));
+    }
     case "approval.request": {
       const request = operationSchemas[operation].parse(input);
       return gateway.requestExecuteApproval({

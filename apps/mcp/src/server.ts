@@ -6,6 +6,11 @@ import {
   MIN_TERMINAL_ROWS,
   RuntimeError,
 } from "@iterminal/domain";
+import {
+  executeTransportRequestSchema,
+  inputTransportRequestSchema,
+  runtimeCapabilitiesRequestSchema,
+} from "@iterminal/protocol";
 import type { RuntimeGateway } from "@iterminal/runtime-rpc";
 import type { CallToolResult } from "@modelcontextprotocol/server";
 import { McpServer } from "@modelcontextprotocol/server";
@@ -49,6 +54,27 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
     {
       instructions: MCP_INSTRUCTIONS,
     },
+  );
+
+  server.registerTool(
+    "runtime_capabilities",
+    {
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      description:
+        "Read the connected Runtime or Router capability contract. Pass sessionId through a Router to inspect that exact live owner; absent features are unsupported.",
+      inputSchema: runtimeCapabilitiesRequestSchema,
+      title: "Get Runtime capabilities",
+    },
+    async (input) =>
+      call(async () => {
+        if (gateway.getRuntimeCapabilities === undefined) {
+          throw new RuntimeError(
+            "INVALID_REQUEST",
+            "Connected Runtime does not support capability negotiation",
+          );
+        }
+        return gateway.getRuntimeCapabilities(input);
+      }),
   );
 
   server.registerTool(
@@ -240,13 +266,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
       annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: true },
       description:
         "Start one top-level Shell command; returns Action/Execution immediately. approvalId binds an exact Human-approved proposal. Reuse idempotencyKey only for the identical request.",
-      inputSchema: z.strictObject({
-        approvalId: z.string().min(1).max(256).optional(),
-        command: z.string().max(256 * 1024),
-        idempotencyKey,
-        generation,
-        sessionId,
-      }),
+      inputSchema: executeTransportRequestSchema,
       title: "Execute in shared terminal",
     },
     async ({
@@ -311,20 +331,7 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
       annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: true },
       description:
         "Write input to the exact foreground Execution. Use expectedScreenVersion for screen-dependent input; use lineInput only for one printable LF-ended line with its two context versions. Do not use lineInput for TUI/editor/password/confirmation. Re-observe changed or guarded targets before retrying.",
-      inputSchema: z.strictObject({
-        data: z.string().max(64 * 1024),
-        expectedScreenVersion: z.number().int().nonnegative().optional(),
-        lineInput: z
-          .strictObject({
-            expectedInputVersion: z.number().int().nonnegative(),
-            expectedInteractionVersion: z.number().int().positive(),
-          })
-          .optional(),
-        idempotencyKey,
-        generation,
-        sessionId,
-        targetExecutionId: executionId,
-      }),
+      inputSchema: inputTransportRequestSchema,
       title: "Send targeted terminal input",
     },
     async (input) =>

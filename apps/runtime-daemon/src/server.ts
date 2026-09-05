@@ -74,6 +74,7 @@ export async function startRuntimeDaemon(options: {
   readonly actionRateLimitWindowMilliseconds?: number;
   readonly actorActionRateLimit?: number;
   readonly beforeAcceptExecuteCommit?: () => void;
+  readonly buildId?: string;
   readonly capacityWeight?: number;
   readonly checkpointEnvironmentKeys?: readonly string[];
   readonly databaseHealthCheckMilliseconds?: number;
@@ -346,7 +347,9 @@ export async function startRuntimeDaemon(options: {
       ...(options.rpcAuthentication === undefined
         ? {}
         : { authentication: options.rpcAuthentication }),
-      gateway: new LocalRuntimeGateway(runtime),
+      gateway: new LocalRuntimeGateway(runtime, {
+        ...(options.buildId === undefined ? {} : { buildId: options.buildId }),
+      }),
       isReady,
       socketPath: options.socketPath,
     });

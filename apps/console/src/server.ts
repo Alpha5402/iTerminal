@@ -17,6 +17,12 @@ import {
   MIN_TERMINAL_ROWS,
   RuntimeError,
 } from "@iterminal/domain";
+import {
+  RUNTIME_PROTOCOL_VERSION,
+  executeTransportRequestSchema,
+  inputTransportRequestSchema,
+  type RuntimeCapabilities,
+} from "@iterminal/protocol";
 import type { RuntimeGateway } from "@iterminal/runtime-rpc";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import type { RawData, WebSocket } from "ws";
@@ -47,14 +53,7 @@ const createSessionSchema = z.strictObject({
   shell: z.enum(["bash", "zsh"]),
   workspaceRoot: z.string().min(1).max(4_096),
 });
-const executeSchema = identitySchema.extend({
-  approvalId: z.string().min(1).max(256).optional(),
-  command: z
-    .string()
-    .min(1)
-    .max(256 * 1_024),
-  idempotencyKey: z.string().min(1).max(256),
-});
+const executeSchema = executeTransportRequestSchema.omit({ sessionId: true });
 const approvalListSchema = z.strictObject({
   generation: z.coerce.number().int().positive(),
   status: z.enum(["PENDING", "APPROVED", "DENIED", "EXPIRED", "CONSUMED"]).optional(),
@@ -70,21 +69,7 @@ const forkSessionSchema = identitySchema.extend({
   expectedCheckpointVersion: z.number().int().positive(),
   idempotencyKey: z.string().min(1).max(256),
 });
-const inputSchema = identitySchema.extend({
-  data: z
-    .string()
-    .min(1)
-    .max(64 * 1_024),
-  expectedScreenVersion: z.number().int().nonnegative().optional(),
-  lineInput: z
-    .strictObject({
-      expectedInputVersion: z.number().int().nonnegative(),
-      expectedInteractionVersion: z.number().int().positive(),
-    })
-    .optional(),
-  idempotencyKey: z.string().min(1).max(256),
-  targetExecutionId: z.string().min(1).max(256),
-});
+const inputSchema = inputTransportRequestSchema.omit({ sessionId: true });
 const secretInputSchema = identitySchema.extend({
   data: z
     .string()
@@ -182,6 +167,11 @@ export interface HumanConsoleResourceLimits {
   readonly requestRateWindowMilliseconds: number;
 }
 
+export type RuntimeCompatibility =
+  | Readonly<{ capabilities: RuntimeCapabilities; status: "compatible" }>
+  | Readonly<{ capabilities: RuntimeCapabilities; status: "incompatible" }>
+  | Readonly<{ status: "legacy" }>;
+
 export interface HumanConsoleServerHandle {
   readonly app: FastifyInstance;
   readonly host: string;
@@ -246,7 +236,10 @@ export async function createHumanConsoleApp(
 
   app.get("/api/bootstrap", async (request, reply) => {
     const actor = actorForRequest(request, reply, actors, now, true, limits.maxActors);
-    const sessions = await options.gateway.listSessions();
+    const [runtimeCompatibility, sessions] = await Promise.all([
+      runtimeCompatibilityFor(options.gateway),
+      options.gateway.listSessions(),
+    ]);
     return success(request, {
       actor,
       canonicalGeometry: {
@@ -267,6 +260,7 @@ export async function createHumanConsoleApp(
               serverName: "iterminal",
             },
           }),
+      runtimeCompatibility,
       sessions,
     });
   });
@@ -1468,6 +1462,27 @@ function allowedNextActions(code: string): readonly string[] {
       return ["inspect_runtime_health", "reconnect_console"];
     default:
       return [];
+  }
+}
+
+async function runtimeCompatibilityFor(gateway: RuntimeGateway): Promise<RuntimeCompatibility> {
+  if (gateway.getRuntimeCapabilities === undefined) return { status: "legacy" };
+  try {
+    const capabilities = await gateway.getRuntimeCapabilities({});
+    return {
+      capabilities,
+      status:
+        capabilities.protocolVersion === RUNTIME_PROTOCOL_VERSION ? "compatible" : "incompatible",
+    };
+  } catch (error) {
+    if (
+      error instanceof RuntimeError &&
+      error.code === "INVALID_REQUEST" &&
+      error.message === "Unsupported Runtime RPC operation"
+    ) {
+      return { status: "legacy" };
+    }
+    throw error;
   }
 }
 

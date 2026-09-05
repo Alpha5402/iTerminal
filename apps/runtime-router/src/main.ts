@@ -16,6 +16,7 @@ const rpcAuthentication = runtimeRpcAuthenticationFromEnvironment(process.env);
 
 const router = await startRuntimeRouter({
   databaseUrl,
+  ...(process.env.ITERM_BUILD_ID === undefined ? {} : { buildId: process.env.ITERM_BUILD_ID }),
   ...(rpcAuthentication === undefined ? {} : { rpcAuthentication }),
   superviseDatabase: true,
   onDatabaseState: reportDatabaseState,

@@ -52,6 +52,11 @@ import type {
 } from "@iterminal/domain";
 import { RuntimeError } from "@iterminal/domain";
 import {
+  defineRuntimeCapabilities,
+  type RuntimeCapabilities,
+  type RuntimeCapabilitiesRequest,
+} from "@iterminal/protocol";
+import {
   PostgresRuntimeOwnerRegistry,
   type PostgresConnectionTarget,
 } from "@iterminal/persistence-postgres";
@@ -88,6 +93,7 @@ type TargetKind = "execution" | "session";
 
 export class CentralRuntimeRouterGateway implements RuntimeGateway {
   readonly #clients = new Map<string, RuntimeGateway>();
+  readonly #capabilities: RuntimeCapabilities;
 
   public constructor(
     private readonly routes: RuntimeOwnerRegistry,
@@ -95,7 +101,29 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
       new UnixRuntimeClient(endpoint),
     private readonly hooks: RuntimeRouterHooks = {},
     private readonly databaseGate?: RuntimeRouterDatabaseGate,
-  ) {}
+    options: Readonly<{ readonly buildId?: string }> = {},
+  ) {
+    this.#capabilities = defineRuntimeCapabilities({
+      ...(options.buildId === undefined ? {} : { buildId: options.buildId }),
+      features: ["runtime.capabilities.v1", "runtime.owner-capabilities.v1"],
+    });
+  }
+
+  public getRuntimeCapabilities(
+    request: RuntimeCapabilitiesRequest = {},
+  ): Promise<RuntimeCapabilities> {
+    if (request.sessionId === undefined) return Promise.resolve(this.#capabilities);
+    return this.#withSession(request.sessionId, "runtime.capabilities", (client) => {
+      if (client.getRuntimeCapabilities === undefined) {
+        throw new RuntimeError(
+          "INVALID_REQUEST",
+          "Target Runtime owner does not support capability negotiation",
+          { sessionId: request.sessionId },
+        );
+      }
+      return client.getRuntimeCapabilities({});
+    });
+  }
 
   public requestExecuteApproval(request: RequestExecuteApprovalRequest): Promise<Approval> {
     return this.#withSession(request.sessionId, "approval.request", (client) =>
@@ -481,6 +509,7 @@ function isRuntimeConnectionFailure(error: RuntimeError): boolean {
 }
 
 export async function startRuntimeRouter(options: {
+  readonly buildId?: string;
   readonly databaseHealthCheckMilliseconds?: number;
   readonly databaseReconnectInitialMilliseconds?: number;
   readonly databaseReconnectMaxMilliseconds?: number;
@@ -527,6 +556,7 @@ export async function startRuntimeRouter(options: {
       undefined,
       options.hooks,
       supervisor?.gate,
+      { ...(options.buildId === undefined ? {} : { buildId: options.buildId }) },
     );
     rpc = await startRuntimeRpcServer({
       ...(options.rpcAuthentication === undefined

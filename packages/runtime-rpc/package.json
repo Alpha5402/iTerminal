@@ -8,6 +8,7 @@
     "@iterminal/application": "workspace:*",
     "@iterminal/domain": "workspace:*",
     "@iterminal/observability": "workspace:*",
+    "@iterminal/protocol": "workspace:*",
     "zod": "4.5.4"
   }
 }

@@ -20,7 +20,10 @@ beforeAll(async () => {
   fixtureRoot = await realpath(fixtureRoot);
   workspaceRoot = join(fixtureRoot, "workspace");
   await mkdir(join(workspaceRoot, "subdir"), { recursive: true });
-  daemon = await startRuntimeDaemon({ socketPath: join(fixtureRoot, "runtime.sock") });
+  daemon = await startRuntimeDaemon({
+    buildId: "a05-mcp-l2",
+    socketPath: join(fixtureRoot, "runtime.sock"),
+  });
 });
 
 afterAll(async () => {
@@ -46,6 +49,7 @@ describe("M4 stdio MCP bridge", () => {
       "execution_wait",
       "input",
       "interaction_get",
+      "runtime_capabilities",
       "screen_cells",
       "screen_diff",
       "screen_get",
@@ -61,6 +65,16 @@ describe("M4 stdio MCP bridge", () => {
       "terminal_resize",
       "terminal_state",
     ]);
+    const capabilities = await callTool<RuntimeCapabilitiesResult>(
+      first,
+      "runtime_capabilities",
+      {},
+    );
+    expect(capabilities).toEqual({
+      buildId: "a05-mcp-l2",
+      features: ["action.execute.v1", "action.input.v1", "runtime.capabilities.v1"],
+      protocolVersion: "1",
+    });
 
     const session = await callTool<SessionResult>(first, "session_create", {
       idempotencyKey: "mcp-stdio-session-create",
@@ -445,4 +459,10 @@ type ApprovalResult = {
   readonly id: string;
   readonly status: string;
   readonly version: number;
+};
+
+type RuntimeCapabilitiesResult = {
+  readonly buildId: string;
+  readonly features: readonly string[];
+  readonly protocolVersion: string;
 };

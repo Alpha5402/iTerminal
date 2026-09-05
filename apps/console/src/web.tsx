@@ -154,6 +154,16 @@ interface Bootstrap {
     readonly configJson: string;
     readonly serverName: string;
   };
+  readonly runtimeCompatibility:
+    | {
+        readonly capabilities: {
+          readonly buildId: string;
+          readonly features: readonly string[];
+          readonly protocolVersion: string;
+        };
+        readonly status: "compatible" | "incompatible";
+      }
+    | { readonly status: "legacy" };
   readonly sessions: readonly Session[];
 }
 
@@ -1521,6 +1531,16 @@ function App(): React.JSX.Element {
             <span className={`signal signal-${streamState}`} />
             <span>{streamState}</span>
             <code>{actorLabel ?? "initializing"}</code>
+            <span
+              title={
+                bootstrap?.runtimeCompatibility.status === "legacy" ||
+                bootstrap?.runtimeCompatibility === undefined
+                  ? "Runtime capability handshake unavailable"
+                  : `Runtime protocol ${bootstrap.runtimeCompatibility.capabilities.protocolVersion}, build ${bootstrap.runtimeCompatibility.capabilities.buildId}`
+              }
+            >
+              runtime {bootstrap?.runtimeCompatibility.status ?? "negotiating"}
+            </span>
           </div>
           <nav aria-label="Console tools" className="console-tools">
             <button
