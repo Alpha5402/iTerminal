@@ -42,7 +42,6 @@ import { createShellLaunchProfile } from "./shell-profile.js";
 import { SensitiveOutputSanitizer } from "./sensitive-output-sanitizer.js";
 
 const START_TIMEOUT_MS = 5_000;
-const EXECUTE_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
 const SESSION_RING_BYTES = 8 * 1024 * 1024;
 const EXECUTION_RING_BYTES = 2 * 1024 * 1024;
 const PTY_BARRIER_PREFIX = "\x1b]1337;iTerminalBarrier=";
@@ -59,7 +58,6 @@ interface PendingExecution {
   readonly callbacks: ShellExecuteCallbacks;
   readonly resolve: (result: ShellExecutionResult) => void;
   readonly reject: (error: Error) => void;
-  readonly timer: NodeJS.Timeout;
   resultExitCode?: number;
   readyEvent?: Readonly<{
     exitCode: number;
@@ -75,14 +73,32 @@ interface ControlWaiter {
   readonly predicate: (event: ControlEvent) => boolean;
   readonly resolve: (event: ControlEvent) => void;
   readonly reject: (error: Error) => void;
-  readonly timer: NodeJS.Timeout;
+  readonly timer: ShellStartupTimerHandle;
 }
 
+export interface ShellStartupTimerHandle {
+  cancel(): void;
+}
+
+export interface ShellStartupScheduler {
+  schedule(callback: () => void, delayMilliseconds: number): ShellStartupTimerHandle;
+}
+
+const systemShellStartupScheduler: ShellStartupScheduler = {
+  schedule(callback, delayMilliseconds) {
+    const timer = setTimeout(callback, delayMilliseconds);
+    return { cancel: () => clearTimeout(timer) };
+  },
+};
+
 export class PtyShellExecutorFactory implements ShellExecutorFactory {
-  public constructor(private readonly processGuardian?: ShellProcessGuardian) {}
+  public constructor(
+    private readonly processGuardian?: ShellProcessGuardian,
+    private readonly startupScheduler: ShellStartupScheduler = systemShellStartupScheduler,
+  ) {}
 
   public async create(options: CreateExecutorOptions): Promise<ShellExecutor> {
-    return PtyShellExecutor.start(options, this.processGuardian);
+    return PtyShellExecutor.start(options, this.processGuardian, this.startupScheduler);
   }
 }
 
@@ -105,6 +121,7 @@ export class PtyShellExecutor implements ShellExecutor {
   readonly #onOutput: (data: string) => void;
   readonly #sessionGeneration: number;
   readonly #sessionId: string;
+  readonly #startupScheduler: ShellStartupScheduler;
 
   #pending: PendingExecution | undefined;
   #pendingPtyText = "";
@@ -120,7 +137,11 @@ export class PtyShellExecutor implements ShellExecutor {
   public readonly shell: ShellKind;
   public readonly shellPid: number;
 
-  private constructor(options: CreateExecutorOptions, processGuardian?: ShellProcessGuardian) {
+  private constructor(
+    options: CreateExecutorOptions,
+    processGuardian: ShellProcessGuardian | undefined,
+    startupScheduler: ShellStartupScheduler,
+  ) {
     this.shell = options.shell;
     this.#executorId = options.executorId;
     this.#onLifecycle = options.onLifecycle;
@@ -128,6 +149,7 @@ export class PtyShellExecutor implements ShellExecutor {
     this.#onOutput = options.onOutput;
     this.#sessionGeneration = options.sessionGeneration;
     this.#sessionId = options.sessionId;
+    this.#startupScheduler = startupScheduler;
     this.#runtimeDirectory = mkdtempSync(join(tmpdir(), "iterminal-runtime-"));
     this.#controlFifo = join(this.#runtimeDirectory, "control.fifo");
     let controlFd: number | undefined;
@@ -196,8 +218,9 @@ export class PtyShellExecutor implements ShellExecutor {
   public static async start(
     options: CreateExecutorOptions,
     processGuardian?: ShellProcessGuardian,
+    startupScheduler: ShellStartupScheduler = systemShellStartupScheduler,
   ): Promise<PtyShellExecutor> {
-    const executor = new PtyShellExecutor(options, processGuardian);
+    const executor = new PtyShellExecutor(options, processGuardian, startupScheduler);
     try {
       const startIndex = executor.#events.length;
       await executor.#waitFor((event) => event.type === "hello", startIndex, START_TIMEOUT_MS);
@@ -236,12 +259,6 @@ export class PtyShellExecutor implements ShellExecutor {
         reject,
         resolve,
         started: false,
-        timer: setTimeout(() => {
-          if (this.#pending?.token === token) {
-            this.#pending = undefined;
-            reject(new Error("Execution exceeded the 24-hour adapter safety timeout"));
-          }
-        }, EXECUTE_TIMEOUT_MS),
         token,
       };
       this.#pending = pending;
@@ -251,8 +268,8 @@ export class PtyShellExecutor implements ShellExecutor {
         this.#pty.write(
           this.shell === "bash" ? BASH_DISPATCH_LOAD_SEQUENCE : ZSH_DISPATCH_LOAD_SEQUENCE,
         );
+        callbacks.onWriteAccepted?.();
       } catch (error) {
-        clearTimeout(pending.timer);
         this.#pending = undefined;
         reject(error instanceof Error ? error : new Error(String(error)));
       }
@@ -336,11 +353,10 @@ export class PtyShellExecutor implements ShellExecutor {
     const error = new Error("Executor closed");
     this.#pending?.reject(error);
     if (this.#pending !== undefined) {
-      clearTimeout(this.#pending.timer);
       this.#pending = undefined;
     }
     for (const waiter of this.#waiters) {
-      clearTimeout(waiter.timer);
+      waiter.timer.cancel();
       waiter.reject(error);
     }
     this.#waiters.clear();
@@ -388,7 +404,7 @@ export class PtyShellExecutor implements ShellExecutor {
     const eventIndex = this.#events.length - 1;
     for (const waiter of this.#waiters) {
       if (eventIndex >= waiter.afterIndex && waiter.predicate(event)) {
-        clearTimeout(waiter.timer);
+        waiter.timer.cancel();
         this.#waiters.delete(waiter);
         waiter.resolve(event);
       }
@@ -475,7 +491,6 @@ export class PtyShellExecutor implements ShellExecutor {
     if (pending.resultExitCode !== undefined && !pending.barrierSeen) {
       return;
     }
-    clearTimeout(pending.timer);
     if (this.#pending?.token === pending.token) {
       this.#pending = undefined;
     }
@@ -506,7 +521,7 @@ export class PtyShellExecutor implements ShellExecutor {
         predicate,
         reject,
         resolve,
-        timer: setTimeout(() => {
+        timer: this.#startupScheduler.schedule(() => {
           this.#waiters.delete(waiter);
           reject(new Error(`Timed out after ${timeoutMs.toString()} ms waiting for Shell event`));
         }, timeoutMs),
@@ -528,12 +543,11 @@ export class PtyShellExecutor implements ShellExecutor {
     }
     this.#fatalError ??= error;
     if (this.#pending !== undefined) {
-      clearTimeout(this.#pending.timer);
       this.#pending.reject(error);
       this.#pending = undefined;
     }
     for (const waiter of this.#waiters) {
-      clearTimeout(waiter.timer);
+      waiter.timer.cancel();
       waiter.reject(error);
     }
     this.#waiters.clear();

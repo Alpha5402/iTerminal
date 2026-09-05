@@ -338,6 +338,7 @@ interface ExecutionDispatchState {
   dispatchTask?: Promise<void>;
   readonly execution: Execution;
   readonly started: Deferred<void>;
+  writeAccepted: boolean;
 }
 
 interface Deferred<T> {
@@ -1570,6 +1571,7 @@ export class RuntimeService {
       completion: deferred<Execution>(),
       execution,
       started: deferred<void>(),
+      writeAccepted: false,
     };
     void state.started.promise.catch(() => undefined);
     void state.completion.promise.catch(() => undefined);
@@ -1632,6 +1634,9 @@ export class RuntimeService {
     let shellCompletion: Promise<ShellExecutionResult>;
     try {
       shellCompletion = executor.execute(execution.command, {
+        onWriteAccepted: () => {
+          state.writeAccepted = true;
+        },
         onStarted: (observedCommand) => {
           try {
             execution.status = "RUNNING";
@@ -1673,6 +1678,7 @@ export class RuntimeService {
           }
         },
       });
+      void shellCompletion.catch(() => undefined);
       this.#hooks.afterExecutionWrite?.(execution);
     } catch (error) {
       await this.#failDispatchedExecution(state, error);
@@ -1780,16 +1786,31 @@ export class RuntimeService {
   async #failDispatchedExecution(state: ExecutionDispatchState, error: unknown): Promise<never> {
     const { action, execution } = state;
     if (execution.status === "UNKNOWN") throw error;
-    state.started.reject(error);
-    execution.status = "FAILED";
+    const uncertain = state.writeAccepted || execution.status === "RUNNING";
+    const settlementError = uncertain
+      ? new RuntimeError(
+          "DELIVERY_UNKNOWN",
+          "Execution outcome is unknown after the Shell dispatch write",
+          { executionId: execution.id, reason: errorMessage(error) },
+          false,
+        )
+      : error;
+    state.started.reject(settlementError);
+    execution.status = uncertain ? "UNKNOWN" : "FAILED";
     execution.finishedAt = this.#timestamp();
-    action.status = "FAILED";
+    action.status = uncertain ? "UNKNOWN" : "FAILED";
     const current = this.store.getSession(execution.sessionId);
     if (current?.status !== "CLOSED") {
+      this.#clearPtyOutput(execution.sessionId);
+      this.#markSensitiveInputUnknown(execution.sessionId);
+      this.#detachExecutor(execution.sessionId);
+      this.#screens.get(execution.sessionId)?.dispose();
+      this.#screens.delete(execution.sessionId);
+      const activeExecution = executionVersion(execution);
       const broken = this.store.breakSession(execution.sessionId, execution.sessionGeneration);
-      const failedEvent = this.#event(
+      const settlementEvent = this.#event(
         broken,
-        "execution.failed",
+        uncertain ? "execution.unknown" : "execution.failed",
         { reason: errorMessage(error) },
         { action, execution, persist: false },
       );
@@ -1800,15 +1821,23 @@ export class RuntimeService {
         { persist: false },
       );
       const persisted = await this.#enqueueDurable(execution.sessionId, 0, () =>
-        this.#durability?.failExecution({
-          action,
-          expectedExecutionVersion: execution.version,
-          fence: this.#requireSessionFence(broken),
-          events: [failedEvent, brokenEvent],
-          execution,
-          reason: errorMessage(error),
-          session: broken,
-        }),
+        uncertain
+          ? this.#durability?.markSessionBroken(
+              this.#requireSessionFence(broken),
+              broken,
+              [settlementEvent, brokenEvent],
+              errorMessage(error),
+              activeExecution,
+            )
+          : this.#durability?.failExecution({
+              action,
+              expectedExecutionVersion: execution.version,
+              fence: this.#requireSessionFence(broken),
+              events: [settlementEvent, brokenEvent],
+              execution,
+              reason: errorMessage(error),
+              session: broken,
+            }),
       ).then(
         () => true,
         (durableError: unknown) => {
@@ -1819,7 +1848,7 @@ export class RuntimeService {
       if (persisted) execution.version += 1;
       this.#sessionLeases.delete(execution.sessionId);
     }
-    throw error;
+    throw settlementError;
   }
 
   #startedExecution(state: ExecutionDispatchState): StartedExecution {
