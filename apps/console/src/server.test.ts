@@ -1,12 +1,17 @@
 import { ACTOR_CAPABILITY_PROFILES } from "@iterminal/domain";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { Actor, InteractionState } from "@iterminal/domain";
 import { startRuntimeDaemon, type RuntimeDaemonHandle } from "@iterminal/runtime-daemon";
-import { UnixRuntimeClient } from "@iterminal/runtime-rpc";
+import {
+  signRuntimeRpcGrant,
+  UnixRuntimeClient,
+  type RuntimeRpcGrantClaims,
+} from "@iterminal/runtime-rpc";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket, type RawData } from "ws";
 import {
@@ -470,6 +475,104 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
     expect(restored.actor).toEqual(first.actor);
   });
 
+  it("reconciles a lost Execute response without a second PTY write and denies an invalid grant", async () => {
+    const fixture = await createFixture(fixtures);
+    const secret = randomBytes(32);
+    const audience = "iterminal-a04-console";
+    daemon = await startRuntimeDaemon({
+      rpcAuthentication: { audience, secret },
+      socketPath: join(fixture.root, "runtime.sock"),
+    });
+    const issuedAt = Math.floor(Date.now() / 1_000);
+    const grant = signRuntimeRpcGrant(secret, {
+      actor: {
+        capabilities: ACTOR_CAPABILITY_PROFILES.human,
+        client: "human-console-web",
+        idPrefix: "human_console_",
+        kind: "paired_prefix",
+        principalPrefix: "local-console:",
+        type: "human",
+      },
+      audience,
+      expiresAt: issuedAt + 60,
+      grantId: "a04-console-grant",
+      issuedAt,
+      operations: [
+        "events.query",
+        "execution.start",
+        "execution.wait",
+        "session.close",
+        "session.create",
+        "session.get",
+        "session.list",
+      ],
+      version: 1,
+    } satisfies RuntimeRpcGrantClaims);
+    const runtime = new UnixRuntimeClient(daemon.socketPath, { authorization: grant });
+    consoleServer = await startHumanConsole({ gateway: runtime, port: 0 });
+    const bootstrapResponse = await requestBootstrap(consoleServer);
+    const cookie = required(bootstrapResponse.headers.get("set-cookie")).split(";", 1)[0] ?? "";
+    const bootstrap = await bodyResult<{ readonly actor: Actor }>(bootstrapResponse);
+    const session = await requestResult<SessionResult>(consoleServer, cookie, "/api/sessions", {
+      body: {
+        idempotencyKey: "a04-lost-response-session",
+        shell: "zsh",
+        workspaceRoot: fixture.workspace,
+      },
+      method: "POST",
+    });
+    const marker = join(fixture.workspace, "a04-write-count.txt");
+    const executeBody = {
+      command: `printf 'once\\n' >> ${JSON.stringify(marker)}; sleep 0.1`,
+      generation: session.generation,
+      idempotencyKey: "a04-lost-execute",
+    };
+    const executePath = `/api/sessions/${session.id}/execute`;
+
+    await dropHttpResponse(consoleServer, cookie, executePath, executeBody);
+    await waitForFileContent(marker, "once\n");
+    await waitUntilReady(runtime, session.id);
+    const acceptedEvents = await runtime.queryEvents(session.id, session.generation, 0, 500);
+    const accepted = acceptedEvents.events.find(
+      (event) => event.type === "action.accepted" && event.actor?.id === bootstrap.actor.id,
+    );
+    expect(accepted?.actionId).toBeDefined();
+    expect(accepted?.executionId).toBeDefined();
+
+    const replay = await requestResult<{
+      readonly action: { readonly id: string };
+      readonly execution: { readonly id: string; readonly status: string };
+    }>(consoleServer, cookie, executePath, { body: executeBody, method: "POST" });
+    expect(replay.action.id).toBe(accepted?.actionId);
+    expect(replay.execution.id).toBe(accepted?.executionId);
+    expect(replay.execution.status).toBe("COMPLETED");
+    expect(await readFile(marker, "utf8")).toBe("once\n");
+    expect(
+      acceptedEvents.events.filter(
+        (event) => event.type === "action.accepted" && event.actor?.id === bootstrap.actor.id,
+      ),
+    ).toHaveLength(1);
+
+    await consoleServer.close();
+    consoleServer = await startHumanConsole({
+      gateway: new UnixRuntimeClient(daemon.socketPath, { authorization: `${grant}x` }),
+      port: 0,
+    });
+    expect((await requestBootstrap(consoleServer, cookie)).status).toBe(403);
+    const denied = await request(consoleServer, cookie, executePath, {
+      body: executeBody,
+      method: "POST",
+    });
+    expect(denied.status).toBe(403);
+    const deniedBody = await denied.text();
+    expect(deniedBody).toContain("POLICY_DENIED");
+    expect(deniedBody).not.toContain(required(accepted?.actionId));
+    expect(deniedBody).not.toContain(required(accepted?.executionId));
+    expect(deniedBody).not.toContain(marker);
+
+    await runtime.closeSession(session.id, session.generation);
+  }, 30_000);
+
   it("keeps READY/interactive writes on Runtime Actions and releases a Guard on disconnect", async () => {
     const fixture = await createFixture(fixtures);
     daemon = await startRuntimeDaemon({ socketPath: join(fixture.root, "runtime.sock") });
@@ -523,7 +626,7 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
       method: "POST",
     });
     expect(readyInput.status).toBe(409);
-    expect(await bodyErrorCode(readyInput)).toBe("SESSION_NOT_READY");
+    expect(await bodyErrorCode(readyInput)).toBe("EXECUTION_CHANGED");
     const forgedActor = await request(
       consoleServer,
       cookie,
@@ -682,15 +785,36 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
       }),
     ).rejects.toMatchObject({ code: "INPUT_GUARDED" });
 
-    await requestResult(consoleServer, cookie, `/api/sessions/${session.id}/input`, {
-      body: {
-        data: "human_value = 40\n",
-        generation: session.generation,
-        idempotencyKey: "m5-human-input",
-        targetExecutionId: started.execution.id,
+    const humanInputBody = {
+      data: "human_value = 40\n",
+      generation: session.generation,
+      idempotencyKey: "m5-human-input",
+      targetExecutionId: started.execution.id,
+    };
+    const humanInputAction = await requestResult<{ readonly id: string }>(
+      consoleServer,
+      cookie,
+      `/api/sessions/${session.id}/input`,
+      {
+        body: humanInputBody,
+        method: "POST",
       },
-      method: "POST",
-    });
+    );
+    const humanControlBody = {
+      delivery: { mode: "PROCESS_SIGNAL", signal: "SIGCONT" },
+      generation: session.generation,
+      idempotencyKey: "m5-human-control",
+      targetExecutionId: started.execution.id,
+    };
+    const humanControlAction = await requestResult<{ readonly id: string }>(
+      consoleServer,
+      cookie,
+      `/api/sessions/${session.id}/control`,
+      {
+        body: humanControlBody,
+        method: "POST",
+      },
+    );
     firstStream.close(1000, "first viewer disconnect");
     await delay(50);
     expect((await runtime.getInteractionState(session.id, session.generation)).guard).toBeDefined();
@@ -707,6 +831,20 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
     });
     const execution = await runtime.waitExecution(started.execution.id);
     expect(execution.output).toContain("42");
+    const inputReplay = await requestResult<{ readonly id: string }>(
+      consoleServer,
+      cookie,
+      `/api/sessions/${session.id}/input`,
+      { body: humanInputBody, method: "POST" },
+    );
+    const controlReplay = await requestResult<{ readonly id: string }>(
+      consoleServer,
+      cookie,
+      `/api/sessions/${session.id}/control`,
+      { body: humanControlBody, method: "POST" },
+    );
+    expect(inputReplay.id).toBe(humanInputAction.id);
+    expect(controlReplay.id).toBe(humanControlAction.id);
     const events = await runtime.queryEvents(session.id, session.generation, 0, 500);
     const humanInput = events.events.find(
       (event) =>
@@ -715,6 +853,16 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
         event.actionId !== undefined,
     );
     expect(humanInput).toBeDefined();
+    expect(
+      events.events.filter(
+        (event) => event.type === "action.accepted" && event.actionId === humanInputAction.id,
+      ),
+    ).toHaveLength(1);
+    expect(
+      events.events.filter(
+        (event) => event.type === "action.accepted" && event.actionId === humanControlAction.id,
+      ),
+    ).toHaveLength(1);
     expect(JSON.stringify(events.events)).not.toContain("READY_BYPASS");
   }, 30_000);
 
@@ -1052,6 +1200,43 @@ function rawHttpGet(
   });
 }
 
+function dropHttpResponse(
+  server: HumanConsoleServerHandle,
+  cookie: string,
+  path: string,
+  body: unknown,
+): Promise<void> {
+  const target = new URL(server.url);
+  const payload = JSON.stringify(body);
+  return new Promise((resolveResponse, rejectResponse) => {
+    let settled = false;
+    const request = httpRequest(
+      {
+        headers: {
+          "content-length": Buffer.byteLength(payload).toString(),
+          "content-type": "application/json",
+          cookie,
+          origin: server.url,
+          "x-iterminal-request": "console",
+        },
+        host: target.hostname,
+        method: "POST",
+        path,
+        port: server.port,
+      },
+      (response) => {
+        settled = true;
+        response.destroy();
+        resolveResponse();
+      },
+    );
+    request.once("error", (error) => {
+      if (!settled) rejectResponse(error);
+    });
+    request.end(payload);
+  });
+}
+
 function runtimeGateway(daemon: RuntimeDaemonHandle): UnixRuntimeClient {
   return new UnixRuntimeClient(daemon.socketPath);
 }
@@ -1063,6 +1248,22 @@ async function waitUntilRunning(runtime: UnixRuntimeClient, executionId: string)
     await delay(10);
   }
   throw new Error(`Execution did not enter RUNNING: ${executionId}`);
+}
+
+async function waitUntilReady(runtime: UnixRuntimeClient, sessionId: string): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if ((await runtime.getSession(sessionId)).status === "READY") return;
+    await delay(10);
+  }
+  throw new Error(`Session did not return to READY: ${sessionId}`);
+}
+
+async function waitForFileContent(path: string, expected: string): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if ((await readFile(path, "utf8").catch(() => undefined)) === expected) return;
+    await delay(10);
+  }
+  throw new Error(`Fixture file did not reach expected content: ${path}`);
 }
 
 async function waitUntilGuardReleased(
