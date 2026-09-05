@@ -14,6 +14,8 @@ import type {
   DurableOwnerRecoveryResult,
   DurableRebuildableSession,
   DurableSessionEvent,
+  ExecutionOutputReadRequest,
+  ExecutionOutputReadResult,
   RuntimeOwnerIdentity,
   RuntimeDurability,
   SessionFence,
@@ -187,6 +189,12 @@ export class PostgresRuntimeDurability implements RuntimeDurability {
 
   public readArtifact(request: ArtifactReadRequest): Promise<DurableArtifactReadResult> {
     return this.#observation.readArtifact(request);
+  }
+
+  public readExecutionOutput(
+    request: ExecutionOutputReadRequest,
+  ): Promise<ExecutionOutputReadResult> {
+    return this.#observation.readExecutionOutput(request);
   }
 
   public requestApproval(

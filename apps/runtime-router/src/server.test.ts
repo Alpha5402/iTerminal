@@ -3,6 +3,8 @@ import type {
   ActionLookupResult,
   ArtifactReadRequest,
   ArtifactReadResult,
+  ExecutionOutputReadRequest,
+  ExecutionOutputReadResult,
   RuntimeOwnerRecord,
   RuntimeOwnerRegistry,
 } from "@iterminal/application";
@@ -37,6 +39,7 @@ describe("CentralRuntimeRouterGateway error classification", () => {
           return new CapabilityClient("owner-a", [
             "action.execute.v1",
             "artifact.read.v1",
+            "execution.output.read.v1",
             "runtime.capabilities.v1",
           ]);
         }
@@ -52,6 +55,7 @@ describe("CentralRuntimeRouterGateway error classification", () => {
       features: [
         "action.lookup.v1",
         "artifact.read.v1",
+        "execution.output.read.v1",
         "runtime.capabilities.v1",
         "runtime.owner-capabilities.v1",
       ],
@@ -59,7 +63,12 @@ describe("CentralRuntimeRouterGateway error classification", () => {
     });
     await expect(gateway.getRuntimeCapabilities({ sessionId: "session-a" })).resolves.toEqual({
       buildId: "owner-a",
-      features: ["action.execute.v1", "artifact.read.v1", "runtime.capabilities.v1"],
+      features: [
+        "action.execute.v1",
+        "artifact.read.v1",
+        "execution.output.read.v1",
+        "runtime.capabilities.v1",
+      ],
       protocolVersion: "1",
     });
     await expect(gateway.getRuntimeCapabilities({ sessionId: "session-b" })).resolves.toEqual({
@@ -214,6 +223,48 @@ describe("CentralRuntimeRouterGateway error classification", () => {
     await expect(absent.readArtifact(request)).resolves.toMatchObject({ kind: "not_found" });
   });
 
+  it("routes Execution output to one exact Session owner and hides absent routes", async () => {
+    const request = {
+      executionId: "execution-routed",
+      generation: 7,
+      sessionId: "session-routed",
+    };
+    let calls = 0;
+    const routed = new CentralRuntimeRouterGateway(
+      routeRegistry(owner),
+      () =>
+        new ExecutionOutputClient((received) => {
+          calls += 1;
+          return Promise.resolve({
+            chunks: [],
+            encoding: "base64",
+            executionId: received.executionId,
+            executionState: "RUNNING",
+            gap: null,
+            generation: received.generation,
+            hasMore: false,
+            persistenceLag: "possible",
+            retention: { minimumAvailableSequence: 1, source: "durable" },
+            sessionId: received.sessionId,
+            stream: "pty",
+          });
+        }),
+    );
+    await expect(routed.readExecutionOutput(request)).resolves.toMatchObject({
+      executionId: request.executionId,
+      persistenceLag: "possible",
+    });
+    expect(calls).toBe(1);
+
+    const absent = new CentralRuntimeRouterGateway(
+      { ...routeRegistry(owner), resolveSessionRoute: () => Promise.resolve(undefined) },
+      () => new ExecutionOutputClient(() => Promise.reject(new Error("must not dispatch"))),
+    );
+    await expect(absent.readExecutionOutput(request)).rejects.toMatchObject({
+      code: "EXECUTION_NOT_FOUND",
+    });
+  });
+
   it("rejects a Session returned under a conflicting owner identity", async () => {
     const gateway = new CentralRuntimeRouterGateway(
       routeRegistry(owner),
@@ -290,7 +341,11 @@ class CapabilityClient extends UnixRuntimeClient {
   public constructor(
     private readonly buildId: string,
     private readonly features: readonly (
-      "action.execute.v1" | "action.input.v1" | "artifact.read.v1" | "runtime.capabilities.v1"
+      | "action.execute.v1"
+      | "action.input.v1"
+      | "artifact.read.v1"
+      | "runtime.capabilities.v1"
+      | "execution.output.read.v1"
     )[],
   ) {
     super("/unused/capability-owner.sock");
@@ -302,6 +357,22 @@ class CapabilityClient extends UnixRuntimeClient {
       features: this.features,
       protocolVersion: "1",
     });
+  }
+}
+
+class ExecutionOutputClient extends UnixRuntimeClient {
+  public constructor(
+    private readonly read: (
+      request: ExecutionOutputReadRequest,
+    ) => Promise<ExecutionOutputReadResult>,
+  ) {
+    super("/unused/execution-output-owner.sock");
+  }
+
+  public override readExecutionOutput(
+    request: ExecutionOutputReadRequest,
+  ): Promise<ExecutionOutputReadResult> {
+    return this.read(request);
   }
 }
 

@@ -67,6 +67,8 @@ import type {
   ActionLookupResult,
   ArtifactReadRequest,
   ArtifactReadResult,
+  ExecutionOutputReadRequest,
+  ExecutionOutputReadResult,
   DurableSessionEvent,
   DurableForkAdmission,
   DurableOwnerRecoveryResult,
@@ -84,7 +86,7 @@ import type {
   TerminalScreenProjection,
   TerminalScreenProjectionFactory,
 } from "./ports.js";
-import { MAX_ARTIFACT_READ_BYTES } from "./ports.js";
+import { MAX_ARTIFACT_READ_BYTES, MAX_EXECUTION_OUTPUT_READ_BYTES } from "./ports.js";
 import { classifyTerminalState } from "./terminal-state.js";
 
 const DEFAULT_EVENT_LIMIT = 100;
@@ -584,6 +586,34 @@ export class RuntimeService {
         reason: "durability_unavailable",
         retryable: true,
       };
+    }
+  }
+
+  public async readExecutionOutput(
+    request: ExecutionOutputReadRequest,
+  ): Promise<ExecutionOutputReadResult> {
+    validateSessionId(request.sessionId);
+    validateGeneration(request.generation);
+    validateExecutionId(request.executionId);
+    validateExecutionOutputRead(request.cursor, request.maxBytes);
+    if (this.#durability?.readExecutionOutput === undefined) {
+      throw new RuntimeError(
+        "RUNTIME_UNAVAILABLE",
+        "Durable Execution output reading is not configured",
+        { component: "execution_output" },
+        true,
+      );
+    }
+    try {
+      return await this.#durability.readExecutionOutput(request);
+    } catch (error) {
+      if (error instanceof RuntimeError) throw error;
+      throw new RuntimeError(
+        "RUNTIME_UNAVAILABLE",
+        "Durable Execution output reading is temporarily unavailable",
+        { component: "execution_output" },
+        true,
+      );
     }
   }
 
@@ -4849,6 +4879,33 @@ function validateArtifactReadRange(offsetBytes: number, maxBytes: number | undef
     throw new RuntimeError(
       "INVALID_REQUEST",
       `Artifact maxBytes must be between 1 and ${MAX_ARTIFACT_READ_BYTES.toString()}`,
+    );
+  }
+}
+
+function validateExecutionId(value: string): void {
+  if (value.length < 1 || value.length > 256 || value.includes("\0")) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      "executionId must contain 1 to 256 non-NUL characters",
+    );
+  }
+}
+
+function validateExecutionOutputRead(
+  cursor: string | undefined,
+  maxBytes: number | undefined,
+): void {
+  if (cursor !== undefined && (cursor.length < 1 || cursor.length > 2_048)) {
+    throw new RuntimeError("INVALID_REQUEST", "Execution output cursor is invalid");
+  }
+  if (
+    maxBytes !== undefined &&
+    (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_EXECUTION_OUTPUT_READ_BYTES)
+  ) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      `Execution output maxBytes must be between 1 and ${MAX_EXECUTION_OUTPUT_READ_BYTES.toString()}`,
     );
   }
 }

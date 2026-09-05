@@ -1,11 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import type { Actor } from "@iterminal/domain";
+import type { Actor, Execution } from "@iterminal/domain";
 import {
   DEFAULT_ARTIFACT_READ_BYTES,
+  DEFAULT_EXECUTION_OUTPUT_READ_BYTES,
   MAX_ARTIFACT_READ_BYTES,
+  MAX_EXECUTION_OUTPUT_READ_BYTES,
   type ArtifactReadRequest,
   type DurableArtifactReadResult,
+  type ExecutionOutputGap,
+  type ExecutionOutputReadRequest,
+  type ExecutionOutputReadResult,
   type SessionFence,
 } from "@iterminal/application";
 import { RuntimeError } from "@iterminal/domain";
@@ -20,6 +25,8 @@ const MAX_EVENT_LIMIT = 500;
 const MAX_SEARCH_LIMIT = 50;
 const DEFAULT_INLINE_BYTES = 4 * 1024;
 const DEFAULT_TAIL_BYTES = 2 * 1024;
+const MAX_DURABLE_OUTPUT_EVENT_BYTES = 8 * 1024;
+const MAX_EXECUTION_OUTPUT_EVENT_ROWS = 64;
 
 export interface EventObservation {
   readonly id: string;
@@ -96,6 +103,29 @@ interface CursorPayload {
   readonly generation: number;
   readonly after: number;
   readonly fingerprint: string;
+}
+
+interface ExecutionOutputCursorPayload {
+  readonly eventOffset: number;
+  readonly eventSequence: number;
+  readonly executionId: string;
+  readonly fingerprint: string;
+  readonly generation: number;
+  readonly position: "event" | "retention";
+  readonly sessionId: string;
+  readonly version: 1;
+}
+
+interface ExecutionOutputEventRow {
+  readonly event_sequence: string;
+  readonly payload: Record<string, unknown>;
+}
+
+interface ExecutionOutputScopeRow {
+  readonly deleted_through: string;
+  readonly minimum_sequence: string | null;
+  readonly next_event_sequence: string;
+  readonly status: Execution["status"];
 }
 
 interface EventRow {
@@ -579,6 +609,366 @@ export class PostgresObservationRepository {
     };
   }
 
+  public async readExecutionOutput(
+    request: ExecutionOutputReadRequest,
+  ): Promise<ExecutionOutputReadResult> {
+    const scope = await this.#pool.query<ExecutionOutputScopeRow>(
+      `SELECT execution.status,
+              generation.next_event_sequence::text,
+              coalesce(watermark.deleted_through_sequence, 0)::text AS deleted_through,
+              (SELECT min(event.event_sequence)::text
+                 FROM session_events event
+                WHERE event.session_id = execution.session_id
+                  AND event.session_generation = execution.session_generation) AS minimum_sequence
+         FROM executions execution
+         JOIN session_generations generation
+           ON generation.session_id = execution.session_id
+          AND generation.generation = execution.session_generation
+         LEFT JOIN event_retention_watermarks watermark
+           ON watermark.session_id = execution.session_id
+          AND watermark.session_generation = execution.session_generation
+        WHERE execution.id = $1 AND execution.session_id = $2
+          AND execution.session_generation = $3`,
+      [request.executionId, request.sessionId, request.generation],
+    );
+    const scopeRow = scope.rows[0];
+    if (scopeRow === undefined) {
+      throw new RuntimeError(
+        "EXECUTION_NOT_FOUND",
+        "Execution was not found in the requested scope",
+      );
+    }
+
+    const deletedThrough = safeNonnegativeInteger(
+      scopeRow.deleted_through,
+      "Event retention watermark",
+    );
+    const minimumFloor =
+      scopeRow.minimum_sequence === null
+        ? 0
+        : safeNonnegativeInteger(scopeRow.minimum_sequence, "Minimum Event sequence") - 1;
+    const effectiveFloor = Math.max(deletedThrough, minimumFloor);
+    const nextEventSequence = safeNonnegativeInteger(
+      scopeRow.next_event_sequence,
+      "Generation Event sequence",
+    );
+    const fingerprint = executionOutputFingerprint(request);
+    const cursor =
+      request.cursor === undefined ? undefined : decodeExecutionOutputCursor(request.cursor);
+    if (
+      cursor !== undefined &&
+      (cursor.sessionId !== request.sessionId ||
+        cursor.generation !== request.generation ||
+        cursor.executionId !== request.executionId ||
+        cursor.fingerprint !== fingerprint)
+    ) {
+      throw new RuntimeError("RESYNC_REQUIRED", "Execution output cursor scope changed");
+    }
+    if (cursor !== undefined && cursor.eventSequence < effectiveFloor) {
+      throw new RuntimeError(
+        "RESYNC_REQUIRED",
+        "Execution output cursor points before retained Event history",
+        { minimumAvailableSequence: effectiveFloor + 1 },
+      );
+    }
+    if (cursor?.position === "retention") {
+      if (
+        effectiveFloor === 0 ||
+        cursor.eventSequence !== effectiveFloor ||
+        cursor.eventOffset !== 0
+      ) {
+        throw new RuntimeError("RESYNC_REQUIRED", "Execution output retention cursor is stale");
+      }
+    } else if (
+      cursor !== undefined &&
+      (cursor.eventSequence <= effectiveFloor || cursor.eventSequence > nextEventSequence)
+    ) {
+      throw new RuntimeError("RESYNC_REQUIRED", "Execution output cursor position is invalid", {
+        minimumAvailableSequence: effectiveFloor + 1,
+      });
+    }
+
+    const startSequence =
+      cursor === undefined || cursor.position === "retention"
+        ? effectiveFloor + 1
+        : cursor.eventSequence;
+    const outputEvents = await this.#pool.query<ExecutionOutputEventRow>(
+      `SELECT event.event_sequence::text, event.payload
+         FROM session_events event
+        WHERE event.session_id = $1 AND event.session_generation = $2
+          AND event.execution_id = $3 AND event.event_type = 'terminal.pty_output'
+          AND event.event_sequence >= $4 AND event.event_sequence > $5
+        ORDER BY event.event_sequence ASC
+        LIMIT $6`,
+      [
+        request.sessionId,
+        request.generation,
+        request.executionId,
+        startSequence,
+        effectiveFloor,
+        MAX_EXECUTION_OUTPUT_EVENT_ROWS + 1,
+      ],
+    );
+    if (cursor?.position === "event") {
+      const anchor = outputEvents.rows[0];
+      const anchorSequence =
+        anchor === undefined
+          ? undefined
+          : safeNonnegativeInteger(anchor.event_sequence, "Output Event sequence");
+      if (anchor === undefined || anchorSequence !== cursor.eventSequence) {
+        throw new RuntimeError("RESYNC_REQUIRED", "Execution output cursor anchor is unavailable", {
+          minimumAvailableSequence: effectiveFloor + 1,
+        });
+      }
+      const anchorBytes = outputEventByteCount(anchor.payload);
+      if (cursor.eventOffset < 0 || cursor.eventOffset > anchorBytes) {
+        throw new RuntimeError("RESYNC_REQUIRED", "Execution output cursor byte offset is invalid");
+      }
+    }
+
+    let gap: ExecutionOutputGap | null = null;
+    if (request.cursor === undefined && effectiveFloor > 0) {
+      const accepted = await this.#pool.query<{ retained: boolean }>(
+        `SELECT EXISTS(
+           SELECT 1 FROM session_events event
+            WHERE event.session_id = $1 AND event.session_generation = $2
+              AND event.execution_id = $3 AND event.event_type = 'action.accepted'
+              AND event.event_sequence > $4
+         ) AS retained`,
+        [request.sessionId, request.generation, request.executionId, effectiveFloor],
+      );
+      if (accepted.rows[0]?.retained !== true) {
+        gap = {
+          kind: "event_retention",
+          minimumAvailableSequence: effectiveFloor + 1,
+        };
+      }
+    }
+
+    const requestedBytes = request.maxBytes ?? DEFAULT_EXECUTION_OUTPUT_READ_BYTES;
+    if (
+      !Number.isSafeInteger(requestedBytes) ||
+      requestedBytes < 1 ||
+      requestedBytes > MAX_EXECUTION_OUTPUT_READ_BYTES
+    ) {
+      throw new RuntimeError(
+        "INVALID_REQUEST",
+        `Execution output maxBytes must be between 1 and ${MAX_EXECUTION_OUTPUT_READ_BYTES.toString()}`,
+      );
+    }
+    const collected: Buffer[] = [];
+    let collectedBytes = 0;
+    let lastCursor =
+      request.cursor ??
+      (gap?.kind === "event_retention"
+        ? encodeExecutionOutputCursor({
+            eventOffset: 0,
+            eventSequence: effectiveFloor,
+            executionId: request.executionId,
+            fingerprint,
+            generation: request.generation,
+            position: "retention",
+            sessionId: request.sessionId,
+            version: 1,
+          })
+        : undefined);
+    let hasMore = false;
+    let continuousBlocked = false;
+    const rows = outputEvents.rows.slice(0, MAX_EXECUTION_OUTPUT_EVENT_ROWS);
+    for (const [rowIndex, row] of rows.entries()) {
+      const eventSequence = safeNonnegativeInteger(row.event_sequence, "Output Event sequence");
+      const eventBytes = outputEventByteCount(row.payload);
+      const eventOffset =
+        cursor?.position === "event" && cursor.eventSequence === eventSequence
+          ? cursor.eventOffset
+          : 0;
+      if (eventOffset === eventBytes) {
+        lastCursor = encodeExecutionOutputCursor({
+          eventOffset,
+          eventSequence,
+          executionId: request.executionId,
+          fingerprint,
+          generation: request.generation,
+          position: "event",
+          sessionId: request.sessionId,
+          version: 1,
+        });
+        continue;
+      }
+      const available = requestedBytes - collectedBytes;
+      if (available === 0) {
+        hasMore = true;
+        break;
+      }
+      const length = Math.min(available, eventBytes - eventOffset);
+      const inline = row.payload.data;
+      let segment: Buffer;
+      if (typeof inline === "string") {
+        const content = Buffer.from(inline, "utf8");
+        if (content.length !== eventBytes) {
+          throw new RuntimeError(
+            "RUNTIME_UNAVAILABLE",
+            "Durable inline output byte count is inconsistent",
+            { component: "execution_output" },
+            false,
+          );
+        }
+        segment = content.subarray(eventOffset, eventOffset + length);
+      } else if (typeof row.payload.artifactRef === "string") {
+        const artifact = await this.#readExecutionOutputArtifact({
+          artifactId: row.payload.artifactRef,
+          eventBytes,
+          eventOffset,
+          executionId: request.executionId,
+          generation: request.generation,
+          length,
+          sessionId: request.sessionId,
+        });
+        if (artifact.kind !== "found") {
+          if (gap?.kind === "event_retention") {
+            lastCursor ??= encodeExecutionOutputCursor({
+              eventOffset: 0,
+              eventSequence: effectiveFloor,
+              executionId: request.executionId,
+              fingerprint,
+              generation: request.generation,
+              position: "retention",
+              sessionId: request.sessionId,
+              version: 1,
+            });
+          } else {
+            gap = {
+              eventSequence,
+              kind: artifact.kind,
+              resumeCursor: encodeExecutionOutputCursor({
+                eventOffset: eventBytes,
+                eventSequence,
+                executionId: request.executionId,
+                fingerprint,
+                generation: request.generation,
+                position: "event",
+                sessionId: request.sessionId,
+                version: 1,
+              }),
+            };
+          }
+          hasMore = false;
+          continuousBlocked = true;
+          break;
+        }
+        segment = artifact.content;
+      } else {
+        throw new RuntimeError(
+          "RUNTIME_UNAVAILABLE",
+          "Durable output Event has no content reference",
+          { component: "execution_output" },
+          false,
+        );
+      }
+      if (segment.length !== length) {
+        throw new RuntimeError(
+          "RUNTIME_UNAVAILABLE",
+          "Durable output range length is inconsistent",
+          { component: "execution_output" },
+          false,
+        );
+      }
+      collected.push(segment);
+      collectedBytes += segment.length;
+      const nextOffset = eventOffset + segment.length;
+      lastCursor = encodeExecutionOutputCursor({
+        eventOffset: nextOffset,
+        eventSequence,
+        executionId: request.executionId,
+        fingerprint,
+        generation: request.generation,
+        position: "event",
+        sessionId: request.sessionId,
+        version: 1,
+      });
+      if (nextOffset < eventBytes) {
+        hasMore = true;
+        break;
+      }
+      if (collectedBytes === requestedBytes) {
+        hasMore = rowIndex + 1 < rows.length || outputEvents.rows.length > rows.length;
+        break;
+      }
+    }
+    if (!continuousBlocked && !hasMore && outputEvents.rows.length > rows.length) {
+      hasMore = true;
+    }
+    const content = Buffer.concat(collected, collectedBytes);
+    return {
+      chunks:
+        content.length === 0
+          ? []
+          : [{ byteLength: content.length, contentBase64: content.toString("base64") }],
+      encoding: "base64",
+      executionId: request.executionId,
+      executionState: scopeRow.status,
+      gap,
+      generation: request.generation,
+      hasMore,
+      ...(lastCursor === undefined ? {} : { nextCursor: lastCursor }),
+      persistenceLag:
+        scopeRow.status === "DISPATCHING" || scopeRow.status === "RUNNING" ? "possible" : "none",
+      retention: { minimumAvailableSequence: effectiveFloor + 1, source: "durable" },
+      sessionId: request.sessionId,
+      stream: "pty",
+    };
+  }
+
+  async #readExecutionOutputArtifact(input: {
+    readonly artifactId: string;
+    readonly eventBytes: number;
+    readonly eventOffset: number;
+    readonly executionId: string;
+    readonly generation: number;
+    readonly length: number;
+    readonly sessionId: string;
+  }): Promise<
+    | Readonly<{ content: Buffer; kind: "found" }>
+    | Readonly<{ kind: "artifact_expired" | "artifact_missing" }>
+  > {
+    const result = await this.#pool.query<{
+      readonly byte_size: string;
+      readonly content: Buffer | null;
+      readonly expired: boolean;
+    }>(
+      `SELECT byte_size::text, expires_at <= now() AS expired,
+              CASE WHEN expires_at > now()
+                   THEN substring(
+                     content FROM LEAST($5::bigint, byte_size)::integer + 1 FOR $6::integer
+                   )
+                   ELSE NULL
+               END AS content
+         FROM artifacts
+        WHERE id = $1 AND session_id = $2 AND session_generation = $3
+          AND execution_id = $4`,
+      [
+        input.artifactId,
+        input.sessionId,
+        input.generation,
+        input.executionId,
+        input.eventOffset,
+        input.length,
+      ],
+    );
+    const row = result.rows[0];
+    if (row === undefined) return { kind: "artifact_missing" };
+    if (row.expired) return { kind: "artifact_expired" };
+    if (safeNonnegativeInteger(row.byte_size, "Artifact byte size") !== input.eventBytes) {
+      throw new RuntimeError(
+        "RUNTIME_UNAVAILABLE",
+        "Artifact and output Event byte counts are inconsistent",
+        { component: "execution_output" },
+        false,
+      );
+    }
+    return { content: row.content ?? Buffer.alloc(0), kind: "found" };
+  }
+
   async #availableEventFloor(
     sessionId: string,
     generation: number,
@@ -857,6 +1247,75 @@ function decodeCursor(value: string): CursorPayload {
   } catch {
     throw new RuntimeError("RESYNC_REQUIRED", "Cursor is malformed");
   }
+}
+
+function executionOutputFingerprint(
+  request: Pick<ExecutionOutputReadRequest, "executionId" | "generation" | "sessionId">,
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        executionId: request.executionId,
+        generation: request.generation,
+        operation: "execution.output.read.v1",
+        sessionId: request.sessionId,
+      }),
+    )
+    .digest("hex");
+}
+
+function encodeExecutionOutputCursor(cursor: ExecutionOutputCursorPayload): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function decodeExecutionOutputCursor(value: string): ExecutionOutputCursorPayload {
+  try {
+    if (value.length > 2_048 || !/^[A-Za-z0-9_-]+$/u.test(value)) {
+      throw new Error("invalid cursor encoding");
+    }
+    const decoded = Buffer.from(value, "base64url");
+    if (decoded.toString("base64url") !== value) throw new Error("non-canonical cursor encoding");
+    const parsed = JSON.parse(decoded.toString("utf8")) as Partial<ExecutionOutputCursorPayload>;
+    if (
+      parsed.version !== 1 ||
+      typeof parsed.sessionId !== "string" ||
+      typeof parsed.executionId !== "string" ||
+      typeof parsed.fingerprint !== "string" ||
+      (parsed.position !== "event" && parsed.position !== "retention") ||
+      typeof parsed.generation !== "number" ||
+      !Number.isSafeInteger(parsed.generation) ||
+      parsed.generation <= 0 ||
+      typeof parsed.eventSequence !== "number" ||
+      !Number.isSafeInteger(parsed.eventSequence) ||
+      parsed.eventSequence <= 0 ||
+      typeof parsed.eventOffset !== "number" ||
+      !Number.isSafeInteger(parsed.eventOffset) ||
+      parsed.eventOffset < 0
+    ) {
+      throw new Error("invalid cursor fields");
+    }
+    return parsed as ExecutionOutputCursorPayload;
+  } catch {
+    throw new RuntimeError("RESYNC_REQUIRED", "Execution output cursor is malformed");
+  }
+}
+
+function outputEventByteCount(payload: Readonly<Record<string, unknown>>): number {
+  const byteCount = payload.byteCount;
+  if (
+    typeof byteCount !== "number" ||
+    !Number.isSafeInteger(byteCount) ||
+    byteCount <= 0 ||
+    byteCount > MAX_DURABLE_OUTPUT_EVENT_BYTES
+  ) {
+    throw new RuntimeError(
+      "RUNTIME_UNAVAILABLE",
+      "Durable output Event byte count is invalid",
+      { component: "execution_output" },
+      false,
+    );
+  }
+  return byteCount;
 }
 
 function bounded(value: number, maximum: number): number {

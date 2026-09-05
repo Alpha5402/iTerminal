@@ -350,6 +350,7 @@ export async function startRuntimeDaemon(options: {
       gateway: new LocalRuntimeGateway(runtime, {
         artifactRead: options.runtime === undefined && durability !== undefined,
         ...(options.buildId === undefined ? {} : { buildId: options.buildId }),
+        executionOutputRead: options.runtime === undefined && durability !== undefined,
       }),
       isReady,
       socketPath: options.socketPath,

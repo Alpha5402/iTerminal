@@ -160,6 +160,9 @@ export type DurableSessionEvent = Omit<SessionEvent, "sequence">;
 
 export const DEFAULT_ARTIFACT_READ_BYTES = 8 * 1024;
 export const MAX_ARTIFACT_READ_BYTES = 64 * 1024;
+export const DEFAULT_EXECUTION_OUTPUT_READ_BYTES = 8 * 1024;
+export const MAX_EXECUTION_OUTPUT_READ_BYTES = 64 * 1024;
+export const MAX_EXECUTION_OUTPUT_RESPONSE_BYTES = 96 * 1024;
 
 export interface ArtifactReadRequest {
   readonly artifactId: string;
@@ -200,6 +203,48 @@ export type ArtifactReadResult =
         reason: "durability_unavailable" | "owner_route_unavailable";
         retryable: true;
       }>);
+
+export interface ExecutionOutputReadRequest {
+  readonly cursor?: string;
+  readonly executionId: string;
+  readonly generation: number;
+  readonly maxBytes?: number;
+  readonly sessionId: string;
+}
+
+export interface ExecutionOutputChunk {
+  readonly byteLength: number;
+  readonly contentBase64: string;
+}
+
+export type ExecutionOutputGap =
+  | Readonly<{
+      kind: "event_retention";
+      minimumAvailableSequence: number;
+    }>
+  | Readonly<{
+      eventSequence: number;
+      kind: "artifact_expired" | "artifact_missing";
+      resumeCursor: string;
+    }>;
+
+export interface ExecutionOutputReadResult {
+  readonly chunks: readonly ExecutionOutputChunk[];
+  readonly encoding: "base64";
+  readonly executionId: string;
+  readonly executionState: Execution["status"];
+  readonly gap: ExecutionOutputGap | null;
+  readonly generation: number;
+  readonly hasMore: boolean;
+  readonly nextCursor?: string;
+  readonly persistenceLag: "none" | "possible";
+  readonly retention: Readonly<{
+    minimumAvailableSequence: number;
+    source: "durable";
+  }>;
+  readonly sessionId: string;
+  readonly stream: "pty";
+}
 
 export interface ActionLookupRequest {
   readonly actor: Actor;
@@ -394,6 +439,7 @@ export interface RuntimeOwnerRegistry {
 export interface RuntimeDurability {
   lookupAction(request: ActionLookupRequest): Promise<ActionLookupFound | undefined>;
   readArtifact?(request: ArtifactReadRequest): Promise<DurableArtifactReadResult>;
+  readExecutionOutput?(request: ExecutionOutputReadRequest): Promise<ExecutionOutputReadResult>;
   requestApproval(
     fence: SessionFence,
     input: DurableApprovalRequest,

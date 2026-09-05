@@ -64,7 +64,7 @@
     "test:m9:rolling:soak": "ITERM_M9_ROLLING_PROFILE=soak vitest run --maxWorkers=1 apps/runtime-router/src/high-cardinality-rolling.test.ts",
     "test:m10:approval": "vitest run --maxWorkers=1 packages/application/src/approval.test.ts packages/persistence-postgres/src/postgres-runtime-repository.test.ts apps/runtime-daemon/src/approval-durable.test.ts apps/mcp/src/mcp-stdio.test.ts apps/console/src/server.test.ts",
     "test:m10:artifact": "vitest run --maxWorkers=1 packages/persistence-postgres/src/postgres-observation-repository.test.ts apps/runtime-daemon/src/artifact-storage-backpressure.test.ts",
-    "test:m10:output": "vitest run --maxWorkers=1 packages/application/src/runtime-durability.test.ts apps/runtime-daemon/src/artifact-storage-backpressure.test.ts",
+    "test:m10:output": "vitest run --maxWorkers=1 packages/application/src/runtime-durability.test.ts packages/application/src/execution-output.test.ts packages/persistence-postgres/src/postgres-observation-repository.test.ts apps/runtime-daemon/src/artifact-storage-backpressure.test.ts apps/mcp/src/execution-output-durable.test.ts",
     "test:m10:console": "vitest run --maxWorkers=1 apps/console/src/server.test.ts",
     "test:m10:credentials": "vitest run --maxWorkers=1 packages/observability/src/index.test.ts packages/runtime-rpc/src/index.test.ts apps/rpc-grant/src/issuer.test.ts packages/persistence-postgres/src/postgres-credential-boundary.test.ts packages/queue-rabbitmq/src/credential-boundary.test.ts",
     "test:m10:hostile": "vitest run --maxWorkers=1 packages/executor-pty/src/control-protocol.test.ts packages/executor-pty/src/hostile-input.test.ts packages/application/src/hostile-path.test.ts packages/runtime-rpc/src/index.test.ts apps/console/src/server.test.ts",

@@ -68,7 +68,9 @@ describe("local stack credential bootstrap", () => {
     ) as {
       operations?: unknown;
     };
-    expect(grantClaims.operations).toEqual(expect.arrayContaining(["artifact.read"]));
+    expect(grantClaims.operations).toEqual(
+      expect.arrayContaining(["artifact.read", "execution.output.read"]),
+    );
     expect(await permissions(stateRoot)).toBe(0o700);
     expect(await permissions(join(stateRoot, "credentials"))).toBe(0o700);
     expect(await permissions(credentials.mcpConfigPath)).toBe(0o600);
@@ -171,6 +173,16 @@ describeDatabase("M10.13 durable local stack", () => {
     });
     expect(completed).toMatchObject({ status: "COMPLETED" });
     expect(completed.output).toContain("local-stack-mcp");
+    const durableOutput = await callTool<ExecutionOutputResult>(client, "execution_output_read", {
+      executionId: started.execution.id,
+      generation: session.generation,
+      sessionId: session.id,
+    });
+    expect(
+      Buffer.concat(
+        durableOutput.chunks.map((chunk) => Buffer.from(chunk.contentBase64, "base64")),
+      ).toString("utf8"),
+    ).toContain("local-stack-mcp");
 
     const bootstrapResponse = await fetch(`${stack.consoleUrl}/api/bootstrap`, {
       headers: { "x-iterminal-request": "console" },
@@ -256,4 +268,8 @@ type ExecutionResult = {
 
 type ArtifactReadResult = {
   readonly kind: "not_found";
+};
+
+type ExecutionOutputResult = {
+  readonly chunks: readonly { readonly contentBase64: string }[];
 };

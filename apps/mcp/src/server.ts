@@ -10,6 +10,7 @@ import {
   actionLookupTransportRequestSchema,
   artifactReadTransportRequestSchema,
   executeTransportRequestSchema,
+  executionOutputReadTransportRequestSchema,
   inputTransportRequestSchema,
   runtimeCapabilitiesRequestSchema,
 } from "@iterminal/protocol";
@@ -119,6 +120,27 @@ export function createMcpServer(gateway: RuntimeGateway, actor: Actor): McpServe
             sessionId: input.sessionId,
           }),
         ),
+      ),
+  );
+
+  server.registerTool(
+    "execution_output_read",
+    {
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      description:
+        "Read one bounded continuous window of already-sanitized durable PTY bytes for an exact Execution. Base64 chunks are authoritative. Defaults to 8 KiB and allows at most 64 KiB. hasMore describes only the current durable continuous window; RUNNING with hasMore=false may still produce output, and persistenceLag=possible means the live PTY may be ahead. An Artifact gap must be acknowledged before using its resumeCursor.",
+      inputSchema: executionOutputReadTransportRequestSchema,
+      title: "Read continuous Execution output",
+    },
+    async (input) =>
+      call(() =>
+        gateway.readExecutionOutput({
+          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+          executionId: input.executionId,
+          generation: input.generation,
+          ...(input.maxBytes === undefined ? {} : { maxBytes: input.maxBytes }),
+          sessionId: input.sessionId,
+        }),
       ),
   );
 
