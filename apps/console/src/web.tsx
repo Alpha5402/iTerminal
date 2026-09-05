@@ -196,7 +196,6 @@ const MAX_TIMELINE_EVENTS = 500;
 const INPUT_BATCH_MS = 20;
 const GUARD_IDLE_RELEASE_MS = 400;
 const DEFAULT_SESSION_SHELL = "zsh" as const;
-const DEFAULT_SESSION_WORKSPACE = "/";
 
 interface ResumeState {
   readonly cursor: number;
@@ -271,6 +270,10 @@ function App(): React.JSX.Element {
   const commandHistoryNavigation = useRef(new CommandHistoryNavigation());
   const historyCaretRestore = useRef(false);
   const [creatingSession, setCreatingSession] = useState(false);
+  const [newSessionFormOpen, setNewSessionFormOpen] = useState(false);
+  const [newSessionName, setNewSessionName] = useState("");
+  const [newSessionWorkspace, setNewSessionWorkspace] = useState("");
+  const [sessionLabels, setSessionLabels] = useState<Record<string, string>>({});
   const [mcpConfigCopied, setMcpConfigCopied] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorView, setInspectorView] = useState<InspectorView>("approvals");
@@ -1171,9 +1174,14 @@ function App(): React.JSX.Element {
 
   const createSession = async (): Promise<void> => {
     if (creatingSession) return;
+    const workspaceRoot = newSessionWorkspace.trim();
+    if (workspaceRoot === "") {
+      setError(normalizeClientError(new Error("Workspace directory is required")));
+      return;
+    }
     const signature = JSON.stringify({
       shell: DEFAULT_SESSION_SHELL,
-      workspaceRoot: DEFAULT_SESSION_WORKSPACE,
+      workspaceRoot,
     });
     let creation = createIdempotency.current;
     if (creation?.signature !== signature) {
@@ -1186,13 +1194,18 @@ function App(): React.JSX.Element {
         body: {
           idempotencyKey: creation.key,
           shell: DEFAULT_SESSION_SHELL,
-          workspaceRoot: DEFAULT_SESSION_WORKSPACE,
+          workspaceRoot,
         },
         method: "POST",
       });
       createIdempotency.current = undefined;
       await refreshSessions();
       setSelectedId(created.id);
+      if (newSessionName.trim() !== "")
+        setSessionLabels((labels) => ({ ...labels, [created.id]: newSessionName.trim() }));
+      setNewSessionFormOpen(false);
+      setNewSessionName("");
+      setNewSessionWorkspace("");
     } catch (reason) {
       setError(normalizeClientError(reason));
     } finally {
@@ -1598,7 +1611,10 @@ function App(): React.JSX.Element {
                       className={`session-tab-signal status-${candidate.status.toLowerCase()}`}
                     />
                     <span className="session-tab-name">
-                      {candidate.shell} {index + 1}
+                      {sessionLabels[candidate.id] ||
+                        candidate.workspaceRoot.split("/").filter(Boolean).pop() ||
+                        "workspace"}{" "}
+                      · {index + 1}
                     </span>
                     <small>{candidate.workspaceRoot}</small>
                   </button>
@@ -1625,24 +1641,72 @@ function App(): React.JSX.Element {
               aria-label="New Session"
               className="session-tab-add"
               disabled={creatingSession}
-              onClick={() => void createSession()}
-              title="New zsh Session at /"
+              onClick={() => {
+                setNewSessionWorkspace(session?.workspaceRoot ?? "");
+                setNewSessionFormOpen(true);
+              }}
+              title="New zsh Session"
               type="button"
             >
               {creatingSession ? "…" : "+"}
             </button>
           </nav>
-          <div className="status-strip">
+          {newSessionFormOpen && (
+            <form
+              className="new-session-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void createSession();
+              }}
+            >
+              <label>
+                Session name <small>(local only / not synced)</small>
+                <input
+                  value={newSessionName}
+                  onChange={(event) => setNewSessionName(event.target.value)}
+                />
+              </label>
+              <label>
+                Workspace directory <strong aria-hidden="true">*</strong>
+                <input
+                  required
+                  value={newSessionWorkspace}
+                  onChange={(event) => setNewSessionWorkspace(event.target.value)}
+                />
+              </label>
+              <button type="submit" disabled={creatingSession}>
+                Create Session
+              </button>
+              <button type="button" onClick={() => setNewSessionFormOpen(false)}>
+                Cancel
+              </button>
+            </form>
+          )}
+          <div className="status-strip" aria-label="Session status">
             <span>
               Session <strong>{session?.status ?? "NONE"}</strong>
             </span>
-            <span>generation {session?.generation ?? "—"}</span>
-            <span>screen v{screen?.screenVersion ?? 0}</span>
+            <span>Workspace {session?.workspaceRoot ?? "—"}</span>
+            {checkpoint !== undefined && checkpoint.sessionId === session?.id && (
+              <span>cwd {checkpoint.cwd}</span>
+            )}
             <span>
-              geometry {screen?.columns ?? SCREEN_COLUMNS}×{screen?.rows ?? SCREEN_ROWS} v
-              {screen?.geometryVersion ?? 1}
+              Input target:{" "}
+              {session?.activeExecutionId === undefined ? "shell" : "shell/active execution"}
             </span>
-            <span>cursor {cursor}</span>
+            <details className="diagnostics">
+              <summary>Diagnostics</summary>
+              <span>generation {session?.generation ?? "—"}</span>
+              <span>screen v{screen?.screenVersion ?? 0}</span>
+              <span>
+                geometry {screen?.columns ?? SCREEN_COLUMNS}×{screen?.rows ?? SCREEN_ROWS} v
+                {screen?.geometryVersion ?? 1}
+              </span>
+              <span>cursor {cursor}</span>
+              {session?.activeExecutionId !== undefined && (
+                <span>execution {session.activeExecutionId}</span>
+              )}
+            </details>
             {sensitiveInput?.status === "ACTIVE" && (
               <button
                 aria-label={
@@ -1666,7 +1730,6 @@ function App(): React.JSX.Element {
                 {sensitiveFinishing ? "…" : "***"}
               </button>
             )}
-            {session?.activeExecutionId !== undefined && <code>{session.activeExecutionId}</code>}
           </div>
           <div
             className="terminal-surface"
@@ -2161,6 +2224,16 @@ function App(): React.JSX.Element {
               <small>Next: {error.allowedNextActions.join(" · ")}</small>
             )}
           </div>
+          <button
+            onClick={() =>
+              void refreshSessions().catch((reason: unknown) =>
+                setError(normalizeClientError(reason)),
+              )
+            }
+            type="button"
+          >
+            Refresh sessions
+          </button>
           <button onClick={() => setError(undefined)} type="button">
             Dismiss
           </button>

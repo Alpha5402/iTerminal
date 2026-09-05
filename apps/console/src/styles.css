@@ -18,12 +18,56 @@
 
 body {
   margin: 0;
-  min-width: 1120px;
   height: 100vh;
   overflow: hidden;
   background:
     radial-gradient(circle at 15% 10%, rgb(14 116 144 / 18%), transparent 28rem),
     radial-gradient(circle at 85% 90%, rgb(126 34 206 / 12%), transparent 32rem), #05070b;
+}
+
+@media (max-width: 720px) {
+  .app-shell {
+    padding: 0.5rem;
+  }
+  .masthead {
+    flex-wrap: wrap;
+  }
+  .console-tools {
+    overflow-x: auto;
+  }
+  .workspace-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 600px) {
+  body {
+    overflow: auto;
+  }
+  .app-shell {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+  }
+  .masthead-actions {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .connection code {
+    max-width: 12rem;
+    overflow-wrap: anywhere;
+  }
+  .session-tab-strip {
+    overflow-x: auto;
+  }
+  .status-strip {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    padding-block: 0.55rem;
+  }
+  .status-strip .diagnostics {
+    flex-basis: 100%;
+  }
 }
 
 button,
@@ -187,6 +231,17 @@ textarea:focus-visible,
   border-radius: 14px;
   background: rgb(7 10 15 / 88%);
   box-shadow: 0 1rem 3rem rgb(0 0 0 / 30%);
+}
+
+.diagnostics {
+  display: inline-flex;
+  gap: 0.65rem;
+  align-items: center;
+}
+
+.diagnostics summary {
+  cursor: pointer;
+  color: #67e8f9;
 }
 
 .inspector {
@@ -392,6 +447,24 @@ textarea {
   height: 3rem;
   border-bottom: 1px solid #172033;
   background: #080c13;
+}
+
+.new-session-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  align-items: end;
+  padding: 0.7rem;
+  background: #0b1220;
+}
+
+.new-session-form label {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 14rem;
+}
+.new-session-form small {
+  color: #94a3b8;
 }
 
 .session-tab-strip {
