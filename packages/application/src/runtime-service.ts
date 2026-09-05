@@ -69,6 +69,9 @@ import type {
   ArtifactReadResult,
   ExecutionOutputReadRequest,
   ExecutionOutputReadResult,
+  ExecutionWaitRequest,
+  ExecutionWaitResult,
+  ExecutionWaitScheduler,
   DurableSessionEvent,
   DurableForkAdmission,
   DurableOwnerRecoveryResult,
@@ -86,7 +89,12 @@ import type {
   TerminalScreenProjection,
   TerminalScreenProjectionFactory,
 } from "./ports.js";
-import { MAX_ARTIFACT_READ_BYTES, MAX_EXECUTION_OUTPUT_READ_BYTES } from "./ports.js";
+import {
+  DEFAULT_EXECUTION_WAIT_MILLISECONDS,
+  MAX_ARTIFACT_READ_BYTES,
+  MAX_EXECUTION_OUTPUT_READ_BYTES,
+  MAX_EXECUTION_WAIT_MILLISECONDS,
+} from "./ports.js";
 import { classifyTerminalState } from "./terminal-state.js";
 
 const DEFAULT_EVENT_LIMIT = 100;
@@ -349,6 +357,15 @@ interface ExecutionDispatchState {
   writeAccepted: boolean;
 }
 
+interface ExecutionWaiter {
+  readonly notify: () => void;
+}
+
+const nativeExecutionWaitScheduler: ExecutionWaitScheduler = {
+  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+  setTimeout: (callback, milliseconds) => setTimeout(callback, milliseconds),
+};
+
 interface Deferred<T> {
   readonly promise: Promise<T>;
   readonly reject: (reason?: unknown) => void;
@@ -382,6 +399,7 @@ export class RuntimeService {
   >();
   readonly #screens = new Map<string, TerminalScreenProjection>();
   readonly #completions = new Map<string, Promise<Execution>>();
+  readonly #executionWaiters = new Map<string, Set<ExecutionWaiter>>();
   readonly #started = new Map<string, Promise<void>>();
   readonly #durableQueues = new Map<string, DurableQueueState>();
   readonly #ptyOutputBuffers = new Map<string, PtyOutputBuffer>();
@@ -403,6 +421,7 @@ export class RuntimeService {
   #ownerDurabilityFailure: RuntimeError | undefined;
   readonly #dispatchStates = new Map<string, ExecutionDispatchState>();
   readonly #executionDispatch: "external" | "immediate";
+  readonly #executionWaitScheduler: ExecutionWaitScheduler;
   readonly #hooks: NonNullable<RuntimeServiceOptions["hooks"]>;
   readonly #now: () => Date;
   readonly #ownerId: string;
@@ -425,6 +444,7 @@ export class RuntimeService {
       options.checkpointEnvironmentKeys ?? DEFAULT_CHECKPOINT_ENVIRONMENT_KEYS,
     );
     this.#executionDispatch = options.executionDispatch ?? "immediate";
+    this.#executionWaitScheduler = options.executionWaitScheduler ?? nativeExecutionWaitScheduler;
     this.#hooks = options.hooks ?? {};
     this.#now = options.now ?? (() => new Date());
     this.#ownerId = options.ownerId ?? `owner_${process.pid.toString()}`;
@@ -1695,6 +1715,10 @@ export class RuntimeService {
     this.#dispatchStates.set(execution.id, state);
     this.#started.set(execution.id, state.started.promise);
     this.#completions.set(execution.id, state.completion.promise);
+    void state.completion.promise.then(
+      () => this.#notifyExecutionWaiters(execution.id),
+      () => this.#notifyExecutionWaiters(execution.id),
+    );
     return state;
   }
 
@@ -2966,6 +2990,79 @@ export class RuntimeService {
   public async waitExecution(executionId: string): Promise<Execution> {
     const execution = this.#requireExecution(executionId);
     return this.#completions.get(execution.id) ?? execution;
+  }
+
+  public async waitExecutionV2(
+    request: ExecutionWaitRequest,
+    signal?: AbortSignal,
+  ): Promise<ExecutionWaitResult> {
+    const waitMs = validateExecutionWaitMilliseconds(request.waitMs);
+    const execution = this.#requireExecution(request.executionId);
+    if (signal?.aborted === true) return Promise.reject(executionWaitAbortError());
+    if (waitMs === 0 || isExecutionTerminal(execution.status)) {
+      return Promise.resolve(executionWaitResult(execution));
+    }
+
+    return new Promise<ExecutionWaitResult>((resolve, reject) => {
+      let settled = false;
+      let timer: unknown;
+      let timerCreated = false;
+      const waiters = this.#executionWaiters.get(execution.id) ?? new Set<ExecutionWaiter>();
+      const cleanup = (): void => {
+        if (timerCreated) this.#executionWaitScheduler.clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        waiters.delete(waiter);
+        if (waiters.size === 0) this.#executionWaiters.delete(execution.id);
+      };
+      const fail = (error: unknown): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error instanceof Error ? error : new Error(String(error)));
+      };
+      const finish = (): void => {
+        if (settled) return;
+        try {
+          const current = this.#requireExecution(execution.id);
+          settled = true;
+          cleanup();
+          resolve(executionWaitResult(current));
+        } catch (error) {
+          fail(error);
+        }
+      };
+      const onAbort = (): void => fail(executionWaitAbortError());
+      const waiter: ExecutionWaiter = { notify: finish };
+
+      waiters.add(waiter);
+      this.#executionWaiters.set(execution.id, waiters);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted === true) {
+        onAbort();
+        return;
+      }
+      try {
+        timer = this.#executionWaitScheduler.setTimeout(finish, waitMs);
+        timerCreated = true;
+        if (settled) this.#executionWaitScheduler.clearTimeout(timer);
+      } catch (error) {
+        fail(error);
+        return;
+      }
+
+      // Settlement may race the initial snapshot and waiter registration.
+      try {
+        if (isExecutionTerminal(this.#requireExecution(execution.id).status)) finish();
+      } catch (error) {
+        fail(error);
+      }
+    });
+  }
+
+  #notifyExecutionWaiters(executionId: string): void {
+    const waiters = this.#executionWaiters.get(executionId);
+    if (waiters === undefined) return;
+    for (const waiter of [...waiters]) waiter.notify();
   }
 
   public async queryEvents(
@@ -4646,6 +4743,32 @@ function waitForPromise<T>(
 
 function abortError(): Error {
   const error = new Error("Screen wait aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function validateExecutionWaitMilliseconds(value: number | undefined): number {
+  const waitMs = value ?? DEFAULT_EXECUTION_WAIT_MILLISECONDS;
+  if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > MAX_EXECUTION_WAIT_MILLISECONDS) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      `Execution wait must be between 0 and ${MAX_EXECUTION_WAIT_MILLISECONDS.toString()} milliseconds`,
+      { waitMs },
+    );
+  }
+  return waitMs;
+}
+
+function executionWaitResult(execution: Execution): ExecutionWaitResult {
+  return {
+    completed: isExecutionTerminal(execution.status),
+    executionId: execution.id,
+    executionState: execution.status,
+  };
+}
+
+function executionWaitAbortError(): Error {
+  const error = new Error("Execution wait aborted");
   error.name = "AbortError";
   return error;
 }

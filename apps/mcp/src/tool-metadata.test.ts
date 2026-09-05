@@ -20,6 +20,7 @@ const baselineToolNames = new Set([
   "execute",
   "execution_get",
   "execution_wait",
+  "execution_wait_v2",
   "interaction_get",
   "input",
   "control",
@@ -64,6 +65,10 @@ describe("MCP tool metadata", () => {
     );
     expect(registered.execution_output_read?.description).not.toContain(
       "A gap must be acknowledged before using its resume cursor",
+    );
+    expect(registered.execution_wait?.description).toContain("Prefer execution_wait_v2");
+    expect(registered.execution_wait_v2?.description).toContain(
+      "completed=true means terminal, not successful",
     );
   });
 });

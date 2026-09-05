@@ -98,6 +98,10 @@ See also [ADR-0071](./0071-durable-execution-output-cursor.md): page exact-Execu
 output with stable Event/byte cursors, explicit Event/Artifact retention gaps, bounded responses,
 and honest live persistence lag.
 
+See also [ADR-0072](./0072-bounded-cancellable-execution-wait.md): add an independent bounded
+Execution wait whose timeout and cancellation release observer resources without changing the PTY
+or shared completion.
+
 Statuses:
 
 - Proposed: evidence or owner decision is still required.

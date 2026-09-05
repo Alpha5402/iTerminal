@@ -18,6 +18,8 @@ import {
   defineRuntimeCapabilities,
   executionOutputReadResultSchema,
   executionOutputReadTransportRequestSchema,
+  executionWaitV2ResultSchema,
+  executionWaitV2TransportRequestSchema,
   executeTransportRequestSchema,
   inputTransportRequestSchema,
   runtimeCapabilitiesRequestSchema,
@@ -64,6 +66,43 @@ describe("public Execute/Input request schemas", () => {
 });
 
 describe("canonical transport schemas", () => {
+  it("bounds Execution wait v2 and defines completed as terminal, not successful", () => {
+    expect(executionWaitV2TransportRequestSchema.parse({ executionId: "execution-1" })).toEqual({
+      executionId: "execution-1",
+      waitMs: 10_000,
+    });
+    expect(
+      executionWaitV2TransportRequestSchema.parse({ executionId: "execution-1", waitMs: 0 }),
+    ).toEqual({ executionId: "execution-1", waitMs: 0 });
+    expect(() =>
+      executionWaitV2TransportRequestSchema.parse({ executionId: "execution-1", waitMs: 30_001 }),
+    ).toThrow();
+
+    for (const executionState of ["COMPLETED", "FAILED", "INTERRUPTED", "UNKNOWN"] as const) {
+      expect(
+        executionWaitV2ResultSchema.parse({
+          completed: true,
+          executionId: "execution-1",
+          executionState,
+        }),
+      ).toMatchObject({ completed: true, executionState });
+    }
+    expect(() =>
+      executionWaitV2ResultSchema.parse({
+        completed: true,
+        executionId: "execution-1",
+        executionState: "RUNNING",
+      }),
+    ).toThrow();
+    expect(() =>
+      executionWaitV2ResultSchema.parse({
+        completed: false,
+        executionId: "execution-1",
+        executionState: "FAILED",
+      }),
+    ).toThrow();
+  });
+
   it("bounds Artifact byte-range requests and verifies response arithmetic", () => {
     expect(
       artifactReadTransportRequestSchema.parse({

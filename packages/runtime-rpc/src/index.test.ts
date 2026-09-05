@@ -21,6 +21,74 @@ import {
 } from "./index.js";
 
 describe("UnixRuntimeClient delivery classification", () => {
+  it("round-trips bounded Execution wait v2 and enforces its distinct grant", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-execution-wait-v2-"));
+    const secret = randomBytes(32);
+    let calls = 0;
+    const server = await startRuntimeRpcServer({
+      authentication: { audience: "runtime-rpc-test", secret },
+      gateway: {
+        ...stubGateway(),
+        waitExecutionV2: (request, signal) => {
+          calls += 1;
+          expect(request).toEqual({ executionId: "execution-rpc", waitMs: 10_000 });
+          expect(signal).toBeInstanceOf(AbortSignal);
+          return Promise.resolve({
+            completed: false,
+            executionId: request.executionId,
+            executionState: "RUNNING",
+          });
+        },
+      },
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    const allowed = new UnixRuntimeClient(server.socketPath, {
+      authorization: signRuntimeRpcGrant(secret, exactAgentGrant(["execution.wait.v2"])),
+    });
+    const denied = new UnixRuntimeClient(server.socketPath, {
+      authorization: signRuntimeRpcGrant(secret, exactAgentGrant(["execution.wait"])),
+    });
+    try {
+      await expect(allowed.waitExecutionV2({ executionId: "execution-rpc" })).resolves.toEqual({
+        completed: false,
+        executionId: "execution-rpc",
+        executionState: "RUNNING",
+      });
+      await expect(
+        denied.waitExecutionV2({ executionId: "execution-rpc", waitMs: 0 }),
+      ).rejects.toMatchObject({ code: "POLICY_DENIED" });
+      expect(calls).toBe(1);
+    } finally {
+      await server.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
+  it("preserves bounded-wait backend unavailability instead of returning incomplete", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-execution-wait-outage-"));
+    const server = await startRuntimeRpcServer({
+      gateway: {
+        ...stubGateway(),
+        waitExecutionV2: () =>
+          Promise.reject(
+            new RuntimeError("RUNTIME_UNAVAILABLE", "fixture backend unavailable", {}, true),
+          ),
+      },
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    try {
+      await expect(
+        new UnixRuntimeClient(server.socketPath).waitExecutionV2({
+          executionId: "execution-rpc",
+          waitMs: 0,
+        }),
+      ).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", retryable: true });
+    } finally {
+      await server.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
   it("round-trips bounded Execution output and enforces its distinct read grant", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-execution-output-"));
     const secret = randomBytes(32);
@@ -418,6 +486,99 @@ describe("UnixRuntimeClient delivery classification", () => {
       await aborted;
     } finally {
       socket.destroy();
+      await server.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
+  it("propagates a bounded Execution wait disconnect to the server waiter", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-execution-wait-abort-"));
+    let announceStarted!: () => void;
+    let announceAborted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      announceStarted = resolve;
+    });
+    const aborted = new Promise<void>((resolve) => {
+      announceAborted = resolve;
+    });
+    const server = await startRuntimeRpcServer({
+      gateway: {
+        ...stubGateway(),
+        waitExecutionV2: (_request, signal) =>
+          new Promise((_resolve, reject) => {
+            announceStarted();
+            signal?.addEventListener(
+              "abort",
+              () => {
+                announceAborted();
+                reject(new Error("bounded Execution wait client disconnected"));
+              },
+              { once: true },
+            );
+          }),
+      },
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    const socket = createConnection(server.socketPath);
+    try {
+      await waitForSocketConnect(socket);
+      socket.write(
+        `${JSON.stringify({
+          id: "execution-wait-v2-abort-test",
+          input: { executionId: "execution-rpc", waitMs: 30_000 },
+          operation: "execution.wait.v2",
+        })}\n`,
+      );
+      await started;
+      socket.destroy();
+      await aborted;
+    } finally {
+      socket.destroy();
+      await server.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
+  it("lets an adapter AbortSignal cancel the same bounded owner wait", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-execution-wait-signal-"));
+    let announceStarted!: () => void;
+    let announceAborted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      announceStarted = resolve;
+    });
+    const aborted = new Promise<void>((resolve) => {
+      announceAborted = resolve;
+    });
+    const server = await startRuntimeRpcServer({
+      gateway: {
+        ...stubGateway(),
+        waitExecutionV2: (_request, signal) =>
+          new Promise((_resolve, reject) => {
+            announceStarted();
+            signal?.addEventListener(
+              "abort",
+              () => {
+                announceAborted();
+                reject(new Error("bounded Execution wait aborted"));
+              },
+              { once: true },
+            );
+          }),
+      },
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    const controller = new AbortController();
+    const waiting = new UnixRuntimeClient(server.socketPath).waitExecutionV2(
+      { executionId: "execution-rpc", waitMs: 30_000 },
+      controller.signal,
+    );
+    try {
+      await started;
+      const rejected = expect(waiting).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+      controller.abort();
+      await rejected;
+      await aborted;
+    } finally {
       await server.close();
       await rm(fixture, { force: true, recursive: true });
     }

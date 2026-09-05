@@ -5,6 +5,8 @@ import type {
   ArtifactReadResult,
   ExecutionOutputReadRequest,
   ExecutionOutputReadResult,
+  ExecutionWaitRequest,
+  ExecutionWaitResult,
   RuntimeOwnerRecord,
   RuntimeOwnerRegistry,
 } from "@iterminal/application";
@@ -56,6 +58,7 @@ describe("CentralRuntimeRouterGateway error classification", () => {
         "action.lookup.v1",
         "artifact.read.v1",
         "execution.output.read.v1",
+        "execution.wait.v2",
         "runtime.capabilities.v1",
         "runtime.owner-capabilities.v1",
       ],
@@ -265,6 +268,99 @@ describe("CentralRuntimeRouterGateway error classification", () => {
     });
   });
 
+  it("forwards one bounded wait to the exact Execution owner with the same cancellation", async () => {
+    const request = { executionId: "execution-routed", waitMs: 30_000 };
+    const controller = new AbortController();
+    let calls = 0;
+    const exactRoutes = {
+      ...routeRegistry(owner),
+      resolveExecutionRoute: (executionId: string) => {
+        expect(executionId).toBe(request.executionId);
+        return Promise.resolve({ liveOwner: owner, ownerId: owner.ownerId });
+      },
+    };
+    const routed = new CentralRuntimeRouterGateway(
+      exactRoutes,
+      () =>
+        new ExecutionWaitClient((received, signal) => {
+          calls += 1;
+          expect(received).toEqual(request);
+          expect(signal).toBe(controller.signal);
+          return Promise.resolve({
+            completed: false,
+            executionId: received.executionId,
+            executionState: "RUNNING",
+          });
+        }),
+    );
+
+    await expect(routed.waitExecutionV2(request, controller.signal)).resolves.toEqual({
+      completed: false,
+      executionId: request.executionId,
+      executionState: "RUNNING",
+    });
+    expect(calls).toBe(1);
+
+    const absent = new CentralRuntimeRouterGateway(
+      { ...exactRoutes, resolveExecutionRoute: () => Promise.resolve(undefined) },
+      () => new ExecutionWaitClient(() => Promise.reject(new Error("must not dispatch"))),
+    );
+    await expect(absent.waitExecutionV2(request)).rejects.toMatchObject({
+      code: "EXECUTION_NOT_FOUND",
+    });
+
+    const backendFailure = new RuntimeError(
+      "RUNTIME_UNAVAILABLE",
+      "Owner wait backend unavailable",
+      { source: "owner-runtime" },
+      true,
+    );
+    const unavailable = new CentralRuntimeRouterGateway(
+      exactRoutes,
+      () => new ExecutionWaitClient(() => Promise.reject(backendFailure)),
+    );
+    await expect(unavailable.waitExecutionV2(request)).rejects.toBe(backendFailure);
+  });
+
+  it("forwards bounded-wait abort without retrying or changing the Execution result", async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    let announceStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      announceStarted = resolve;
+    });
+    const routed = new CentralRuntimeRouterGateway(
+      {
+        ...routeRegistry(owner),
+        resolveExecutionRoute: () => Promise.resolve({ liveOwner: owner, ownerId: owner.ownerId }),
+      },
+      () =>
+        new ExecutionWaitClient((_request, signal) => {
+          calls += 1;
+          return new Promise((_resolve, reject) => {
+            announceStarted();
+            signal?.addEventListener(
+              "abort",
+              () => {
+                const error = new Error("fixture observation aborted");
+                error.name = "AbortError";
+                reject(error);
+              },
+              { once: true },
+            );
+          });
+        }),
+    );
+    const waiting = routed.waitExecutionV2(
+      { executionId: "execution-routed", waitMs: 30_000 },
+      controller.signal,
+    );
+    await started;
+    controller.abort();
+    await expect(waiting).rejects.toMatchObject({ name: "AbortError" });
+    expect(calls).toBe(1);
+  });
+
   it("rejects a Session returned under a conflicting owner identity", async () => {
     const gateway = new CentralRuntimeRouterGateway(
       routeRegistry(owner),
@@ -346,6 +442,7 @@ class CapabilityClient extends UnixRuntimeClient {
       | "artifact.read.v1"
       | "runtime.capabilities.v1"
       | "execution.output.read.v1"
+      | "execution.wait.v2"
     )[],
   ) {
     super("/unused/capability-owner.sock");
@@ -373,6 +470,24 @@ class ExecutionOutputClient extends UnixRuntimeClient {
     request: ExecutionOutputReadRequest,
   ): Promise<ExecutionOutputReadResult> {
     return this.read(request);
+  }
+}
+
+class ExecutionWaitClient extends UnixRuntimeClient {
+  public constructor(
+    private readonly wait: (
+      request: ExecutionWaitRequest,
+      signal?: AbortSignal,
+    ) => Promise<ExecutionWaitResult>,
+  ) {
+    super("/unused/execution-wait-owner.sock");
+  }
+
+  public override waitExecutionV2(
+    request: ExecutionWaitRequest,
+    signal?: AbortSignal,
+  ): Promise<ExecutionWaitResult> {
+    return this.wait(request, signal);
   }
 }
 

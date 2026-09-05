@@ -69,7 +69,7 @@ describe("local stack credential bootstrap", () => {
       operations?: unknown;
     };
     expect(grantClaims.operations).toEqual(
-      expect.arrayContaining(["artifact.read", "execution.output.read"]),
+      expect.arrayContaining(["artifact.read", "execution.output.read", "execution.wait.v2"]),
     );
     expect(await permissions(stateRoot)).toBe(0o700);
     expect(await permissions(join(stateRoot, "credentials"))).toBe(0o700);
