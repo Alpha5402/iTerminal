@@ -84,6 +84,8 @@ import type {
   DurableOwnerRecoveryResult,
   DurableRebuildableSession,
   RuntimeOwnerIdentity,
+  RuntimeRetentionLimits,
+  RuntimeRetentionSnapshot,
   RuntimeDurability,
   RuntimeServiceOptions,
   RuntimeStore,
@@ -97,6 +99,7 @@ import type {
   TerminalScreenProjectionFactory,
 } from "./ports.js";
 import {
+  DEFAULT_RUNTIME_RETENTION_LIMITS,
   DEFAULT_EXECUTION_WAIT_MILLISECONDS,
   MAX_ARTIFACT_READ_BYTES,
   MAX_EXECUTION_OBSERVATION_RESPONSE_BYTES,
@@ -364,6 +367,7 @@ interface ExecutionDispatchState {
   dispatchTask?: Promise<void>;
   readonly execution: Execution;
   readonly started: Deferred<void>;
+  historyPersisted: boolean;
   writeAccepted: boolean;
 }
 
@@ -468,6 +472,38 @@ export class RuntimeService {
       "sessionLeaseMilliseconds",
     );
     this.#screenProjectionFactory = options.screenProjectionFactory;
+    this.store.configureRetention?.({
+      durable: this.#durability !== undefined,
+      limits: runtimeRetentionLimits(options.retention),
+    });
+  }
+
+  public retentionSnapshot(): Readonly<{
+    readonly application: Readonly<{
+      readonly approvals: number;
+      readonly completionPromises: number;
+      readonly dispatchStates: number;
+      readonly durableQueues: number;
+      readonly executionWaiters: number;
+      readonly startedPromises: number;
+    }>;
+    readonly store?: RuntimeRetentionSnapshot;
+  }> {
+    let executionWaiters = 0;
+    for (const waiters of this.#executionWaiters.values()) executionWaiters += waiters.size;
+    return {
+      application: {
+        approvals: this.#approvals.size,
+        completionPromises: this.#completions.size,
+        dispatchStates: this.#dispatchStates.size,
+        durableQueues: this.#durableQueues.size,
+        executionWaiters,
+        startedPromises: this.#started.size,
+      },
+      ...(this.store.retentionSnapshot === undefined
+        ? {}
+        : { store: this.store.retentionSnapshot() }),
+    };
   }
 
   public activateDurableOwner(owner: RuntimeOwnerIdentity): void {
@@ -1797,6 +1833,7 @@ export class RuntimeService {
       );
     }
     this.#requireExecutor(session.id);
+    this.#assertActionCapacity("execute", request);
     if (request.approvalId !== undefined && this.#durability !== undefined) {
       const durableApproval = await this.#durability.getApproval(
         session.id,
@@ -1934,6 +1971,7 @@ export class RuntimeService {
       action,
       completion: deferred<Execution>(),
       execution,
+      historyPersisted: false,
       started: deferred<void>(),
       writeAccepted: false,
     };
@@ -1943,10 +1981,20 @@ export class RuntimeService {
     this.#started.set(execution.id, state.started.promise);
     this.#completions.set(execution.id, state.completion.promise);
     void state.completion.promise.then(
-      () => this.#notifyExecutionWaiters(execution.id),
-      () => this.#notifyExecutionWaiters(execution.id),
+      () => this.#releaseExecutionTransients(execution.id, state),
+      () => this.#releaseExecutionTransients(execution.id, state),
     );
     return state;
+  }
+
+  #releaseExecutionTransients(executionId: string, state: ExecutionDispatchState): void {
+    this.#notifyExecutionWaiters(executionId);
+    if (state.historyPersisted) this.#settleActionHistory(state.action, state.execution);
+    if (this.#dispatchStates.get(executionId) === state) this.#dispatchStates.delete(executionId);
+    if (this.#started.get(executionId) === state.started.promise) this.#started.delete(executionId);
+    if (this.#completions.get(executionId) === state.completion.promise) {
+      this.#completions.delete(executionId);
+    }
   }
 
   #startDispatch(state: ExecutionDispatchState): void {
@@ -2148,6 +2196,7 @@ export class RuntimeService {
       this.#checkpointInvalid.delete(execution.sessionId);
     }
     execution.version += 1;
+    state.historyPersisted = true;
     return execution;
   }
 
@@ -2213,7 +2262,10 @@ export class RuntimeService {
           return false;
         },
       );
-      if (persisted) execution.version += 1;
+      if (persisted) {
+        execution.version += 1;
+        state.historyPersisted = true;
+      }
       this.#sessionLeases.delete(execution.sessionId);
     }
     throw settlementError;
@@ -2516,6 +2568,7 @@ export class RuntimeService {
       request.expectedScreenVersion,
     );
     await this.#assertInteractionAllowed(session, request.actor, "secret", false);
+    this.#assertActionCapacity("secret_input", request);
     const previousInputContext = this.#inputContext(session, request.targetExecutionId);
     const acceptedAt = this.#timestamp();
     const sensitiveInputId = `sec_${randomUUID()}`;
@@ -2594,6 +2647,7 @@ export class RuntimeService {
         ),
       );
       this.#completeUntrackedInput(session, action, previousInputContext);
+      this.#settleActionHistory(action);
       return action;
     } catch {
       action.status = "UNKNOWN";
@@ -2603,13 +2657,19 @@ export class RuntimeService {
         { sensitiveInputId },
         { action, persist: false },
       );
+      let persisted = false;
       await this.#enqueueDurable(session.id, 0, () =>
         this.#durability?.finishInteraction(
           this.#requireSessionFence(session),
           action,
           unknownEvent,
         ),
-      ).catch((durableFailure: unknown) => this.#tripDurability(session.id, durableFailure));
+      )
+        .then(() => {
+          persisted = true;
+        })
+        .catch((durableFailure: unknown) => this.#tripDurability(session.id, durableFailure));
+      if (persisted) this.#settleActionHistory(action);
       throw new RuntimeError(
         "DELIVERY_UNKNOWN",
         "Secret input delivery is uncertain; output redaction remains active",
@@ -2780,6 +2840,7 @@ export class RuntimeService {
         );
       }
     }
+    this.#assertActionCapacity("input", request);
     const action: InputAction = {
       acceptedAt: this.#timestamp(),
       actionSequence: this.store.nextActionSequence(session.id, session.generation),
@@ -2863,6 +2924,7 @@ export class RuntimeService {
               }),
         });
       }
+      this.#settleActionHistory(action);
       return action;
     } catch (error) {
       action.status = "UNKNOWN";
@@ -2872,13 +2934,19 @@ export class RuntimeService {
         { reason: errorMessage(error) },
         { action, persist: false },
       );
+      let persisted = false;
       await this.#enqueueDurable(session.id, 0, () =>
         this.#durability?.finishInteraction(
           this.#requireSessionFence(session),
           action,
           unknownEvent,
         ),
-      ).catch((durableFailure: unknown) => this.#tripDurability(session.id, durableFailure));
+      )
+        .then(() => {
+          persisted = true;
+        })
+        .catch((durableFailure: unknown) => this.#tripDurability(session.id, durableFailure));
+      if (persisted) this.#settleActionHistory(action);
       throw new RuntimeError(
         "DELIVERY_UNKNOWN",
         "PTY input delivery is uncertain",
@@ -2973,6 +3041,7 @@ export class RuntimeService {
       });
     }
     await this.#assertInteractionAllowed(session, request.actor, "resize", false);
+    this.#assertActionCapacity("resize", request);
     const action: ResizeAction = {
       acceptedAt: this.#timestamp(),
       actionSequence: this.store.nextActionSequence(session.id, session.generation),
@@ -3067,6 +3136,7 @@ export class RuntimeService {
         }),
       );
       this.store.appendEvent(session.id, session.generation, deliveredEvent);
+      this.#settleActionHistory(action);
       return action;
     } catch (error) {
       await projectionResize?.catch(() => undefined);
@@ -3103,6 +3173,7 @@ export class RuntimeService {
         })
         .catch((durableFailure: unknown) => this.#tripDurability(session.id, durableFailure));
       if (persisted && activeExecutionState !== undefined) activeExecutionState.version += 1;
+      if (persisted) this.#settleActionHistory(action);
       this.#sessionLeases.delete(session.id);
       this.store.appendEvent(session.id, session.generation, unknownEvent);
       this.store.appendEvent(session.id, session.generation, brokenEvent);
@@ -3170,6 +3241,7 @@ export class RuntimeService {
       "control",
       request.bypassGuard ?? false,
     );
+    this.#assertActionCapacity("control", request);
     const action: ControlAction = {
       acceptedAt: this.#timestamp(),
       actionSequence: this.store.nextActionSequence(session.id, session.generation),
@@ -3227,6 +3299,7 @@ export class RuntimeService {
         ),
       );
       this.#completeUntrackedInput(session, action, previousInputContext);
+      this.#settleActionHistory(action);
       return action;
     } catch (error) {
       action.status = "UNKNOWN";
@@ -3236,13 +3309,19 @@ export class RuntimeService {
         { reason: errorMessage(error) },
         { action, persist: false },
       );
+      let persisted = false;
       await this.#enqueueDurable(session.id, 0, () =>
         this.#durability?.finishInteraction(
           this.#requireSessionFence(session),
           action,
           unknownEvent,
         ),
-      ).catch((durableFailure: unknown) => this.#tripDurability(session.id, durableFailure));
+      )
+        .then(() => {
+          persisted = true;
+        })
+        .catch((durableFailure: unknown) => this.#tripDurability(session.id, durableFailure));
+      if (persisted) this.#settleActionHistory(action);
       throw new RuntimeError(
         "DELIVERY_UNKNOWN",
         "Control delivery is uncertain",
@@ -3387,12 +3466,27 @@ export class RuntimeService {
         throw durabilityError(error);
       }
     }
+    const retention = this.store.eventRetention?.(sessionId, generation);
+    if (after !== 0 && retention !== undefined && after < retention.discardedThrough) {
+      throw new RuntimeError("RESYNC_REQUIRED", "Cursor points before retained event history", {
+        minimumAvailableSequence: retention.minimumAvailableSequence,
+      });
+    }
     const events = this.store.queryEvents(sessionId, generation, after, limit + 1);
     const truncated = events.length > limit;
     const page = truncated ? events.slice(0, limit) : events;
     const last = page.at(-1);
     return {
       events: page,
+      ...(retention === undefined
+        ? {}
+        : {
+            retention: {
+              gap: after === 0 && retention.discardedThrough > 0,
+              minimumAvailableSequence: retention.minimumAvailableSequence,
+              source: "memory" as const,
+            },
+          }),
       truncated,
       ...(truncated && last !== undefined ? { nextAfter: last.sequence } : {}),
     };
@@ -3434,12 +3528,24 @@ export class RuntimeService {
             activeExecution,
           ),
         );
-        if (activeExecutionState !== undefined) activeExecutionState.version += 1;
+        if (activeExecutionState !== undefined) {
+          activeExecutionState.version += 1;
+          this.#settleActionHistory(
+            this.store.getAction(activeExecutionState.actionId),
+            activeExecutionState,
+          );
+        }
         this.#sessionLeases.delete(sessionId);
       } catch (error) {
         if (isDurabilityFatal(error)) this.#tripDurability(sessionId, error);
         throw error;
       }
+      this.#interactionStates.delete(sessionId);
+      this.#inputContexts.delete(sessionId);
+      this.#sensitiveInputs.delete(sessionId);
+      this.#checkpoints.delete(sessionId);
+      this.#checkpointInvalid.delete(sessionId);
+      this.#durableQueues.delete(sessionId);
       return closed;
     });
   }
@@ -4043,6 +4149,16 @@ export class RuntimeService {
         capability,
       });
     }
+  }
+
+  #assertActionCapacity(actionType: SessionAction["type"], request: unknown): void {
+    const estimatedActionBytes = Buffer.byteLength(JSON.stringify(request), "utf8") + 2_048;
+    this.store.assertActionCapacity?.(actionType, estimatedActionBytes);
+  }
+
+  #settleActionHistory(action: SessionAction | undefined, execution?: Execution): void {
+    if (action === undefined) return;
+    this.store.settleActionHistory?.(action.id, execution?.id);
   }
 
   #validateActor(actor: Actor): void {
@@ -4783,6 +4899,10 @@ export class RuntimeService {
       );
       if (activeExecutionState !== undefined && activeExecution !== undefined) {
         activeExecutionState.version += 1;
+        this.#settleActionHistory(
+          this.store.getAction(activeExecutionState.actionId),
+          activeExecutionState,
+        );
       }
       for (const lifecycleEvent of events) {
         this.store.appendEvent(session.id, session.generation, lifecycleEvent);
@@ -5705,6 +5825,25 @@ function missingSessionLease(
 
 function executionVersion(execution: Execution): Readonly<{ id: string; version: number }> {
   return { id: execution.id, version: execution.version };
+}
+
+function runtimeRetentionLimits(
+  configured: Partial<RuntimeRetentionLimits> | undefined,
+): RuntimeRetentionLimits {
+  const limits = { ...DEFAULT_RUNTIME_RETENTION_LIMITS, ...configured };
+  for (const [name, value] of Object.entries(limits)) {
+    requirePositiveInteger(value, `retention.${name}`);
+  }
+  if (
+    limits.memoryOnlyControlReserveEntries >= limits.memoryOnlyActionEntries ||
+    limits.memoryOnlyControlReserveBytes >= limits.memoryOnlyActionBytes
+  ) {
+    throw new RuntimeError(
+      "INVALID_REQUEST",
+      "Memory-only Control reserve must be smaller than total Action capacity",
+    );
+  }
+  return limits;
 }
 
 function requirePositiveInteger(value: number, name: string): number {

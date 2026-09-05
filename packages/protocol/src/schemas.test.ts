@@ -22,6 +22,7 @@ import {
   executionOutputReadTransportRequestSchema,
   executionWaitV2ResultSchema,
   executionWaitV2TransportRequestSchema,
+  eventPageTransportSchema,
   executeTransportRequestSchema,
   historyLookupResultSchema,
   historyLookupTransportRequestSchema,
@@ -70,6 +71,63 @@ describe("public Execute/Input request schemas", () => {
 });
 
 describe("canonical transport schemas", () => {
+  it("validates bounded memory Event retention metadata without changing Event objects", () => {
+    const event = {
+      id: "event-3",
+      observedAt: "2026-09-05T00:00:00.000Z",
+      payload: { unchanged: true },
+      sequence: 3,
+      sessionGeneration: 1,
+      sessionId: "session-events",
+      type: "fixture.event",
+    };
+    expect(
+      eventPageTransportSchema.parse({
+        events: [event],
+        retention: { gap: true, minimumAvailableSequence: 3, source: "memory" },
+        truncated: false,
+      }),
+    ).toEqual({
+      events: [event],
+      retention: { gap: true, minimumAvailableSequence: 3, source: "memory" },
+      truncated: false,
+    });
+    expect(() =>
+      eventPageTransportSchema.parse({
+        events: [event],
+        retention: { gap: true, minimumAvailableSequence: 0, source: "memory" },
+        truncated: false,
+      }),
+    ).toThrow();
+    expect(() =>
+      eventPageTransportSchema.parse({ events: [event], nextAfter: 2, truncated: true }),
+    ).toThrow();
+    expect(() =>
+      eventPageTransportSchema.parse({
+        events: [{ ...event, unexpected: true }],
+        truncated: false,
+      }),
+    ).toThrow();
+    expect(() =>
+      eventPageTransportSchema.parse({
+        events: [event],
+        retention: { gap: true, minimumAvailableSequence: 4, source: "memory" },
+        truncated: false,
+      }),
+    ).toThrow();
+    expect(() =>
+      eventPageTransportSchema.parse({
+        events: Array.from({ length: 65 }, (_, index) => ({
+          ...event,
+          id: `event-${index.toString()}`,
+          payload: { data: "x".repeat(64 * 1024 - 32) },
+          sequence: index + 1,
+        })),
+        truncated: false,
+      }),
+    ).toThrowError(/4 MiB/);
+  });
+
   it("binds durable history facts to exact targets and terminal tombstones", () => {
     const request = historyLookupTransportRequestSchema.parse({
       generation: 2,

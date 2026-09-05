@@ -98,6 +98,7 @@ export async function startRuntimeDaemon(options: {
   readonly sessionActionRateLimit?: number;
   readonly socketPath: string;
   readonly processGuardianTerminationGraceMilliseconds?: number;
+  readonly retention?: RuntimeServiceOptions["retention"];
   readonly rpcAuthentication?: RuntimeRpcAuthentication;
   readonly runtime?: RuntimeService;
 }): Promise<RuntimeDaemonHandle> {
@@ -156,6 +157,7 @@ export async function startRuntimeDaemon(options: {
       options.ownerLeaseMilliseconds !== undefined ||
       options.onProcessGuardianState !== undefined ||
       options.processGuardianTerminationGraceMilliseconds !== undefined ||
+      options.retention !== undefined ||
       options.sessionActionRateLimit !== undefined ||
       options.sessionLeaseMilliseconds !== undefined)
   ) {
@@ -313,6 +315,7 @@ export async function startRuntimeDaemon(options: {
         : { executionDispatch: options.executionDispatch }),
       ...(options.hooks === undefined ? {} : { hooks: options.hooks }),
       ownerId,
+      ...(options.retention === undefined ? {} : { retention: options.retention }),
       screenProjectionFactory: new XtermScreenProjectionFactory(),
       sessionLeaseMilliseconds,
     });

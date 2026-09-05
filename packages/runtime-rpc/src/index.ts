@@ -83,6 +83,7 @@ import {
   executionOutputReadTransportRequestSchema,
   executionWaitV2ResultSchema,
   executionWaitV2TransportRequestSchema,
+  eventPageTransportSchema,
   historyLookupResultSchema,
   historyLookupTransportRequestSchema,
   defineRuntimeCapabilities,
@@ -1155,7 +1156,9 @@ export class UnixRuntimeClient implements RuntimeGateway {
     after = 0,
     limit = 100,
   ): Promise<EventPage> {
-    return this.#request("events.query", { after, generation, limit, sessionId });
+    return this.#request("events.query", { after, generation, limit, sessionId }).then(
+      (result) => eventPageTransportSchema.parse(result) as EventPage,
+    );
   }
 
   public closeSession(sessionId: string, generation: number): Promise<Session> {
@@ -1692,11 +1695,13 @@ async function dispatch(
     }
     case "events.query": {
       const request = operationSchemas[operation].parse(input);
-      return gateway.queryEvents(
-        request.sessionId,
-        request.generation,
-        request.after,
-        request.limit,
+      return eventPageTransportSchema.parse(
+        await gateway.queryEvents(
+          request.sessionId,
+          request.generation,
+          request.after,
+          request.limit,
+        ),
       );
     }
     case "screen.get": {

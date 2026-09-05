@@ -491,5 +491,10 @@ export interface SessionEvent {
 export interface EventPage {
   readonly events: readonly SessionEvent[];
   readonly nextAfter?: number;
+  readonly retention?: Readonly<{
+    readonly gap: boolean;
+    readonly minimumAvailableSequence: number;
+    readonly source: "memory";
+  }>;
   readonly truncated: boolean;
 }

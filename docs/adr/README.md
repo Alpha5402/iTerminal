@@ -110,6 +110,10 @@ See also [ADR-0074](./0074-durable-history-and-idempotency-tombstones.md): add e
 Action/Execution history, transactional retention tombstones, and pre-side-effect durable Action
 replay checks without reconstructing live PTY state.
 
+See also [ADR-0075](./0075-bounded-runtime-memory-and-terminal-cleanup.md): bound in-process
+Action/Execution/Event history, preserve durable anti-replay, fail memory-only admission closed at
+capacity, and release settled Execute resources.
+
 Statuses:
 
 - Proposed: evidence or owner decision is still required.

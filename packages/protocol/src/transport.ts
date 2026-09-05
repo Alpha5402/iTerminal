@@ -1,3 +1,4 @@
+import { ACTOR_CAPABILITIES } from "@iterminal/domain";
 import type { LineInputPrecondition } from "@iterminal/domain";
 import * as z from "zod/v4";
 
@@ -35,6 +36,112 @@ export const sessionIdTransportSchema = z.string().min(1).max(256);
 export const sessionGenerationTransportSchema = z.number().int().positive();
 export const executionIdTransportSchema = z.string().min(1).max(256);
 export const idempotencyKeyTransportSchema = z.string().min(1).max(256);
+
+const eventActorTransportSchema = z
+  .strictObject({
+    capabilities: z.array(z.enum(ACTOR_CAPABILITIES)).max(ACTOR_CAPABILITIES.length),
+    client: z.string().min(1).max(256),
+    id: z.string().min(1).max(256),
+    principal: z.string().min(1).max(256),
+    type: z.enum(["human", "agent", "scheduler", "system"]),
+  })
+  .superRefine((actor, context) => {
+    if (
+      actor.capabilities.length === 0 ||
+      actor.capabilities.some(
+        (capability, index) => index > 0 && actor.capabilities[index - 1]! >= capability,
+      )
+    ) {
+      context.addIssue({ code: "custom", message: "Event Actor capabilities must be canonical" });
+    }
+  });
+
+const eventPayloadTransportSchema = z
+  .record(z.string().min(1).max(128), z.unknown())
+  .refine((payload) => Object.keys(payload).length <= 128, "Event payload has too many fields")
+  .refine(
+    (payload) => serializedUtf8Bytes(payload) <= 64 * 1024,
+    "Event payload exceeds the 64 KiB wire limit",
+  );
+
+const sessionEventTransportSchema = z.strictObject({
+  actionId: z.string().min(1).max(256).optional(),
+  actor: eventActorTransportSchema.optional(),
+  executionId: executionIdTransportSchema.optional(),
+  id: z.string().min(1).max(256),
+  observedAt: z.iso.datetime({ offset: true }),
+  payload: eventPayloadTransportSchema,
+  sequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  sessionGeneration: sessionGenerationTransportSchema,
+  sessionId: sessionIdTransportSchema,
+  type: z.string().min(1).max(128),
+});
+
+export const eventPageTransportSchema = z
+  .strictObject({
+    events: z.array(sessionEventTransportSchema).max(500),
+    nextAfter: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+    retention: z
+      .strictObject({
+        gap: z.boolean(),
+        minimumAvailableSequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+        source: z.literal("memory"),
+      })
+      .optional(),
+    truncated: z.boolean(),
+  })
+  .superRefine((page, context) => {
+    if (page.truncated !== (page.nextAfter !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        message: "Event page nextAfter must exist exactly when truncated",
+      });
+    }
+    const last = page.events.at(-1);
+    if (page.nextAfter !== undefined && last?.sequence !== page.nextAfter) {
+      context.addIssue({
+        code: "custom",
+        message: "Event page nextAfter must equal the final Event sequence",
+      });
+    }
+    const first = page.events[0];
+    if (
+      first !== undefined &&
+      page.retention !== undefined &&
+      page.retention.minimumAvailableSequence > first.sequence
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Event retention floor cannot follow the first returned Event",
+      });
+    }
+    for (let index = 1; index < page.events.length; index += 1) {
+      const previous = page.events[index - 1]!;
+      const current = page.events[index]!;
+      if (
+        current.sequence <= previous.sequence ||
+        current.sessionId !== previous.sessionId ||
+        current.sessionGeneration !== previous.sessionGeneration
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "Event page must contain one strictly ordered Session generation",
+        });
+        break;
+      }
+    }
+    if (serializedUtf8Bytes(page) > 4 * 1024 * 1024) {
+      context.addIssue({ code: "custom", message: "Event page exceeds the 4 MiB wire limit" });
+    }
+  });
+
+function serializedUtf8Bytes(value: unknown): number {
+  try {
+    return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
 
 export const lineInputPreconditionTransportSchema: z.ZodType<LineInputPrecondition> =
   z.strictObject({

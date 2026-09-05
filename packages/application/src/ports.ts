@@ -154,6 +154,56 @@ export interface RuntimeStore {
     after: number,
     limit: number,
   ): readonly SessionEvent[];
+  configureRetention?(configuration: RuntimeStoreRetentionConfiguration): void;
+  assertActionCapacity?(actionType: SessionAction["type"], estimatedBytes: number): void;
+  settleActionHistory?(actionId: string, executionId?: string): void;
+  eventRetention?(sessionId: string, generation: number): RuntimeEventRetention;
+  retentionSnapshot?(): RuntimeRetentionSnapshot;
+}
+
+export interface RuntimeRetentionLimits {
+  readonly durableHistoryBytes: number;
+  readonly durableHistoryEntries: number;
+  readonly eventBytesPerGeneration: number;
+  readonly eventEntriesPerGeneration: number;
+  readonly memoryOnlyActionBytes: number;
+  readonly memoryOnlyActionEntries: number;
+  readonly memoryOnlyControlReserveBytes: number;
+  readonly memoryOnlyControlReserveEntries: number;
+}
+
+export const DEFAULT_RUNTIME_RETENTION_LIMITS: RuntimeRetentionLimits = {
+  durableHistoryBytes: 16 * 1024 * 1024,
+  durableHistoryEntries: 4_096,
+  eventBytesPerGeneration: 4 * 1024 * 1024,
+  eventEntriesPerGeneration: 2_048,
+  memoryOnlyActionBytes: 16 * 1024 * 1024,
+  memoryOnlyActionEntries: 4_096,
+  memoryOnlyControlReserveBytes: 256 * 1024,
+  memoryOnlyControlReserveEntries: 64,
+};
+
+export interface RuntimeStoreRetentionConfiguration {
+  readonly durable: boolean;
+  readonly limits: RuntimeRetentionLimits;
+}
+
+export interface RuntimeEventRetention {
+  readonly discardedThrough: number;
+  readonly minimumAvailableSequence: number;
+}
+
+export interface RuntimeRetentionSnapshot {
+  readonly actions: number;
+  readonly actionBytes: number;
+  readonly durableHistoryBytes: number;
+  readonly durableHistoryEntries: number;
+  readonly events: number;
+  readonly eventBytes: number;
+  readonly executions: number;
+  readonly executionBytes: number;
+  readonly historyBytes: number;
+  readonly idempotencyBindings: number;
 }
 
 export type DurableSessionEvent = Omit<SessionEvent, "sequence">;
@@ -749,4 +799,5 @@ export interface RuntimeServiceOptions {
   readonly sessionLeaseMilliseconds?: number;
   readonly screenProjectionFactory?: TerminalScreenProjectionFactory;
   readonly now?: () => Date;
+  readonly retention?: Partial<RuntimeRetentionLimits>;
 }
