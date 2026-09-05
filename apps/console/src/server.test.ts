@@ -651,6 +651,12 @@ describe("M5 Human Console HTTP/WebSocket adapter", () => {
     expect(lookup).not.toHaveProperty("requestHash");
     expect(lookup).not.toHaveProperty("command");
     expect(lookup).not.toHaveProperty("actor");
+    await expect(
+      requestResult(consoleServer, cookie, lookupPath, {
+        body: { generation: session.generation, idempotencyKey: executeBody.idempotencyKey },
+        method: "POST",
+      }),
+    ).resolves.toEqual(lookup);
     expect(await readFile(marker, "utf8")).toBe("once\n");
 
     const secondBootstrap = await requestBootstrap(consoleServer);

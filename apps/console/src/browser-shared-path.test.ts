@@ -227,31 +227,118 @@ describeBrowser("M5 real Browser Human Console plus official MCP Agent", () => {
     await diagnosticsSummary.focus();
     await page.keyboard.press("Enter");
     expect(await diagnostics.getAttribute("open")).toBe("");
+    await page.evaluate(() => {
+      document.documentElement.style.zoom = "1";
+    });
+    await page.setViewportSize({ width: 1309, height: 900 });
     expect(
       (await runtime.getInteractionState(session.id, session.generation)).inputContext?.state,
     ).toBe("clear");
     await editor.fill("first\nsecond");
     await editor.press("Enter");
     await waitForPageText(page, ".error-banner", "INVALID_REQUEST");
+    await waitForPageText(page, '[data-testid="submission-intent"]', "rejected");
     expect(await editor.inputValue()).toBe("first\nsecond");
     const afterInvalid = await pool.query<{ count: number }>(
       "SELECT count(*)::int AS count FROM actions WHERE session_id=$1 AND kind='input'",
       [session.id],
     );
     expect(afterInvalid.rows[0]?.count).toBe(2);
-    // A lost response must not create a fresh duplicate intent on the next Enter.
+    // A lost response keeps one frozen identity. Repeated Enter and lookup never write again.
     await editor.fill("uncertain-line");
     let posts = 0;
-    await page.route(`**/api/sessions/${session.id}/input`, async (route) => {
+    let lookups = 0;
+    let frozenInputBody: unknown;
+    const inputPattern = `**/api/sessions/${session.id}/input`;
+    const lookupPattern = `**/api/sessions/${session.id}/actions/lookup`;
+    await page.route(inputPattern, async (route) => {
       posts++;
+      frozenInputBody = route.request().postDataJSON();
+      await route.fetch();
       await route.abort("failed");
+    });
+    await page.route(lookupPattern, async (route) => {
+      lookups++;
+      await delay(75);
+      if (lookups === 1) {
+        const body = frozenInputBody as { readonly idempotencyKey?: unknown } | undefined;
+        if (typeof body?.idempotencyKey !== "string") {
+          throw new Error("Browser did not expose the frozen idempotency key");
+        }
+        await route.fulfill({
+          body: JSON.stringify({
+            requestId: "c01-synthetic-not-found",
+            result: {
+              generation: session.generation,
+              idempotencyKey: body.idempotencyKey,
+              kind: "not_found",
+              mayStillBeInFlight: true,
+              message:
+                "No accepted Action is currently observable; the original request may still be in flight, so do not generate a replacement idempotency key",
+              sessionId: session.id,
+            },
+          }),
+          contentType: "application/json",
+          status: 200,
+        });
+        return;
+      }
+      await route.continue();
     });
     await editor.press("Enter");
     await expect.poll(() => posts).toBe(1);
     await waitForPageText(page, ".error-banner", "Failed to fetch");
+    await waitForPageText(page, '[data-testid="submission-intent"]', "uncertain");
+    await editor.fill("newer local draft");
+    await editor.press("Enter");
     await editor.press("Enter");
     expect(posts).toBe(1);
-    expect(await editor.inputValue()).toBe("uncertain-line");
+    expect(await editor.inputValue()).toBe("newer local draft");
+
+    await page.evaluate(() => {
+      const check = [...document.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent === "Check result",
+      );
+      if (!(check instanceof HTMLButtonElement)) throw new Error("Check result button missing");
+      check.click();
+      check.click();
+    });
+    await waitForPageText(page, '[data-testid="submission-intent"]', "may still be in flight");
+    expect(lookups).toBe(1);
+    expect(posts).toBe(1);
+    const c01ScreenshotDir = join(
+      repositoryRoot,
+      "docs/verification/review-remediation/artifacts/2026-09-05-C01",
+    );
+    await mkdir(c01ScreenshotDir, { recursive: true });
+    await page.screenshot({
+      path: join(c01ScreenshotDir, "uncertain-not-found-with-newer-draft.png"),
+      fullPage: true,
+    });
+    await waitForPageText(page, '[data-testid="browser-terminal-output"]', "ACK:uncertain-line");
+    await page.getByRole("button", { name: "Check result" }).click();
+    await waitForPageText(page, '[data-testid="submission-intent"]', "actual status DELIVERED");
+    await waitForPageText(
+      page,
+      '[data-testid="submission-intent"]',
+      "not proof that the program handled the input or that execution succeeded",
+    );
+    expect(lookups).toBe(2);
+    expect(posts).toBe(1);
+    expect(await editor.inputValue()).toBe("newer local draft");
+    if (frozenInputBody === undefined) throw new Error("Browser did not expose the frozen body");
+    const frozenKey = (frozenInputBody as { readonly idempotencyKey?: unknown }).idempotencyKey;
+    expect(typeof frozenKey).toBe("string");
+    const acceptedFrozen = await pool.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM actions WHERE session_id=$1 AND idempotency_key=$2",
+      [session.id, frozenKey],
+    );
+    expect(acceptedFrozen.rows[0]?.count).toBe(1);
+    await page.locator(".error-banner").getByRole("button", { name: "Dismiss" }).click();
+    await page.screenshot({
+      path: join(c01ScreenshotDir, "accepted-with-newer-draft.png"),
+      fullPage: true,
+    });
   }, 60_000);
 
   it("copies wrapped output back into the Shell without extra newlines and survives Console loss", async () => {

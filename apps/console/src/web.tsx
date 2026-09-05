@@ -2,8 +2,17 @@ import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 
 import { Terminal } from "@xterm/xterm";
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import { createRoot } from "react-dom/client";
+import type { ActionLookupResult } from "@iterminal/protocol";
 
 import {
   commandHistoryKey,
@@ -22,6 +31,18 @@ import {
   sessionTabKey,
   visibleSessionTabs,
 } from "./session-tabs.js";
+import {
+  idleSubmissionIntent,
+  isDefiniteSubmissionRejectionCode,
+  isSubmissionIntentPending,
+  startSubmissionIntent,
+  submissionIntentCanSettleFailure,
+  submissionIntentMatchesDraft,
+  submissionIntentReducer,
+  type SubmissionIntentEvent,
+  type SubmissionIntentIdentity,
+  type SubmissionIntentState,
+} from "./submission-intent.js";
 
 type SessionStatus = "STARTING" | "READY" | "RESERVED" | "RUNNING" | "BROKEN" | "CLOSED";
 type InputPolicy = "common" | "human_guarded" | "human_only" | "agent_only";
@@ -212,6 +233,11 @@ interface CursorComposerLayout {
   readonly width: number;
 }
 
+interface LocalDraft {
+  readonly revision: number;
+  readonly value: string;
+}
+
 type InspectorView = "advanced" | "approvals" | "mcp" | "session";
 
 const INSPECTOR_TITLES: Record<InspectorView, string> = {
@@ -260,12 +286,16 @@ function App(): React.JSX.Element {
     "offline",
   );
   const [error, setError] = useState<ApiErrorBody>();
-  const [command, setCommand] = useState("");
-  const [foregroundDrafts, setForegroundDrafts] = useState<Record<string, string>>({});
+  const [commandDraft, setCommandDraft] = useState<LocalDraft>({ revision: 0, value: "" });
+  const [foregroundDrafts, setForegroundDrafts] = useState<Record<string, LocalDraft>>({});
   const [rawInput, setRawInput] = useState(false);
   const rawInputState = useRef(false);
-  const foregroundPending = useRef(new Set<string>());
-  const [foregroundBlocked, setForegroundBlocked] = useState<readonly string[]>([]);
+  const foregroundPreparing = useRef(new Set<string>());
+  const [submissionIntent, dispatchSubmissionIntent] = useReducer(
+    submissionIntentReducer,
+    idleSubmissionIntent,
+  );
+  const submissionIntentRef = useRef<SubmissionIntentState>(idleSubmissionIntent);
   const commandHistories = useRef(new Map<string, readonly CommandHistoryEntry[]>());
   const commandHistoryNavigation = useRef(new CommandHistoryNavigation());
   const historyCaretRestore = useRef(false);
@@ -332,13 +362,35 @@ function App(): React.JSX.Element {
     !rawInput &&
     !secureInputVisible &&
     sensitiveInput?.status !== "ACTIVE";
-  const editorValue =
+  const foregroundDraft =
     foregroundLineVisible && foregroundScope !== undefined
-      ? (foregroundDrafts[foregroundScope] ?? "")
-      : command;
+      ? (foregroundDrafts[foregroundScope] ?? { revision: 0, value: "" })
+      : undefined;
+  const activeDraft = foregroundDraft ?? commandDraft;
+  const editorValue = activeDraft.value;
+  const command = commandDraft.value;
   const cursorComposerRequested =
     session?.status === "READY" || foregroundLineVisible || secureInputVisible;
   const pendingApprovalCount = approvals.filter((approval) => approval.status === "PENDING").length;
+  const transitionSubmissionIntent = useCallback(
+    (event: SubmissionIntentEvent): SubmissionIntentState => {
+      const next = submissionIntentReducer(submissionIntentRef.current, event);
+      submissionIntentRef.current = next;
+      dispatchSubmissionIntent(event);
+      return next;
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!isSubmissionIntentPending(submissionIntent)) return;
+    const warnBeforeLeaving = (event: BeforeUnloadEvent): void => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
+  }, [submissionIntent]);
 
   useEffect(() => {
     if (session === undefined || bootstrap === undefined) return;
@@ -749,7 +801,7 @@ function App(): React.JSX.Element {
       setCheckpoint(undefined);
       setApprovals([]);
       setSensitiveInput(undefined);
-      setCommand("");
+      setCommandDraft((draft) => ({ revision: draft.revision + 1, value: "" }));
       setError(undefined);
       setBrowserTerminalMirror("");
       latestScreen.current = undefined;
@@ -774,7 +826,7 @@ function App(): React.JSX.Element {
     setTimeline(saved?.events ?? []);
     setCheckpoint(undefined);
     setStaleAcknowledged(false);
-    setCommand("");
+    setCommandDraft((draft) => ({ revision: draft.revision + 1, value: "" }));
     commandHistoryNavigation.current.reset();
     historyCaretRestore.current = false;
     let disposed = false;
@@ -1220,19 +1272,44 @@ function App(): React.JSX.Element {
       return;
     }
     if (session === undefined || command.trim() === "") return;
-    try {
-      await api(`/api/sessions/${encodeURIComponent(session.id)}/execute`, {
-        body: {
-          command,
-          generation: session.generation,
-          idempotencyKey: crypto.randomUUID(),
+    const target = session;
+    const identity = beginSubmissionIntent(() => {
+      const idempotencyKey = crypto.randomUUID();
+      return {
+        draftRevision: commandDraft.revision,
+        generation: target.generation,
+        idempotencyKey,
+        payload: {
+          body: { command, generation: target.generation, idempotencyKey },
+          kind: "execute",
         },
+        sessionId: target.id,
+      };
+    });
+    if (identity === undefined) return;
+    const { idempotencyKey } = identity;
+    try {
+      const result = await api<{
+        readonly action: { readonly id: string; readonly status: string };
+        readonly execution: { readonly id: string; readonly status: string };
+      }>(`/api/sessions/${encodeURIComponent(target.id)}/execute`, {
+        body: identity.payload.body,
         method: "POST",
       });
-      setCommand("");
+      transitionSubmissionIntent({
+        actionId: result.action.id,
+        actionStatus: result.action.status,
+        executionId: result.execution.id,
+        executionStatus: result.execution.status,
+        generation: identity.generation,
+        idempotencyKey,
+        sessionId: identity.sessionId,
+        type: "accepted",
+      });
+      clearAcceptedDraft(identity);
       commandHistoryNavigation.current.reset();
     } catch (reason) {
-      setError(normalizeClientError(reason));
+      settleSubmissionFailure(identity, reason);
     }
   };
 
@@ -1241,15 +1318,16 @@ function App(): React.JSX.Element {
       session === undefined ||
       foregroundScope === undefined ||
       editorValue.trim() === "" ||
-      foregroundPending.current.has(foregroundScope) ||
-      foregroundBlocked.includes(foregroundScope)
+      foregroundPreparing.current.has(foregroundScope) ||
+      isSubmissionIntentPending(submissionIntentRef.current)
     )
       return;
     const target = session;
     const scope = foregroundScope;
     const draft = editorValue;
-    let attempted = false;
-    foregroundPending.current.add(scope);
+    const draftRevision = activeDraft.revision;
+    let submittedIdentity: SubmissionIntentIdentity | undefined;
+    foregroundPreparing.current.add(scope);
     try {
       const observed = await api<InteractionState>(
         `/api/sessions/${encodeURIComponent(target.id)}/interaction?generation=${target.generation}`,
@@ -1259,6 +1337,8 @@ function App(): React.JSX.Element {
         throw new Error(
           "Foreground input context is unavailable; refresh and check the active program",
         );
+      const targetExecutionId = target.activeExecutionId;
+      if (targetExecutionId === undefined) return;
       const current = latestSession.current;
       if (
         current?.id !== target.id ||
@@ -1266,47 +1346,177 @@ function App(): React.JSX.Element {
         current.activeExecutionId !== target.activeExecutionId
       )
         return;
-      attempted = true;
-      const result = await api<{ status: string }>(
+      const identity = beginSubmissionIntent(() => {
+        const idempotencyKey = crypto.randomUUID();
+        return {
+          draftRevision,
+          executionId: targetExecutionId,
+          generation: target.generation,
+          idempotencyKey,
+          payload: {
+            body: {
+              data: `${draft}\n`,
+              generation: target.generation,
+              targetExecutionId,
+              lineInput: {
+                expectedInputVersion: context.version,
+                expectedInteractionVersion: observed.version,
+              },
+              idempotencyKey,
+            },
+            kind: "input",
+          },
+          sessionId: target.id,
+        };
+      });
+      if (identity === undefined) return;
+      submittedIdentity = identity;
+      const { idempotencyKey } = identity;
+      const result = await api<{ readonly id: string; readonly status: string }>(
         `/api/sessions/${encodeURIComponent(target.id)}/input`,
         {
           method: "POST",
-          body: {
-            data: `${draft}\n`,
-            generation: target.generation,
-            targetExecutionId: target.activeExecutionId,
-            lineInput: {
-              expectedInputVersion: context.version,
-              expectedInteractionVersion: observed.version,
-            },
-            idempotencyKey: crypto.randomUUID(),
-          },
+          body: identity.payload.body,
         },
       );
-      if (result.status !== "DELIVERED")
-        throw new Error("Input delivery is uncertain; inspect Events before sending again");
-      setForegroundDrafts((drafts) =>
-        drafts[scope] === draft ? { ...drafts, [scope]: "" } : drafts,
-      );
+      if (result.status === "DELIVERED") {
+        transitionSubmissionIntent({
+          actionId: result.id,
+          actionStatus: result.status,
+          generation: identity.generation,
+          idempotencyKey,
+          sessionId: identity.sessionId,
+          type: "accepted",
+        });
+        clearAcceptedDraft(identity);
+      } else {
+        transitionSubmissionIntent({
+          actionId: result.id,
+          generation: identity.generation,
+          idempotencyKey,
+          message: `The Input Action status is ${result.status}. Check the accepted Action before deciding what to do; this request will not be sent again.`,
+          sessionId: identity.sessionId,
+          type: "uncertain",
+        });
+      }
     } catch (reason) {
-      const failure = normalizeClientError(reason);
-      const rejected = [
-        "INVALID_REQUEST",
-        "INPUT_CONTEXT_CHANGED",
-        "INPUT_CONTEXT_UNSAFE",
-        "INPUT_GUARDED",
-        "POLICY_DENIED",
-        "EXECUTION_CHANGED",
-        "SESSION_GENERATION_CHANGED",
-        "SESSION_BROKEN",
-        "SESSION_NOT_READY",
-        "SENSITIVE_INPUT_ACTIVE",
-        "RATE_LIMITED",
-      ].includes(failure.code);
-      if (attempted && !rejected) setForegroundBlocked((keys) => [...keys, scope]);
-      setError(failure);
+      const intent = submissionIntentRef.current;
+      if (submissionIntentCanSettleFailure(intent, submittedIdentity)) {
+        settleSubmissionFailure(submittedIdentity, reason);
+      } else {
+        setError(normalizeClientError(reason));
+      }
     } finally {
-      foregroundPending.current.delete(scope);
+      foregroundPreparing.current.delete(scope);
+    }
+  };
+
+  const beginSubmissionIntent = (
+    createIdentity: () => SubmissionIntentIdentity,
+  ): SubmissionIntentIdentity | undefined => {
+    const before = submissionIntentRef.current;
+    const next = startSubmissionIntent(before, createIdentity);
+    if (next === before || next.status !== "submitting") return undefined;
+    const identity = identityOfIntent(next);
+    submissionIntentRef.current = next;
+    dispatchSubmissionIntent({ identity, type: "begin" });
+    return identity;
+  };
+
+  const settleSubmissionFailure = (identity: SubmissionIntentIdentity, reason: unknown): void => {
+    const failure = normalizeClientError(reason);
+    transitionSubmissionIntent(
+      isDefiniteAdmissionRejection(reason)
+        ? {
+            code: failure.code,
+            generation: identity.generation,
+            idempotencyKey: identity.idempotencyKey,
+            message: failure.message,
+            sessionId: identity.sessionId,
+            type: "rejected",
+          }
+        : {
+            generation: identity.generation,
+            idempotencyKey: identity.idempotencyKey,
+            message:
+              "The submission response was not established. The frozen request identity is kept in this tab; use Check result, which performs no terminal write.",
+            sessionId: identity.sessionId,
+            type: "uncertain",
+          },
+    );
+    setError(failure);
+  };
+
+  const clearAcceptedDraft = (identity: SubmissionIntentIdentity): void => {
+    if (identity.payload.kind === "input" && identity.executionId !== undefined) {
+      const executionId = identity.executionId;
+      const scope = `${identity.sessionId}:${identity.generation.toString()}:${executionId}`;
+      setForegroundDrafts((drafts) => {
+        const draft = drafts[scope];
+        return draft !== undefined &&
+          submissionIntentMatchesDraft(identity, {
+            draftRevision: draft.revision,
+            executionId,
+            generation: identity.generation,
+            sessionId: identity.sessionId,
+          })
+          ? {
+              ...drafts,
+              [scope]: { revision: draft.revision + 1, value: "" },
+            }
+          : drafts;
+      });
+      return;
+    }
+    const current = latestSession.current;
+    if (current === undefined) return;
+    setCommandDraft((draft) =>
+      submissionIntentMatchesDraft(identity, {
+        draftRevision: draft.revision,
+        generation: current.generation,
+        sessionId: current.id,
+      })
+        ? { revision: draft.revision + 1, value: "" }
+        : draft,
+    );
+  };
+
+  const reconcileSubmission = async (): Promise<void> => {
+    const intent = submissionIntentRef.current;
+    if (intent.status !== "uncertain" || intent.checking) return;
+    transitionSubmissionIntent({
+      generation: intent.generation,
+      idempotencyKey: intent.idempotencyKey,
+      sessionId: intent.sessionId,
+      type: "lookup_started",
+    });
+    try {
+      const result = await api<ActionLookupResult>(
+        `/api/sessions/${encodeURIComponent(intent.sessionId)}/actions/lookup`,
+        {
+          body: {
+            generation: intent.generation,
+            idempotencyKey: intent.idempotencyKey,
+          },
+          method: "POST",
+        },
+      );
+      const next = transitionSubmissionIntent({
+        generation: intent.generation,
+        idempotencyKey: intent.idempotencyKey,
+        result,
+        sessionId: intent.sessionId,
+        type: "lookup_finished",
+      });
+      if (next.status === "accepted") clearAcceptedDraft(identityOfIntent(next));
+    } catch (reason) {
+      transitionSubmissionIntent({
+        generation: intent.generation,
+        idempotencyKey: intent.idempotencyKey,
+        message: `Result lookup is unavailable: ${normalizeClientError(reason).message}. The original submission remains uncertain and was not resent.`,
+        sessionId: intent.sessionId,
+        type: "lookup_failed",
+      });
     }
   };
 
@@ -1349,7 +1559,7 @@ function App(): React.JSX.Element {
     event.preventDefault();
     historyCaretRestore.current = recalled !== command;
     if (recalled === command) placeCaretAtEnd(editor);
-    setCommand(recalled);
+    setCommandDraft((draft) => ({ revision: draft.revision + 1, value: recalled }));
     return true;
   };
 
@@ -1731,6 +1941,80 @@ function App(): React.JSX.Element {
               </button>
             )}
           </div>
+          {submissionIntent.status !== "idle" && (
+            <section
+              aria-live="polite"
+              className={`submission-intent submission-${submissionIntent.status}`}
+              data-testid="submission-intent"
+            >
+              <div>
+                <strong>
+                  {submissionIntent.payload.kind === "execute"
+                    ? "Shell command"
+                    : "Foreground line"}
+                  {" submission: "}
+                  {submissionIntent.status}
+                </strong>
+                <span>
+                  Session {submissionIntent.sessionId}, generation {submissionIntent.generation}
+                  {submissionIntent.executionId === undefined
+                    ? ""
+                    : `, execution ${submissionIntent.executionId}`}
+                </span>
+                {submissionIntent.status === "submitting" && (
+                  <small>
+                    One frozen request is in flight. Enter will not create another key or send it
+                    again.
+                  </small>
+                )}
+                {submissionIntent.status === "uncertain" && (
+                  <>
+                    <small>{submissionIntent.message}</small>
+                    <small>
+                      This identity exists only in this browser tab. Leaving or refreshing loses the
+                      lookup identity; it does not recover or retry the submission.
+                    </small>
+                  </>
+                )}
+                {submissionIntent.status === "accepted" && (
+                  <small>
+                    Action {submissionIntent.actionId} was found with actual status{" "}
+                    {submissionIntent.actionStatus}
+                    {submissionIntent.executionStatus === undefined
+                      ? ""
+                      : `; Execution status ${submissionIntent.executionStatus}`}
+                    . This is not proof that the program handled the input or that execution
+                    succeeded.
+                  </small>
+                )}
+                {submissionIntent.status === "rejected" && (
+                  <small>
+                    {submissionIntent.code}: {submissionIntent.message}. This request was
+                    definitively rejected before a terminal write; edit the draft and press Enter to
+                    create a new intent.
+                  </small>
+                )}
+              </div>
+              {submissionIntent.status === "uncertain" && (
+                <button
+                  disabled={submissionIntent.checking}
+                  onClick={() => void reconcileSubmission()}
+                  type="button"
+                >
+                  {submissionIntent.checking ? "Checking…" : "Check result"}
+                </button>
+              )}
+              {(submissionIntent.status === "accepted" ||
+                submissionIntent.status === "rejected") && (
+                <button
+                  onClick={() => transitionSubmissionIntent({ type: "dismiss" })}
+                  type="button"
+                >
+                  Dismiss
+                </button>
+              )}
+            </section>
+          )}
           <div
             className="terminal-surface"
             onClick={(event) => {
@@ -1818,8 +2102,20 @@ function App(): React.JSX.Element {
                       historyCaretRestore.current = false;
                       if (foregroundLineVisible && foregroundScope !== undefined) {
                         const value = event.currentTarget.value;
-                        setForegroundDrafts((drafts) => ({ ...drafts, [foregroundScope]: value }));
-                      } else setCommand(event.currentTarget.value);
+                        setForegroundDrafts((drafts) => ({
+                          ...drafts,
+                          [foregroundScope]: {
+                            revision: (drafts[foregroundScope]?.revision ?? 0) + 1,
+                            value,
+                          },
+                        }));
+                      } else {
+                        const value = event.currentTarget.value;
+                        setCommandDraft((draft) => ({
+                          revision: draft.revision + 1,
+                          value,
+                        }));
+                      }
                     }}
                     onSelect={(event) => {
                       const editor = event.currentTarget;
@@ -2287,6 +2583,23 @@ function isApiError(value: unknown): value is ApiErrorBody {
     "message" in value &&
     "requestId" in value
   );
+}
+
+function isDefiniteAdmissionRejection(reason: unknown): boolean {
+  return reason instanceof ConsoleApiError && isDefiniteSubmissionRejectionCode(reason.body.code);
+}
+
+function identityOfIntent(
+  intent: Exclude<SubmissionIntentState, { readonly status: "idle" }>,
+): SubmissionIntentIdentity {
+  return {
+    draftRevision: intent.draftRevision,
+    ...(intent.executionId === undefined ? {} : { executionId: intent.executionId }),
+    generation: intent.generation,
+    idempotencyKey: intent.idempotencyKey,
+    payload: intent.payload,
+    sessionId: intent.sessionId,
+  };
 }
 
 function renderScreen(
