@@ -7,6 +7,7 @@ export const UNKNOWN_RUNTIME_BUILD_ID = "unknown";
 export const RUNTIME_FEATURES = Object.freeze([
   "action.execute.v1",
   "action.input.v1",
+  "action.lookup.v1",
   "runtime.capabilities.v1",
   "runtime.owner-capabilities.v1",
 ] as const);
@@ -54,6 +55,59 @@ export const inputTransportRequestSchema = z.strictObject({
   targetExecutionId: executionIdTransportSchema,
 });
 
+export const actionLookupTransportRequestSchema = z.strictObject({
+  generation: sessionGenerationTransportSchema,
+  idempotencyKey: idempotencyKeyTransportSchema,
+  sessionId: sessionIdTransportSchema,
+});
+
+const actionLookupIdentitySchema = z.strictObject({
+  generation: sessionGenerationTransportSchema,
+  idempotencyKey: idempotencyKeyTransportSchema,
+  sessionId: sessionIdTransportSchema,
+});
+
+export const actionLookupResultSchema = z.discriminatedUnion("kind", [
+  actionLookupIdentitySchema.extend({
+    acceptedAt: z.iso.datetime({ offset: true }),
+    actionId: z.string().min(1).max(256),
+    actionStatus: z.enum([
+      "ACCEPTED",
+      "DISPATCHING",
+      "RUNNING",
+      "COMPLETED",
+      "FAILED",
+      "INTERRUPTED",
+      "UNKNOWN",
+      "CANCELLED",
+      "DELIVERED",
+      "REJECTED",
+    ]),
+    actionType: z.enum(["execute", "input", "secret_input", "control", "resize"]),
+    executionId: executionIdTransportSchema.optional(),
+    executionStatus: z
+      .enum(["DISPATCHING", "RUNNING", "COMPLETED", "FAILED", "INTERRUPTED", "UNKNOWN"])
+      .optional(),
+    kind: z.literal("found"),
+  }),
+  actionLookupIdentitySchema.extend({
+    kind: z.literal("not_found"),
+    mayStillBeInFlight: z.literal(true),
+    message: z.string().min(1).max(512),
+  }),
+  actionLookupIdentitySchema.extend({
+    expiredAt: z.iso.datetime({ offset: true }),
+    kind: z.literal("expired"),
+    message: z.string().min(1).max(512),
+  }),
+  actionLookupIdentitySchema.extend({
+    kind: z.literal("unavailable"),
+    message: z.string().min(1).max(512),
+    reason: z.enum(["durability_unavailable", "owner_route_unavailable"]),
+    retryable: z.literal(true),
+  }),
+]);
+
 export const runtimeCapabilitiesRequestSchema = z.strictObject({
   sessionId: sessionIdTransportSchema.optional(),
 });
@@ -82,6 +136,8 @@ export const runtimeCapabilitiesSchema: z.ZodType<RuntimeCapabilities> = z.stric
 
 export type ExecuteTransportRequest = z.output<typeof executeTransportRequestSchema>;
 export type InputTransportRequest = z.output<typeof inputTransportRequestSchema>;
+export type ActionLookupTransportRequest = z.output<typeof actionLookupTransportRequestSchema>;
+export type ActionLookupResult = z.output<typeof actionLookupResultSchema>;
 export type RuntimeCapabilitiesRequest = z.output<typeof runtimeCapabilitiesRequestSchema>;
 
 export function defineRuntimeCapabilities(input: {

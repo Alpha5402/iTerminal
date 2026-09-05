@@ -1,4 +1,9 @@
-import type { RuntimeOwnerRecord, RuntimeOwnerRegistry } from "@iterminal/application";
+import type {
+  ActionLookupRequest,
+  ActionLookupResult,
+  RuntimeOwnerRecord,
+  RuntimeOwnerRegistry,
+} from "@iterminal/application";
 import type { Session } from "@iterminal/domain";
 import { RuntimeError } from "@iterminal/domain";
 import { UnixRuntimeClient, type RuntimeGateway } from "@iterminal/runtime-rpc";
@@ -38,7 +43,7 @@ describe("CentralRuntimeRouterGateway error classification", () => {
 
     await expect(gateway.getRuntimeCapabilities()).resolves.toEqual({
       buildId: "router-a05",
-      features: ["runtime.capabilities.v1", "runtime.owner-capabilities.v1"],
+      features: ["action.lookup.v1", "runtime.capabilities.v1", "runtime.owner-capabilities.v1"],
       protocolVersion: "1",
     });
     await expect(gateway.getRuntimeCapabilities({ sessionId: "session-a" })).resolves.toEqual({
@@ -77,6 +82,86 @@ describe("CentralRuntimeRouterGateway error classification", () => {
     );
 
     await expect(gateway.getSession("session-owner-unavailable")).rejects.toBe(ownerFailure);
+  });
+
+  it("routes Action lookup to one exact owner and classifies absent or unavailable routes", async () => {
+    const request = {
+      actor: {
+        capabilities: ["session.execute"] as const,
+        client: "router-test",
+        id: "agent-router",
+        principal: "router-principal",
+        type: "agent" as const,
+      },
+      generation: 7,
+      idempotencyKey: "router-lookup",
+      sessionId: "session-routed",
+    };
+    let calls = 0;
+    const routed = new CentralRuntimeRouterGateway(
+      routeRegistry(owner),
+      () =>
+        new LookupClient((received) => {
+          calls += 1;
+          expect(received).toEqual(request);
+          return Promise.resolve({
+            acceptedAt: new Date(0).toISOString(),
+            actionId: "action-routed",
+            actionStatus: "COMPLETED",
+            actionType: "execute",
+            executionId: "execution-routed",
+            executionStatus: "COMPLETED",
+            generation: received.generation,
+            idempotencyKey: received.idempotencyKey,
+            kind: "found",
+            sessionId: received.sessionId,
+          });
+        }),
+    );
+    await expect(routed.lookupAction(request)).resolves.toMatchObject({
+      actionId: "action-routed",
+      kind: "found",
+    });
+    expect(calls).toBe(1);
+
+    const absent = new CentralRuntimeRouterGateway(
+      { ...routeRegistry(owner), resolveSessionRoute: () => Promise.resolve(undefined) },
+      () => new LookupClient(() => Promise.reject(new Error("must not dispatch"))),
+    );
+    await expect(absent.lookupAction(request)).resolves.toMatchObject({
+      kind: "not_found",
+      mayStillBeInFlight: true,
+    });
+
+    const ownerless = new CentralRuntimeRouterGateway(
+      {
+        ...routeRegistry(owner),
+        resolveSessionRoute: () => Promise.resolve({ ownerId: owner.ownerId }),
+      },
+      () => new LookupClient(() => Promise.reject(new Error("must not dispatch"))),
+    );
+    await expect(ownerless.lookupAction(request)).resolves.toMatchObject({
+      kind: "unavailable",
+      reason: "owner_route_unavailable",
+    });
+
+    const databaseDown = new CentralRuntimeRouterGateway(
+      {
+        ...routeRegistry(owner),
+        resolveSessionRoute: () => Promise.reject(new Error("route database down")),
+      },
+      () => new LookupClient(() => Promise.reject(new Error("must not dispatch"))),
+    );
+    await expect(databaseDown.lookupAction(request)).resolves.toMatchObject({
+      kind: "unavailable",
+      reason: "owner_route_unavailable",
+    });
+
+    const denied = new CentralRuntimeRouterGateway(
+      routeRegistry(owner),
+      () => new LookupClient(() => Promise.reject(new RuntimeError("POLICY_DENIED", "denied"))),
+    );
+    await expect(denied.lookupAction(request)).rejects.toMatchObject({ code: "POLICY_DENIED" });
   });
 
   it("rejects a Session returned under a conflicting owner identity", async () => {
@@ -167,6 +252,18 @@ class CapabilityClient extends UnixRuntimeClient {
       features: this.features,
       protocolVersion: "1",
     });
+  }
+}
+
+class LookupClient extends UnixRuntimeClient {
+  public constructor(
+    private readonly lookup: (request: ActionLookupRequest) => Promise<ActionLookupResult>,
+  ) {
+    super("/unused/action-lookup-owner.sock");
+  }
+
+  public override lookupAction(request: ActionLookupRequest): Promise<ActionLookupResult> {
+    return this.lookup(request);
   }
 }
 

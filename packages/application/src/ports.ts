@@ -158,6 +158,45 @@ export interface RuntimeStore {
 
 export type DurableSessionEvent = Omit<SessionEvent, "sequence">;
 
+export interface ActionLookupRequest {
+  readonly actor: Actor;
+  readonly generation: number;
+  readonly idempotencyKey: string;
+  readonly sessionId: string;
+}
+
+export interface ActionLookupFound extends Omit<ActionLookupRequest, "actor"> {
+  readonly acceptedAt: string;
+  readonly actionId: string;
+  readonly actionStatus: SessionAction["status"];
+  readonly actionType: SessionAction["type"];
+  readonly executionId?: string | undefined;
+  readonly executionStatus?: Execution["status"] | undefined;
+  readonly kind: "found";
+}
+
+export type ActionLookupResult =
+  | ActionLookupFound
+  | (Omit<ActionLookupRequest, "actor"> &
+      Readonly<{
+        kind: "not_found";
+        mayStillBeInFlight: true;
+        message: string;
+      }>)
+  | (Omit<ActionLookupRequest, "actor"> &
+      Readonly<{
+        expiredAt: string;
+        kind: "expired";
+        message: string;
+      }>)
+  | (Omit<ActionLookupRequest, "actor"> &
+      Readonly<{
+        kind: "unavailable";
+        message: string;
+        reason: "durability_unavailable" | "owner_route_unavailable";
+        retryable: true;
+      }>);
+
 export interface DurableExecuteAdmission {
   readonly action: ExecuteAction;
   readonly execution: Execution;
@@ -310,6 +349,7 @@ export interface RuntimeOwnerRegistry {
 }
 
 export interface RuntimeDurability {
+  lookupAction(request: ActionLookupRequest): Promise<ActionLookupFound | undefined>;
   requestApproval(
     fence: SessionFence,
     input: DurableApprovalRequest,

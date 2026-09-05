@@ -62,6 +62,9 @@ import {
 import { deliveredInputState, validateLineInput } from "./input-context.js";
 
 import type {
+  ActionLookupFound,
+  ActionLookupRequest,
+  ActionLookupResult,
   DurableSessionEvent,
   DurableForkAdmission,
   DurableOwnerRecoveryResult,
@@ -504,6 +507,48 @@ export class RuntimeService {
       () => this.#forgetDurableSessionCreation(normalized.idempotencyKey, promise),
     );
     return promise;
+  }
+
+  public async lookupAction(request: ActionLookupRequest): Promise<ActionLookupResult> {
+    validateSessionId(request.sessionId);
+    validateGeneration(request.generation);
+    validateIdempotencyKey(request.idempotencyKey);
+    const identity = actionLookupIdentity(request);
+    this.#validateActorShape(request.actor);
+    const existingActor = this.#actors.get(request.actor.id);
+    if (existingActor !== undefined && !sameActor(existingActor, request.actor)) {
+      return actionLookupNotFound(identity);
+    }
+    const action = this.store.getActionByIdempotency(
+      `${request.sessionId}:${request.actor.id}`,
+      request.idempotencyKey,
+    );
+    if (action !== undefined) {
+      if (!sameActor(action.actor, request.actor)) {
+        return actionLookupNotFound(identity);
+      }
+      if (action.sessionGeneration !== request.generation) return actionLookupNotFound(identity);
+      return projectActionLookup(
+        action,
+        action.type === "execute" ? this.store.getExecution(action.executionId) : undefined,
+      );
+    }
+
+    if (this.#durability === undefined) return actionLookupNotFound(identity);
+    try {
+      return (await this.#durability.lookupAction(request)) ?? actionLookupNotFound(identity);
+    } catch (error) {
+      if (error instanceof RuntimeError && error.code === "ACTOR_IDENTITY_CONFLICT") {
+        return actionLookupNotFound(identity);
+      }
+      return {
+        ...identity,
+        kind: "unavailable",
+        message: "Durable Action lookup is temporarily unavailable",
+        reason: "durability_unavailable",
+        retryable: true,
+      };
+    }
   }
 
   #forgetDurableSessionCreation(idempotencyKey: string, promise: Promise<Session>): void {
@@ -3533,13 +3578,7 @@ export class RuntimeService {
   }
 
   #validateActor(actor: Actor): void {
-    if (!isCanonicalActorCapabilities(actor.capabilities)) {
-      throw new RuntimeError(
-        "INVALID_REQUEST",
-        "Actor capabilities must be a non-empty canonical set",
-        { actorId: actor.id },
-      );
-    }
+    this.#validateActorShape(actor);
     const existing = this.#actors.get(actor.id);
     if (existing !== undefined && !sameActor(existing, actor)) {
       throw new RuntimeError(
@@ -3549,6 +3588,16 @@ export class RuntimeService {
       );
     }
     this.#actors.set(actor.id, { ...actor, capabilities: [...actor.capabilities] });
+  }
+
+  #validateActorShape(actor: Actor): void {
+    if (!isCanonicalActorCapabilities(actor.capabilities)) {
+      throw new RuntimeError(
+        "INVALID_REQUEST",
+        "Actor capabilities must be a non-empty canonical set",
+        { actorId: actor.id },
+      );
+    }
   }
 
   #requireInteractionStateVersion(state: InteractionState, expectedVersion: number): void {
@@ -4302,6 +4351,42 @@ function sameActor(left: Actor, right: Actor): boolean {
   );
 }
 
+function actionLookupIdentity(request: ActionLookupRequest): Omit<ActionLookupRequest, "actor"> {
+  return {
+    generation: request.generation,
+    idempotencyKey: request.idempotencyKey,
+    sessionId: request.sessionId,
+  };
+}
+
+function actionLookupNotFound(identity: Omit<ActionLookupRequest, "actor">): ActionLookupResult {
+  return {
+    ...identity,
+    kind: "not_found",
+    mayStillBeInFlight: true,
+    message:
+      "No accepted Action is currently observable; the original request may still be in flight, so do not generate a replacement idempotency key",
+  };
+}
+
+function projectActionLookup(
+  action: SessionAction,
+  execution: Execution | undefined,
+): ActionLookupFound {
+  return {
+    acceptedAt: action.acceptedAt,
+    actionId: action.id,
+    actionStatus: action.status,
+    actionType: action.type,
+    ...(action.type === "execute" ? { executionId: action.executionId } : {}),
+    ...(execution === undefined ? {} : { executionStatus: execution.status }),
+    generation: action.sessionGeneration,
+    idempotencyKey: action.idempotencyKey,
+    kind: "found",
+    sessionId: action.sessionId,
+  };
+}
+
 function cloneInteractionState(state: InteractionState): InteractionState {
   return {
     ...state,
@@ -4693,6 +4778,16 @@ async function validateCheckpointPath(checkpoint: ShellCheckpoint): Promise<void
       { sessionId: checkpoint.sessionId },
     );
   }
+}
+
+function validateSessionId(value: string): void {
+  if (value.length < 1 || value.length > 256 || value.includes("\0")) {
+    throw new RuntimeError("INVALID_REQUEST", "sessionId must contain 1 to 256 non-NUL characters");
+  }
+}
+
+function validateGeneration(value: number): void {
+  requirePositiveInteger(value, "generation");
 }
 
 function checkpointView(

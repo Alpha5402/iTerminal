@@ -21,6 +21,81 @@ import {
 } from "./index.js";
 
 describe("UnixRuntimeClient delivery classification", () => {
+  it("round-trips bounded Action lookup results through the authenticated Actor contract", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-action-lookup-"));
+    const secret = randomBytes(32);
+    const lookupActor = {
+      capabilities: ACTOR_CAPABILITY_PROFILES.agent,
+      client: "test-mcp",
+      id: "agent-rpc-test",
+      principal: "local-agent-test",
+      type: "agent",
+    } as const;
+    let calls = 0;
+    const server = await startRuntimeRpcServer({
+      authentication: { audience: "runtime-rpc-test", secret },
+      gateway: {
+        ...stubGateway(),
+        lookupAction: (request) => {
+          calls += 1;
+          return Promise.resolve({
+            acceptedAt: new Date(0).toISOString(),
+            actionId: "action-rpc",
+            actionStatus: "UNKNOWN",
+            actionType: "execute",
+            executionId: "execution-rpc",
+            executionStatus: "UNKNOWN",
+            generation: request.generation,
+            idempotencyKey: request.idempotencyKey,
+            kind: "found",
+            sessionId: request.sessionId,
+          } as const);
+        },
+      },
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    const allowed = new UnixRuntimeClient(server.socketPath, {
+      authorization: signRuntimeRpcGrant(secret, exactAgentGrant(["action.lookup"])),
+    });
+    try {
+      await expect(
+        allowed.lookupAction({
+          actor: lookupActor,
+          generation: 3,
+          idempotencyKey: "lookup-rpc",
+          sessionId: "session-rpc",
+        }),
+      ).resolves.toMatchObject({ kind: "found", actionStatus: "UNKNOWN" });
+      expect(calls).toBe(1);
+
+      await expect(
+        allowed.lookupAction({
+          actor: { ...lookupActor, principal: "forged" },
+          generation: 3,
+          idempotencyKey: "lookup-rpc",
+          sessionId: "session-rpc",
+        }),
+      ).rejects.toMatchObject({ code: "POLICY_DENIED" });
+      expect(calls).toBe(1);
+
+      const wrongOperation = new UnixRuntimeClient(server.socketPath, {
+        authorization: signRuntimeRpcGrant(secret, exactAgentGrant(["session.list"])),
+      });
+      await expect(
+        wrongOperation.lookupAction({
+          actor: lookupActor,
+          generation: 3,
+          idempotencyKey: "lookup-rpc",
+          sessionId: "session-rpc",
+        }),
+      ).rejects.toMatchObject({ code: "POLICY_DENIED" });
+      expect(calls).toBe(1);
+    } finally {
+      await server.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
   it("negotiates and validates the live Runtime capability response", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-capabilities-"));
     const server = await startRuntimeRpcServer({
@@ -806,6 +881,7 @@ function stubGateway(): RuntimeGateway {
     throw new Error("Unexpected gateway operation");
   };
   return {
+    lookupAction: unsupported,
     beginSecretInput: unsupported,
     decideApproval: unsupported,
     getApproval: unsupported,

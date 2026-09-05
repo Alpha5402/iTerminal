@@ -12,6 +12,7 @@ import {
 const LOCAL_GRANT_TTL_SECONDS = 24 * 60 * 60;
 
 const MCP_OPERATIONS = [
+  "action.lookup",
   "approval.get",
   "approval.list",
   "approval.request",
@@ -40,6 +41,7 @@ const MCP_OPERATIONS = [
 ] as const satisfies readonly RuntimeOperation[];
 
 const CONSOLE_OPERATIONS = [
+  "action.lookup",
   "approval.decide",
   "approval.get",
   "approval.list",

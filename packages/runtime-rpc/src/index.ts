@@ -6,6 +6,8 @@ import { isAbsolute, join } from "node:path";
 
 import type {
   AcquireInteractionGuardRequest,
+  ActionLookupRequest,
+  ActionLookupResult,
   ControlRequest,
   BeginSecretInputRequest,
   CreateSessionRequest,
@@ -61,6 +63,8 @@ import {
 } from "@iterminal/domain";
 import { operationalErrorMessage } from "@iterminal/observability";
 import {
+  actionLookupResultSchema,
+  actionLookupTransportRequestSchema,
   defineRuntimeCapabilities,
   executeTransportRequestSchema,
   inputTransportRequestSchema,
@@ -181,6 +185,7 @@ const screenRectangleSchema = sessionIdentitySchema.extend({
 });
 
 const operationSchemas = {
+  "action.lookup": actionLookupTransportRequestSchema.extend({ actor: actorSchema }),
   "approval.decide": sessionIdentitySchema.extend({
     actor: actorSchema,
     approvalId: z.string().min(1).max(256),
@@ -354,6 +359,7 @@ export interface StartedExecutionView {
 }
 
 export interface RuntimeGateway {
+  lookupAction(request: ActionLookupRequest): Promise<ActionLookupResult>;
   getRuntimeCapabilities?(request?: RuntimeCapabilitiesRequest): Promise<RuntimeCapabilities>;
   requestExecuteApproval(request: RequestExecuteApprovalRequest): Promise<Approval>;
   getApproval(request: GetApprovalRequest): Promise<Approval>;
@@ -407,8 +413,17 @@ export class LocalRuntimeGateway implements RuntimeGateway {
   ) {
     this.#capabilities = defineRuntimeCapabilities({
       ...(options.buildId === undefined ? {} : { buildId: options.buildId }),
-      features: ["action.execute.v1", "action.input.v1", "runtime.capabilities.v1"],
+      features: [
+        "action.execute.v1",
+        "action.input.v1",
+        "action.lookup.v1",
+        "runtime.capabilities.v1",
+      ],
     });
+  }
+
+  public lookupAction(request: ActionLookupRequest): Promise<ActionLookupResult> {
+    return this.runtime.lookupAction(request);
   }
 
   public getRuntimeCapabilities(): Promise<RuntimeCapabilities> {
@@ -707,6 +722,17 @@ export class UnixRuntimeClient implements RuntimeGateway {
     this.#authorization = options.authorization;
     this.#authorizationProvider = options.authorizationProvider;
     this.#socketPath = socketPath;
+  }
+
+  public async lookupAction(request: ActionLookupRequest): Promise<ActionLookupResult> {
+    return actionLookupResultSchema.parse(
+      await this.#request("action.lookup", {
+        actor: request.actor,
+        generation: request.generation,
+        idempotencyKey: request.idempotencyKey,
+        sessionId: request.sessionId,
+      }),
+    );
   }
 
   public requestExecuteApproval(request: RequestExecuteApprovalRequest): Promise<Approval> {
@@ -1209,6 +1235,17 @@ async function dispatch(
   signal: AbortSignal,
 ): Promise<unknown> {
   switch (operation) {
+    case "action.lookup": {
+      const request = operationSchemas[operation].parse(input);
+      return actionLookupResultSchema.parse(
+        await gateway.lookupAction({
+          actor: request.actor,
+          generation: request.generation,
+          idempotencyKey: request.idempotencyKey,
+          sessionId: request.sessionId,
+        }),
+      );
+    }
     case "runtime.capabilities": {
       const request = operationSchemas[operation].parse(input);
       if (gateway.getRuntimeCapabilities === undefined) {

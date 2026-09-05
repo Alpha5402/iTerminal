@@ -405,6 +405,10 @@ class ControlledDurability implements RuntimeDurability {
   public readonly outputEvents: DurableSessionEvent[] = [];
   #nextFencingToken = 1;
 
+  public lookupAction(): Promise<undefined> {
+    return Promise.resolve(undefined);
+  }
+
   public requestApproval(
     fence: SessionFence,
     input: DurableApprovalRequest,

@@ -11,6 +11,8 @@ import {
 import { executeRequestSchema, inputRequestSchema } from "./schemas.js";
 import {
   RUNTIME_PROTOCOL_VERSION,
+  actionLookupResultSchema,
+  actionLookupTransportRequestSchema,
   defineRuntimeCapabilities,
   executeTransportRequestSchema,
   inputTransportRequestSchema,
@@ -58,6 +60,52 @@ describe("public Execute/Input request schemas", () => {
 });
 
 describe("canonical transport schemas", () => {
+  it("bounds Action lookup identity and projected results without payload fingerprints", () => {
+    expect(
+      actionLookupTransportRequestSchema.parse({
+        generation: 2,
+        idempotencyKey: "accepted-request",
+        sessionId: "session-1",
+      }),
+    ).toEqual({ generation: 2, idempotencyKey: "accepted-request", sessionId: "session-1" });
+    expect(() =>
+      actionLookupTransportRequestSchema.parse({
+        actor: { id: "untrusted" },
+        generation: 2,
+        idempotencyKey: "accepted-request",
+        sessionId: "session-1",
+      }),
+    ).toThrow();
+    expect(
+      actionLookupResultSchema.parse({
+        acceptedAt: new Date(0).toISOString(),
+        actionId: "action-1",
+        actionStatus: "UNKNOWN",
+        actionType: "execute",
+        executionId: "execution-1",
+        executionStatus: "UNKNOWN",
+        generation: 2,
+        idempotencyKey: "accepted-request",
+        kind: "found",
+        sessionId: "session-1",
+      }),
+    ).not.toHaveProperty("requestHash");
+    expect(() =>
+      actionLookupResultSchema.parse({
+        acceptedAt: new Date(0).toISOString(),
+        actionId: "action-1",
+        actionStatus: "COMPLETED",
+        actionType: "execute",
+        command: "secret command",
+        generation: 2,
+        idempotencyKey: "accepted-request",
+        kind: "found",
+        requestHash: "a".repeat(64),
+        sessionId: "session-1",
+      }),
+    ).toThrow();
+  });
+
   it("shares actor-free Execute and Input fields across adapters", () => {
     expect(
       executeTransportRequestSchema.parse({

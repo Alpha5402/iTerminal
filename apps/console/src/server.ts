@@ -19,6 +19,7 @@ import {
 } from "@iterminal/domain";
 import {
   RUNTIME_PROTOCOL_VERSION,
+  actionLookupTransportRequestSchema,
   executeTransportRequestSchema,
   inputTransportRequestSchema,
   type RuntimeCapabilities,
@@ -54,6 +55,7 @@ const createSessionSchema = z.strictObject({
   workspaceRoot: z.string().min(1).max(4_096),
 });
 const executeSchema = executeTransportRequestSchema.omit({ sessionId: true });
+const actionLookupSchema = actionLookupTransportRequestSchema.omit({ sessionId: true });
 const approvalListSchema = z.strictObject({
   generation: z.coerce.number().int().positive(),
   status: z.enum(["PENDING", "APPROVED", "DENIED", "EXPIRED", "CONSUMED"]).optional(),
@@ -332,6 +334,21 @@ export async function createHumanConsoleApp(
           sessionId,
         }),
       ),
+    );
+  });
+
+  app.post("/api/sessions/:sessionId/actions/lookup", async (request, reply) => {
+    const actor = actorForRequest(request, reply, actors, now);
+    const { sessionId } = sessionParamsSchema.parse(request.params);
+    const body = actionLookupSchema.parse(request.body);
+    return success(
+      request,
+      await options.gateway.lookupAction({
+        actor,
+        generation: body.generation,
+        idempotencyKey: body.idempotencyKey,
+        sessionId,
+      }),
     );
   });
 

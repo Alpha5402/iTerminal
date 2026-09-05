@@ -36,6 +36,27 @@ export async function persistActor(client: PoolClient, actor: Actor): Promise<vo
   );
 }
 
+export async function assertPersistedActorIdentity(
+  client: PoolClient,
+  actor: Actor,
+): Promise<boolean> {
+  assertCanonicalActor(actor);
+  const existing = await client.query<ActorRow>(
+    `SELECT id, actor_type, principal, client, capabilities
+       FROM actors
+      WHERE id = $1`,
+    [actor.id],
+  );
+  const row = existing.rows[0];
+  if (row === undefined) return false;
+  if (sameActorRow(row, actor)) return true;
+  throw new RuntimeError(
+    "ACTOR_IDENTITY_CONFLICT",
+    "Actor id is already bound to a different immutable identity",
+    { actorId: actor.id },
+  );
+}
+
 export function actorFromRow(
   row: Readonly<{
     readonly actor_id: string;
