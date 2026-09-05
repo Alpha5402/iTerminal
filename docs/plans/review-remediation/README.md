@@ -1,6 +1,6 @@
 # iTerminal 审阅整改执行计划
 
-日期：2026-09-05。状态：计划，尚未实施。适用对象：按单张任务卡工作的 Sol / Luna。
+日期：2026-09-05。状态：执行中。适用对象：按单张任务卡工作的 Sol / Luna。
 
 本计划把本轮审阅的 28 项意见转成 36 张任务卡。它规定目标行为和验证方法，不要求执行模型再次进行全仓架构审阅，也不把“模型能力不足”当成已证实的根因。优先修正真实语义错误、不可恢复的操作体验和 Agent 观察成本，再优化结构。
 
@@ -48,7 +48,7 @@
 | [A03](01-correctness.md#a03)         | 修复请求 schema 漂移              | 无                           | Luna | 已验收 |
 | [A04](01-correctness.md#a04)         | HTTP 与 Application 幂等顺序一致  | 无                           | Sol  | 已验收 |
 | [A05](01-correctness.md#a05)         | 协议与运行能力握手                | A03                          | Sol  | 已验收 |
-| [A06](01-correctness.md#a06)         | 按请求身份查询已接受 Action       | A05                          | Sol  | 进行中 |
+| [A06](01-correctness.md#a06)         | 按请求身份查询已接受 Action       | A05                          | Sol  | 已验收 |
 | [B01](02-observation-mcp.md#b01)     | 有权限、有界 Artifact 读取        | A05                          | Sol  | 未开始 |
 | [B02](02-observation-mcp.md#b02)     | 连续输出游标与分页                | B01                          | Sol  | 未开始 |
 | [B03](02-observation-mcp.md#b03)     | 有界、可取消的执行等待            | A05                          | Sol  | 未开始 |
