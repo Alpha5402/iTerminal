@@ -50,6 +50,7 @@ describe("M4 stdio MCP bridge", () => {
       "events_query",
       "execute",
       "execution_get",
+      "execution_output_read",
       "execution_wait",
       "input",
       "interaction_get",
@@ -85,6 +86,7 @@ describe("M4 stdio MCP bridge", () => {
       protocolVersion: "1",
     });
     expect(capabilities.features).not.toContain("artifact.read.v1");
+    expect(capabilities.features).not.toContain("execution.output.read.v1");
     expect(
       await callTool<ArtifactReadResult>(first, "artifact_read", {
         artifactId: "art-no-durable-reader",
@@ -92,6 +94,16 @@ describe("M4 stdio MCP bridge", () => {
         sessionId: "session-no-durable-reader",
       }),
     ).toMatchObject({ kind: "unavailable", reason: "durability_unavailable" });
+    const unavailableOutput = await first.callTool({
+      arguments: {
+        executionId: "execution-no-durable-reader",
+        generation: 1,
+        sessionId: "session-no-durable-reader",
+      },
+      name: "execution_output_read",
+    });
+    expect(unavailableOutput.isError).toBe(true);
+    expect(textContent(unavailableOutput)).toContain('"code":"RUNTIME_UNAVAILABLE"');
 
     const session = await callTool<SessionResult>(first, "session_create", {
       idempotencyKey: "mcp-stdio-session-create",

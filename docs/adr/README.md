@@ -94,6 +94,10 @@ See also [ADR-0070](./0070-bounded-scoped-artifact-read.md): read already-saniti
 through an exact database-owned Session scope, bounded byte ranges, non-disclosing misses, and an
 explicit UTF-8 text-boundary contract.
 
+See also [ADR-0071](./0071-durable-execution-output-cursor.md): page exact-Execution durable PTY
+output with stable Event/byte cursors, explicit Event/Artifact retention gaps, bounded responses,
+and honest live persistence lag.
+
 Statuses:
 
 - Proposed: evidence or owner decision is still required.

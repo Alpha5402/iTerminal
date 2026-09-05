@@ -608,6 +608,337 @@ describeDatabase("PostgresObservationRepository", () => {
     });
     expect(anchor.events.map((event) => event.sequence)).toEqual([3]);
   });
+
+  it("pages exact durable Execution bytes without duplicate boundaries", async () => {
+    const sessionId = await createSession(runtime);
+    const executionId = await createAcceptedExecution(runtime, sessionId, "output-pages");
+    const expected = Buffer.from(
+      `${"a".repeat(4_096)}${"鲸".repeat(1_365)}x${"b".repeat(4_096)}`,
+      "utf8",
+    );
+    for (const data of ["a".repeat(4_096), `${"鲸".repeat(1_365)}x`, "b".repeat(4_096)]) {
+      await observation.appendOutput({
+        createdAt: new Date(),
+        data,
+        executionId,
+        generation: 1,
+        sessionId,
+      });
+    }
+
+    const first = await observation.readExecutionOutput({
+      executionId,
+      generation: 1,
+      maxBytes: 4_097,
+      sessionId,
+    });
+    expect(first).toMatchObject({
+      executionState: "DISPATCHING",
+      gap: null,
+      hasMore: true,
+      persistenceLag: "possible",
+      stream: "pty",
+    });
+    const pages = [first];
+    while (pages.at(-1)?.hasMore === true) {
+      const cursor = pages.at(-1)?.nextCursor;
+      if (cursor === undefined) throw new Error("Expected a cursor while durable bytes remain");
+      pages.push(
+        await observation.readExecutionOutput({
+          cursor,
+          executionId,
+          generation: 1,
+          maxBytes: 4_097,
+          sessionId,
+        }),
+      );
+    }
+    expect(Buffer.concat(pages.map(decodeOutput))).toEqual(expected);
+    const second = pages[1];
+    if (second === undefined) throw new Error("Expected a second output page");
+
+    const reopened = new PostgresObservationRepository(databaseTarget);
+    try {
+      if (first.nextCursor === undefined) throw new Error("Expected first output cursor");
+      const replay = await reopened.readExecutionOutput({
+        cursor: first.nextCursor,
+        executionId,
+        generation: 1,
+        maxBytes: 4_097,
+        sessionId,
+      });
+      expect(decodeOutput(replay)).toEqual(decodeOutput(second));
+      expect(replay.nextCursor).toBe(second.nextCursor);
+    } finally {
+      await reopened.close();
+    }
+  });
+
+  it("reports hasMore=false when the byte budget ends at the final Event boundary", async () => {
+    const sessionId = await createSession(runtime);
+    const executionId = await createAcceptedExecution(runtime, sessionId, "exact-boundary");
+    await observation.appendOutput({
+      createdAt: new Date(),
+      data: "x".repeat(4_096),
+      executionId,
+      generation: 1,
+      sessionId,
+    });
+    await observation.appendOutput({
+      createdAt: new Date(),
+      data: "y".repeat(4_096),
+      executionId,
+      generation: 1,
+      sessionId,
+    });
+
+    const result = await observation.readExecutionOutput({
+      executionId,
+      generation: 1,
+      maxBytes: 8_192,
+      sessionId,
+    });
+    expect(decodeOutput(result)).toHaveLength(8_192);
+    expect(result.hasMore).toBe(false);
+  });
+
+  it("uses a bounded 65th Event probe without hiding additional tiny Events", async () => {
+    const sessionId = await createSession(runtime);
+    const executionId = await createAcceptedExecution(runtime, sessionId, "event-scan-probe");
+    for (let index = 0; index < 66; index += 1) {
+      await observation.appendOutput({
+        createdAt: new Date(),
+        data: String.fromCharCode(65 + (index % 26)),
+        executionId,
+        generation: 1,
+        sessionId,
+      });
+    }
+
+    const first = await observation.readExecutionOutput({
+      executionId,
+      generation: 1,
+      maxBytes: 64 * 1024,
+      sessionId,
+    });
+    expect(decodeOutput(first)).toHaveLength(64);
+    expect(first.hasMore).toBe(true);
+    if (first.nextCursor === undefined) throw new Error("Expected scan continuation cursor");
+    const second = await observation.readExecutionOutput({
+      cursor: first.nextCursor,
+      executionId,
+      generation: 1,
+      maxBytes: 64 * 1024,
+      sessionId,
+    });
+    expect(decodeOutput(second)).toHaveLength(2);
+    expect(second.hasMore).toBe(false);
+  });
+
+  it("checks exact Execution scope before parsing an opaque cursor", async () => {
+    const sessionId = await createSession(runtime);
+    const otherSessionId = await createSession(runtime);
+    const executionId = await createAcceptedExecution(runtime, sessionId, "cursor-scope");
+    await observation.appendOutput({
+      createdAt: new Date(),
+      data: "scope",
+      executionId,
+      generation: 1,
+      sessionId,
+    });
+
+    await expect(
+      observation.readExecutionOutput({
+        cursor: "not-a-valid-cursor",
+        executionId,
+        generation: 1,
+        sessionId: otherSessionId,
+      }),
+    ).rejects.toMatchObject({ code: "EXECUTION_NOT_FOUND" });
+    await expect(
+      observation.readExecutionOutput({
+        cursor: "not-a-valid-cursor",
+        executionId,
+        generation: 1,
+        sessionId,
+      }),
+    ).rejects.toMatchObject({ code: "RESYNC_REQUIRED" });
+  });
+
+  it("rejects canonical future, wrong-anchor, offset, and foreign-scope cursors", async () => {
+    const sessionId = await createSession(runtime);
+    const otherSessionId = await createSession(runtime);
+    const executionId = await createAcceptedExecution(runtime, sessionId, "canonical-forgery");
+    const output = await observation.appendOutput({
+      createdAt: new Date(),
+      data: "cursor-anchor",
+      executionId,
+      generation: 1,
+      sessionId,
+    });
+    const first = await observation.readExecutionOutput({
+      executionId,
+      generation: 1,
+      maxBytes: 1,
+      sessionId,
+    });
+    if (first.nextCursor === undefined) throw new Error("Expected a durable output cursor");
+
+    const foreignCursor = mutateOutputCursor(first.nextCursor, { sessionId: otherSessionId });
+    const forged = [
+      mutateOutputCursor(first.nextCursor, { eventSequence: Number.MAX_SAFE_INTEGER }),
+      mutateOutputCursor(first.nextCursor, { eventSequence: output.eventSequence - 1 }),
+      mutateOutputCursor(first.nextCursor, { eventOffset: output.byteCount + 1 }),
+      foreignCursor,
+    ];
+    for (const cursor of forged) {
+      await expect(
+        observation.readExecutionOutput({
+          cursor,
+          executionId,
+          generation: 1,
+          sessionId,
+        }),
+      ).rejects.toMatchObject({ code: "RESYNC_REQUIRED" });
+    }
+
+    await expect(
+      observation.readExecutionOutput({
+        cursor: foreignCursor,
+        executionId,
+        generation: 1,
+        sessionId: otherSessionId,
+      }),
+    ).rejects.toMatchObject({ code: "EXECUTION_NOT_FOUND" });
+  });
+
+  it("stops at a missing Artifact and requires its explicit resume cursor", async () => {
+    const sessionId = await createSession(runtime);
+    const executionId = await createAcceptedExecution(runtime, sessionId, "artifact-gap");
+    const missing = await observation.appendOutput({
+      createdAt: new Date(),
+      data: "m".repeat(8_000),
+      executionId,
+      generation: 1,
+      inlineThresholdBytes: 1,
+      sessionId,
+    });
+    await observation.appendOutput({
+      createdAt: new Date(),
+      data: "after-gap",
+      executionId,
+      generation: 1,
+      sessionId,
+    });
+    await pool.query("DELETE FROM artifacts WHERE id = $1", [missing.artifactRef]);
+
+    const blocked = await observation.readExecutionOutput({
+      executionId,
+      generation: 1,
+      sessionId,
+    });
+    expect(blocked).toMatchObject({
+      chunks: [],
+      gap: { eventSequence: missing.eventSequence, kind: "artifact_missing" },
+      hasMore: false,
+    });
+    expect(blocked.nextCursor).toBeUndefined();
+    if (blocked.gap?.kind !== "artifact_missing") throw new Error("Expected missing Artifact gap");
+
+    const resumed = await observation.readExecutionOutput({
+      cursor: blocked.gap.resumeCursor,
+      executionId,
+      generation: 1,
+      sessionId,
+    });
+    expect(decodeOutput(resumed).toString("utf8")).toBe("after-gap");
+    expect(resumed.gap).toBeNull();
+  });
+
+  it("classifies an expired output Artifact separately from a missing Artifact", async () => {
+    const sessionId = await createSession(runtime);
+    const executionId = await createAcceptedExecution(runtime, sessionId, "expired-artifact-gap");
+    const expired = await observation.appendOutput({
+      createdAt: new Date(),
+      data: "e".repeat(8_000),
+      executionId,
+      generation: 1,
+      inlineThresholdBytes: 1,
+      sessionId,
+    });
+    await pool.query(
+      "UPDATE artifacts SET expires_at = now() - interval '1 second' WHERE id = $1",
+      [expired.artifactRef],
+    );
+
+    const blocked = await observation.readExecutionOutput({
+      executionId,
+      generation: 1,
+      sessionId,
+    });
+    expect(blocked.gap).toMatchObject({
+      eventSequence: expired.eventSequence,
+      kind: "artifact_expired",
+    });
+    expect(blocked.chunks).toEqual([]);
+  });
+
+  it("reports a conservative Event retention gap instead of silently skipping history", async () => {
+    const sessionId = await createSession(runtime);
+    const executionId = await createAcceptedExecution(runtime, sessionId, "retention-gap");
+    const outputs = [];
+    for (const data of ["gone-one", "gone-two", "retained-tail"]) {
+      outputs.push(
+        await observation.appendOutput({
+          createdAt: new Date(),
+          data,
+          executionId,
+          generation: 1,
+          sessionId,
+        }),
+      );
+    }
+    const deletedThrough = outputs[1]?.eventSequence;
+    const retainedSequence = outputs[2]?.eventSequence;
+    if (deletedThrough === undefined || retainedSequence === undefined) {
+      throw new Error("Expected output Event sequences");
+    }
+    const stale = await observation.readExecutionOutput({
+      executionId,
+      generation: 1,
+      maxBytes: 1,
+      sessionId,
+    });
+    if (stale.nextCursor === undefined) throw new Error("Expected a pre-retention cursor");
+    await pool.query(
+      `DELETE FROM session_events
+        WHERE session_id = $1 AND session_generation = 1 AND event_sequence <= $2`,
+      [sessionId, deletedThrough],
+    );
+
+    await expect(
+      observation.readExecutionOutput({
+        cursor: stale.nextCursor,
+        executionId,
+        generation: 1,
+        sessionId,
+      }),
+    ).rejects.toMatchObject({
+      code: "RESYNC_REQUIRED",
+      details: { minimumAvailableSequence: retainedSequence },
+    });
+
+    const retained = await observation.readExecutionOutput({
+      executionId,
+      generation: 1,
+      sessionId,
+    });
+    expect(retained.gap).toMatchObject({
+      kind: "event_retention",
+      minimumAvailableSequence: retainedSequence,
+    });
+    expect(decodeOutput(retained).toString("utf8")).toBe("retained-tail");
+  });
 });
 
 async function createSession(repository: PostgresRuntimeRepository): Promise<string> {
@@ -622,6 +953,47 @@ async function createSession(repository: PostgresRuntimeRepository): Promise<str
     workspaceRoot: "/tmp/iterminal-test",
   });
   return sessionId;
+}
+
+async function createAcceptedExecution(
+  repository: PostgresRuntimeRepository,
+  sessionId: string,
+  idempotencyKey: string,
+): Promise<string> {
+  const accepted = await repository.acceptExecute({
+    acceptedAt: new Date(),
+    actionId: `act_${randomUUID()}`,
+    actor: {
+      capabilities: ACTOR_CAPABILITY_PROFILES.agent,
+      client: "execution-output-test",
+      id: `agent_${randomUUID()}`,
+      principal: "execution-output-test",
+      type: "agent",
+    },
+    command: "printf output",
+    eventId: `evt_${randomUUID()}`,
+    executionId: `exe_${randomUUID()}`,
+    generation: 1,
+    idempotencyKey,
+    outboxId: `out_${randomUUID()}`,
+    requestHash: `hash-${idempotencyKey}`,
+    sessionId,
+  });
+  return accepted.executionId;
+}
+
+function decodeOutput(result: {
+  readonly chunks: readonly Readonly<{ readonly contentBase64: string }>[];
+}): Buffer {
+  return Buffer.concat(result.chunks.map((chunk) => Buffer.from(chunk.contentBase64, "base64")));
+}
+
+function mutateOutputCursor(cursor: string, changes: Readonly<Record<string, unknown>>): string {
+  const payload = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Record<
+    string,
+    unknown
+  >;
+  return Buffer.from(JSON.stringify({ ...payload, ...changes }), "utf8").toString("base64url");
 }
 
 async function seedOutputLines(

@@ -6,6 +6,7 @@ import { createMcpServer, MCP_INSTRUCTIONS } from "./server.js";
 const baselineToolNames = new Set([
   "action_lookup",
   "artifact_read",
+  "execution_output_read",
   "runtime_capabilities",
   "session_create",
   "session_get",
@@ -58,5 +59,11 @@ describe("MCP tool metadata", () => {
     for (const tool of Object.values(registered)) {
       expect(tool.description?.length ?? 0).toBeLessThanOrEqual(700);
     }
+    expect(registered.execution_output_read?.description).toContain(
+      "An Artifact gap must be acknowledged before using its resumeCursor",
+    );
+    expect(registered.execution_output_read?.description).not.toContain(
+      "A gap must be acknowledged before using its resume cursor",
+    );
   });
 });

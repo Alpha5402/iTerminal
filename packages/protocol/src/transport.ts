@@ -9,6 +9,7 @@ export const RUNTIME_FEATURES = Object.freeze([
   "action.input.v1",
   "action.lookup.v1",
   "artifact.read.v1",
+  "execution.output.read.v1",
   "runtime.capabilities.v1",
   "runtime.owner-capabilities.v1",
 ] as const);
@@ -145,6 +146,120 @@ export const artifactReadResultSchema = z.union([
   }),
 ]);
 
+const executionStatusTransportSchema = z.enum([
+  "DISPATCHING",
+  "RUNNING",
+  "COMPLETED",
+  "FAILED",
+  "INTERRUPTED",
+  "UNKNOWN",
+]);
+
+const executionOutputCursorSchema = z
+  .string()
+  .min(1)
+  .max(2_048)
+  .regex(/^[A-Za-z0-9_-]+$/);
+
+export const executionOutputReadTransportRequestSchema = z.strictObject({
+  cursor: executionOutputCursorSchema.optional(),
+  executionId: executionIdTransportSchema,
+  generation: sessionGenerationTransportSchema,
+  maxBytes: z
+    .number()
+    .int()
+    .positive()
+    .max(64 * 1024)
+    .optional(),
+  sessionId: sessionIdTransportSchema,
+});
+
+const executionOutputChunkSchema = z
+  .strictObject({
+    byteLength: z
+      .number()
+      .int()
+      .positive()
+      .max(64 * 1024),
+    contentBase64: z
+      .string()
+      .min(4)
+      .max(Math.ceil((64 * 1024) / 3) * 4)
+      .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
+  })
+  .superRefine((chunk, context) => {
+    const padding = chunk.contentBase64.endsWith("==")
+      ? 2
+      : chunk.contentBase64.endsWith("=")
+        ? 1
+        : 0;
+    const decodedBytes = (chunk.contentBase64.length / 4) * 3 - padding;
+    if (decodedBytes !== chunk.byteLength) {
+      context.addIssue({
+        code: "custom",
+        message: "Execution output contentBase64 length must match byteLength",
+      });
+    }
+  });
+
+const executionOutputGapSchema = z.union([
+  z.strictObject({
+    kind: z.literal("event_retention"),
+    minimumAvailableSequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  }),
+  z.strictObject({
+    eventSequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    kind: z.enum(["artifact_expired", "artifact_missing"]),
+    resumeCursor: executionOutputCursorSchema,
+  }),
+]);
+
+export const executionOutputReadResultSchema = z
+  .strictObject({
+    chunks: z.array(executionOutputChunkSchema).max(1),
+    encoding: z.literal("base64"),
+    executionId: executionIdTransportSchema,
+    executionState: executionStatusTransportSchema,
+    gap: executionOutputGapSchema.nullable(),
+    generation: sessionGenerationTransportSchema,
+    hasMore: z.boolean(),
+    nextCursor: executionOutputCursorSchema.optional(),
+    persistenceLag: z.enum(["none", "possible"]),
+    retention: z.strictObject({
+      minimumAvailableSequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      source: z.literal("durable"),
+    }),
+    sessionId: sessionIdTransportSchema,
+    stream: z.literal("pty"),
+  })
+  .superRefine((result, context) => {
+    const active = result.executionState === "DISPATCHING" || result.executionState === "RUNNING";
+    if (active !== (result.persistenceLag === "possible")) {
+      context.addIssue({
+        code: "custom",
+        message: "Execution state and durable persistence lag must agree",
+      });
+    }
+    if (result.gap?.kind !== undefined && result.gap.kind !== "event_retention" && result.hasMore) {
+      context.addIssue({
+        code: "custom",
+        message: "An Artifact gap cannot be represented as continuous hasMore output",
+      });
+    }
+    if (
+      (result.chunks.length > 0 || result.hasMore || result.gap?.kind === "event_retention") &&
+      result.nextCursor === undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Continuous durable output requires a next cursor",
+      });
+    }
+    if (new TextEncoder().encode(JSON.stringify(result)).byteLength > 96 * 1024) {
+      context.addIssue({ code: "custom", message: "Execution output response exceeds 96 KiB" });
+    }
+  });
+
 const actionLookupIdentitySchema = z.strictObject({
   generation: sessionGenerationTransportSchema,
   idempotencyKey: idempotencyKeyTransportSchema,
@@ -224,6 +339,10 @@ export type ActionLookupTransportRequest = z.output<typeof actionLookupTransport
 export type ActionLookupResult = z.output<typeof actionLookupResultSchema>;
 export type ArtifactReadTransportRequest = z.output<typeof artifactReadTransportRequestSchema>;
 export type ArtifactReadResult = z.output<typeof artifactReadResultSchema>;
+export type ExecutionOutputReadTransportRequest = z.output<
+  typeof executionOutputReadTransportRequestSchema
+>;
+export type ExecutionOutputReadResult = z.output<typeof executionOutputReadResultSchema>;
 export type RuntimeCapabilitiesRequest = z.output<typeof runtimeCapabilitiesRequestSchema>;
 
 export function defineRuntimeCapabilities(input: {

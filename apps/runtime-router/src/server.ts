@@ -8,6 +8,8 @@ import {
   type ActionLookupResult,
   type ArtifactReadRequest,
   type ArtifactReadResult,
+  type ExecutionOutputReadRequest,
+  type ExecutionOutputReadResult,
   type ControlRequest,
   type BeginSecretInputRequest,
   type CreateSessionRequest,
@@ -112,6 +114,7 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
       features: [
         "action.lookup.v1",
         "artifact.read.v1",
+        "execution.output.read.v1",
         "runtime.capabilities.v1",
         "runtime.owner-capabilities.v1",
       ],
@@ -183,6 +186,24 @@ export class CentralRuntimeRouterGateway implements RuntimeGateway {
           reason: "owner_route_unavailable",
           retryable: true,
         };
+      }
+      throw error;
+    }
+  }
+
+  public async readExecutionOutput(
+    request: ExecutionOutputReadRequest,
+  ): Promise<ExecutionOutputReadResult> {
+    try {
+      return await this.#withSession(request.sessionId, "execution.output.read", (client) =>
+        client.readExecutionOutput(request),
+      );
+    } catch (error) {
+      if (error instanceof RuntimeError && error.code === "SESSION_NOT_FOUND") {
+        throw new RuntimeError(
+          "EXECUTION_NOT_FOUND",
+          "Execution was not found in the requested scope",
+        );
       }
       throw error;
     }

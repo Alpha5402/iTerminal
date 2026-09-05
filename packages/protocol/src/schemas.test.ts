@@ -16,6 +16,8 @@ import {
   artifactReadResultSchema,
   artifactReadTransportRequestSchema,
   defineRuntimeCapabilities,
+  executionOutputReadResultSchema,
+  executionOutputReadTransportRequestSchema,
   executeTransportRequestSchema,
   inputTransportRequestSchema,
   runtimeCapabilitiesRequestSchema,
@@ -167,6 +169,86 @@ describe("canonical transport schemas", () => {
         sessionId: "session-1",
       }),
     ).toThrow();
+  });
+
+  it("bounds durable Execution output requests, bytes, gaps, and total transport size", () => {
+    expect(
+      executionOutputReadTransportRequestSchema.parse({
+        executionId: "execution-1",
+        generation: 2,
+        sessionId: "session-1",
+      }),
+    ).toEqual({ executionId: "execution-1", generation: 2, sessionId: "session-1" });
+    expect(() =>
+      executionOutputReadTransportRequestSchema.parse({
+        executionId: "execution-1",
+        generation: 2,
+        maxBytes: 64 * 1024 + 1,
+        sessionId: "session-1",
+      }),
+    ).toThrow();
+
+    const bytes = Buffer.alloc(64 * 1024, 0xa5);
+    const maximum = executionOutputReadResultSchema.parse({
+      chunks: [{ byteLength: bytes.length, contentBase64: bytes.toString("base64") }],
+      encoding: "base64",
+      executionId: "execution-1",
+      executionState: "RUNNING",
+      gap: null,
+      generation: 2,
+      hasMore: false,
+      nextCursor: "a".repeat(2_048),
+      persistenceLag: "possible",
+      retention: { minimumAvailableSequence: 1, source: "durable" },
+      sessionId: "session-1",
+      stream: "pty",
+    });
+    expect(new TextEncoder().encode(JSON.stringify(maximum)).byteLength).toBeLessThanOrEqual(
+      96 * 1024,
+    );
+
+    for (const invalid of [
+      {
+        chunks: [{ byteLength: 1, contentBase64: Buffer.from("two").toString("base64") }],
+      },
+      {
+        chunks: [
+          { byteLength: 1, contentBase64: Buffer.from("a").toString("base64") },
+          { byteLength: 1, contentBase64: Buffer.from("b").toString("base64") },
+        ],
+      },
+      {
+        gap: { eventSequence: 8, kind: "artifact_missing", resumeCursor: "resume" },
+        hasMore: true,
+      },
+      { executionState: "RUNNING", persistenceLag: "none" },
+      { executionState: "COMPLETED", persistenceLag: "possible" },
+      {
+        chunks: [{ byteLength: 1, contentBase64: Buffer.from("a").toString("base64") }],
+        nextCursor: undefined,
+      },
+      {
+        gap: { kind: "event_retention", minimumAvailableSequence: 9 },
+        nextCursor: undefined,
+      },
+    ]) {
+      expect(() =>
+        executionOutputReadResultSchema.parse({
+          chunks: [],
+          encoding: "base64",
+          executionId: "execution-1",
+          executionState: "COMPLETED",
+          gap: null,
+          generation: 2,
+          hasMore: false,
+          persistenceLag: "none",
+          retention: { minimumAvailableSequence: 1, source: "durable" },
+          sessionId: "session-1",
+          stream: "pty",
+          ...invalid,
+        }),
+      ).toThrow();
+    }
   });
 
   it("shares actor-free Execute and Input fields across adapters", () => {

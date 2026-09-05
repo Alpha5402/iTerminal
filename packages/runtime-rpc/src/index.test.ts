@@ -21,6 +21,67 @@ import {
 } from "./index.js";
 
 describe("UnixRuntimeClient delivery classification", () => {
+  it("round-trips bounded Execution output and enforces its distinct read grant", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-execution-output-"));
+    const secret = randomBytes(32);
+    let calls = 0;
+    const server = await startRuntimeRpcServer({
+      authentication: { audience: "runtime-rpc-test", secret },
+      gateway: {
+        ...stubGateway(),
+        readExecutionOutput: (request) => {
+          calls += 1;
+          const content = Buffer.from("durable-pty", "utf8");
+          return Promise.resolve({
+            chunks: [{ byteLength: content.length, contentBase64: content.toString("base64") }],
+            encoding: "base64",
+            executionId: request.executionId,
+            executionState: "RUNNING",
+            gap: null,
+            generation: request.generation,
+            hasMore: false,
+            nextCursor: "opaque-cursor",
+            persistenceLag: "possible",
+            retention: { minimumAvailableSequence: 1, source: "durable" },
+            sessionId: request.sessionId,
+            stream: "pty",
+          });
+        },
+      },
+      socketPath: join(fixture, "runtime.sock"),
+    });
+    const allowed = new UnixRuntimeClient(server.socketPath, {
+      authorization: signRuntimeRpcGrant(secret, exactAgentGrant(["execution.output.read"])),
+    });
+    const denied = new UnixRuntimeClient(server.socketPath, {
+      authorization: signRuntimeRpcGrant(secret, exactAgentGrant(["artifact.read"])),
+    });
+    try {
+      await expect(
+        allowed.readExecutionOutput({
+          executionId: "execution-rpc",
+          generation: 3,
+          maxBytes: 8 * 1024,
+          sessionId: "session-rpc",
+        }),
+      ).resolves.toMatchObject({
+        executionState: "RUNNING",
+        persistenceLag: "possible",
+      });
+      await expect(
+        denied.readExecutionOutput({
+          executionId: "execution-rpc",
+          generation: 3,
+          sessionId: "session-rpc",
+        }),
+      ).rejects.toMatchObject({ code: "POLICY_DENIED" });
+      expect(calls).toBe(1);
+    } finally {
+      await server.close();
+      await rm(fixture, { force: true, recursive: true });
+    }
+  });
+
   it("round-trips bounded Artifact ranges and enforces the read operation grant", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "iterminal-rpc-artifact-read-"));
     const secret = randomBytes(32);
@@ -941,6 +1002,7 @@ function stubGateway(): RuntimeGateway {
   return {
     lookupAction: unsupported,
     readArtifact: unsupported,
+    readExecutionOutput: unsupported,
     beginSecretInput: unsupported,
     decideApproval: unsupported,
     getApproval: unsupported,
